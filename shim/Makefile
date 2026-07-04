@@ -8,7 +8,7 @@ BIN_DIR  = ../build
 LIB      = $(BIN_DIR)/libmacify_shim.so
 
 SRC = shim_core.c shim_mach.c shim_objc.c shim_tlv.c shim_pthread.c \
-      shim_signal.c shim_io.c shim_misc.c
+      shim_signal.c shim_io.c shim_misc.c shim_spawn.c
 OBJ = $(SRC:.c=.o)
 
 .PHONY: all clean

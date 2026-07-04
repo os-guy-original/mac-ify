@@ -302,6 +302,61 @@ int fcntl(int fd, int cmd, ...) {
         unsigned int linux_fl = translate_open_flags(macos_fl);
         return real_fcntl(fd, linux_cmd, (void *)(long)linux_fl);
     }
+    /* F_SETLK (8), F_SETLKW (9), F_GETLK (7): translate struct flock.
+     * macOS: l_start(8), l_len(8), l_pid(4), l_type(2), l_whence(2)
+     * Linux: l_type(2), l_whence(2), pad(4), l_start(8), l_len(8), l_pid(4) */
+    if (cmd == 7 || cmd == 8 || cmd == 9) {
+        struct macos_flock {
+            int64_t l_start;
+            int64_t l_len;
+            int32_t l_pid;
+            int16_t l_type;
+            int16_t l_whence;
+        };
+        struct macos_flock *mf = (struct macos_flock *)arg;
+        struct flock lf;
+        memset(&lf, 0, sizeof(lf));
+        switch (mf->l_type) {
+            case 1: lf.l_type = F_RDLCK; break;
+            case 2: lf.l_type = F_UNLCK; break;
+            case 3: lf.l_type = F_WRLCK; break;
+            default: lf.l_type = mf->l_type; break;
+        }
+        lf.l_whence = mf->l_whence;
+        lf.l_start = mf->l_start;
+        lf.l_len = mf->l_len;
+        lf.l_pid = mf->l_pid;
+        int ret = real_fcntl(fd, linux_cmd, &lf);
+        if (cmd == 7 && ret >= 0) {
+            switch (lf.l_type) {
+                case F_RDLCK: mf->l_type = 1; break;
+                case F_WRLCK: mf->l_type = 3; break;
+                case F_UNLCK: mf->l_type = 2; break;
+                default: mf->l_type = lf.l_type; break;
+            }
+            mf->l_whence = lf.l_whence;
+            mf->l_start = lf.l_start;
+            mf->l_len = lf.l_len;
+            mf->l_pid = lf.l_pid;
+        }
+        return ret;
+    }
+    /* macOS-specific fcntl commands that don't exist on Linux.
+     * Return success (0) for no-op commands to avoid EINVAL. */
+    if (cmd >= 16 && cmd != 67) {
+        switch (cmd) {
+            case 16: return 0;  /* F_GETOWN */
+            case 17: return 0;  /* F_SETOWN */
+            case 48: return 0;  /* F_NOCACHE */
+            case 50: errno = ENOTSUP; return -1;  /* F_GETPATH */
+            case 51: return 0;  /* F_FULLFSYNC */
+            case 55: return 0;  /* F_GLOBAL_NOCACHE */
+            case 61: return 0;  /* F_RDADVISE */
+            case 63: return 0;  /* F_RDAHEAD */
+            case 42: return 0;  /* F_PREALLOCATE */
+            default: return 0;
+        }
+    }
     return real_fcntl(fd, linux_cmd, arg);
 }
 
@@ -513,14 +568,15 @@ struct macos_stat {
     struct timespec st_atim;     /* offset 32 (16 bytes) */
     struct timespec st_mtim;     /* offset 48 */
     struct timespec st_ctim;     /* offset 64 */
-    int64_t       st_size;       /* offset 80 */
-    int64_t       st_blocks;     /* offset 88 */
-    int32_t       st_blksize;    /* offset 96 */
-    uint32_t      st_flags;      /* offset 100 */
-    uint32_t      st_gen;        /* offset 104 */
-    int32_t       st_lspare;     /* offset 108 */
-    int64_t       st_qspare[2];  /* offset 112 */
-};                               /* total: 128 bytes + padding = 144 */
+    struct timespec st_birthtim; /* offset 80 — macOS-specific! */
+    int64_t       st_size;       /* offset 96 */
+    int64_t       st_blocks;     /* offset 104 */
+    int32_t       st_blksize;    /* offset 112 */
+    uint32_t      st_flags;      /* offset 116 */
+    uint32_t      st_gen;        /* offset 120 */
+    int32_t       st_lspare;     /* offset 124 */
+    int64_t       st_qspare[2];  /* offset 128 */
+};
 
 static void translate_stat(const struct stat *linux_st, struct macos_stat *macos_st) {
     memset(macos_st, 0, sizeof(*macos_st));
@@ -534,6 +590,7 @@ static void translate_stat(const struct stat *linux_st, struct macos_stat *macos
     macos_st->st_atim    = linux_st->st_atim;
     macos_st->st_mtim    = linux_st->st_mtim;
     macos_st->st_ctim    = linux_st->st_ctim;
+    macos_st->st_birthtim = linux_st->st_ctim; /* Linux has no birth time */
     macos_st->st_size    = linux_st->st_size;
     macos_st->st_blocks  = linux_st->st_blocks;
     macos_st->st_blksize = linux_st->st_blksize;
@@ -903,48 +960,34 @@ void macify_freeaddrinfo(void *ai) {
     }
 }
 
-/* wait4 — glibc's NSS can internally call fork+wait4 (e.g., to start nscd).
- * The forked child runs a copy of the macOS binary, which deadlocks.
- * Return ECHILD immediately since macOS binaries don't have real children. */
+/* wait4 — allow for macOS callers (hyperfine needs it to wait for subprocesses).
+ * Block for non-macOS (glibc NSS) to prevent deadlocks. */
 int macify_wait4(int pid, int *status, int options, void *rusage) __asm__("wait4");
 int macify_wait4(int pid, int *status, int options, void *rusage) {
-    (void)pid; (void)status; (void)options; (void)rusage;
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static pid_t (*real_wait4)(pid_t, int *, int, void *) = NULL;
+        if (!real_wait4) real_wait4 = dlsym(RTLD_NEXT, "wait4");
+        if (real_wait4) return real_wait4(pid, status, options, rusage);
+    }
     errno = 10;  /* ECHILD */
     return -1;
 }
 
-/* fork — glibc's NSS may call fork internally (e.g., to start nscd).
- * The forked child would run a copy of the macOS binary, causing a
- * deadlock. Return -1 with ENOSYS to prevent this. */
+/* fork — allow for macOS callers (hyperfine needs it for subprocesses).
+ * Block for non-macOS (glibc NSS) to prevent deadlocks. */
 pid_t macify_fork(void) __asm__("fork");
 pid_t macify_fork(void) {
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static pid_t (*real_fork)(void) = NULL;
+        if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
+        if (real_fork) return real_fork();
+    }
     errno = 38;  /* ENOSYS */
     return -1;
 }
 
-/* read override is defined below (pipe EOF detection for seccomp+NSS) */
-
-/* posix_spawn / posix_spawnp — glibc's NSS may use these to spawn helper
- * processes. Override to return ENOSYS to prevent child processes. */
-int macify_posix_spawn(void *pid, const char *path, const void *fa,
-                       const void *attrp, char *const argv[], char *const envp[])
-    __asm__("posix_spawn");
-int macify_posix_spawn(void *pid, const char *path, const void *fa,
-                       const void *attrp, char *const argv[], char *const envp[]) {
-    (void)pid; (void)path; (void)fa; (void)attrp; (void)argv; (void)envp;
-    errno = 38;  /* ENOSYS */
-    return -1;
-}
-
-int macify_posix_spawnp(void *pid, const char *file, const void *fa,
-                        const void *attrp, char *const argv[], char *const envp[])
-    __asm__("posix_spawnp");
-int macify_posix_spawnp(void *pid, const char *file, const void *fa,
-                        const void *attrp, char *const argv[], char *const envp[]) {
-    (void)pid; (void)file; (void)fa; (void)attrp; (void)argv; (void)envp;
-    errno = 38;  /* ENOSYS */
-    return -1;
-}
+/* posix_spawn / posix_spawnp are implemented in shim_spawn.c with
+ * proper struct translation (macOS structs are much smaller than Linux's). */
 
 /* vfork — also override to prevent glibc from using it */
 pid_t macify_vfork(void) __asm__("vfork");
@@ -969,13 +1012,20 @@ long macify_clone(unsigned long flags, void *stack, int *parent_tid,
     __asm__("__clone");
 long macify_clone(unsigned long flags, void *stack, int *parent_tid,
                   int *child_tid, unsigned long tls, void *newsp) {
-    /* Allow thread creation */
-    if (flags & 0x10000) {  /* CLONE_THREAD */
+    /* Allow thread creation (CLONE_THREAD) */
+    if (flags & 0x10000) {
         static long (*real_clone)(unsigned long, void *, int *, int *, unsigned long, void *) = NULL;
         if (!real_clone) real_clone = dlsym(RTLD_NEXT, "__clone");
         if (real_clone) return real_clone(flags, stack, parent_tid, child_tid, tls, newsp);
     }
-    /* Block process creation — glibc NSS will fall back to direct lookups */
+    /* Allow fork for macOS callers (clone with SIGCHLD, no CLONE_THREAD) */
+    if ((flags & 0xFF) == 17 && !(flags & 0x10000)) {
+        if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+            static long (*real_clone)(unsigned long, void *, int *, int *, unsigned long, void *) = NULL;
+            if (!real_clone) real_clone = dlsym(RTLD_NEXT, "__clone");
+            if (real_clone) return real_clone(flags, stack, parent_tid, child_tid, tls, newsp);
+        }
+    }
     errno = 38;  /* ENOSYS */
     return -1;
 }

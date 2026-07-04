@@ -163,30 +163,9 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                 const char *sym = symbol_name;
                 if (sym[0] == '_') sym++;
 
-                /* Try shim first, then libc fallback. The shim provides
-                 * macOS-specific functions (__errno, _NSGetEnviron, mach_*,
-                 * objc_*, dispatch_*, etc.); libc provides standard C. */
-                void *addr = dlsym(g_dylibs[ordinal - 1].handle, sym);
-                if (!addr && g_dylibs[ordinal - 1].libc_handle) {
-                    addr = dlsym(g_dylibs[ordinal - 1].libc_handle, sym);
-                }
-                /* If still not found, try stripping macOS $-suffixes.
-                 * macOS has symbols like _close$NOCANCEL, _fstat$INODE64,
-                 * _realpath$DARWIN_EXTSN. On Linux, these map to the
-                 * base function (close, fstat, realpath). */
-                if (!addr) {
-                    char base_sym[256];
-                    strncpy(base_sym, sym, 255);
-                    base_sym[255] = '\0';
-                    char *dollar = strchr(base_sym, '$');
-                    if (dollar) {
-                        *dollar = '\0';
-                        addr = dlsym(g_dylibs[ordinal - 1].handle, base_sym);
-                        if (!addr && g_dylibs[ordinal - 1].libc_handle) {
-                            addr = dlsym(g_dylibs[ordinal - 1].libc_handle, base_sym);
-                        }
-                    }
-                }
+                /* Use resolve_symbol which checks shim → libc → libm →
+                 * extra handles (libz, libncurses, etc.) → $-suffix strip */
+                void *addr = resolve_symbol(ordinal - 1, sym);
                 if (!addr) {
                     fprintf(stderr, "macify: cannot resolve symbol '%s' from %s\n",
                             sym, g_dylibs[ordinal - 1].name);
@@ -236,25 +215,7 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                     if (ordinal < 1 || ordinal > g_ndylibs) return -1;
                     const char *sym = symbol_name;
                     if (sym[0] == '_') sym++;
-                    /* Try shim first, then libc */
-                    void *addr = dlsym(g_dylibs[ordinal - 1].handle, sym);
-                    if (!addr && g_dylibs[ordinal - 1].libc_handle) {
-                        addr = dlsym(g_dylibs[ordinal - 1].libc_handle, sym);
-                    }
-                    /* Try stripping $-suffix */
-                    if (!addr) {
-                        char base_sym[256];
-                        strncpy(base_sym, sym, 255);
-                        base_sym[255] = '\0';
-                        char *dollar = strchr(base_sym, '$');
-                        if (dollar) {
-                            *dollar = '\0';
-                            addr = dlsym(g_dylibs[ordinal - 1].handle, base_sym);
-                            if (!addr && g_dylibs[ordinal - 1].libc_handle) {
-                                addr = dlsym(g_dylibs[ordinal - 1].libc_handle, base_sym);
-                            }
-                        }
-                    }
+                    void *addr = resolve_symbol(ordinal - 1, sym);
                     if (!addr) {
                         fprintf(stderr, "macify: cannot resolve '%s' in DO_BIND_ULEB_TIMES\n", sym);
                         return -1;

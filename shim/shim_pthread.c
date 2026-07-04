@@ -56,10 +56,15 @@ int OSSpinLockTry(volatile int32_t *lock) {
     return __sync_lock_test_and_set(lock, 1) == 0;
 }
 
-/* pthread_atfork — register fork handlers. Pass through to glibc. */
+/* pthread_atfork — register fork handlers. Pass through to glibc.
+ * On glibc 2.34+, pthread_atfork only exists as a versioned symbol
+ * with no default version, so dlsym returns NULL. Must use dlvsym. */
 int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void)) {
     static int (*real_atfork)(void (*)(void), void (*)(void), void (*)(void)) = NULL;
-    if (!real_atfork) real_atfork = dlsym(RTLD_NEXT, "pthread_atfork");
+    if (!real_atfork) {
+        real_atfork = dlvsym(RTLD_NEXT, "pthread_atfork", "GLIBC_2.2.5");
+        if (!real_atfork) real_atfork = dlsym(RTLD_NEXT, "pthread_atfork");
+    }
     return real_atfork(prepare, parent, child);
 }
 

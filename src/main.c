@@ -222,6 +222,10 @@ int main(int argc, char **argv, char **envp) {
                 extra1 = dlopen("libidn2.so.0", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libunistring")) {
                 extra1 = dlopen("libunistring.so.5", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libedit")) {
+                extra1 = dlopen("libedit.so.2", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libreadline")) {
+                extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libintl")) {
                 /* libintl is part of glibc on Linux — no separate library */
                 extra1 = NULL;
