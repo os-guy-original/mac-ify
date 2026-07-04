@@ -99,8 +99,29 @@ void jump_to_entry(uint64_t entry, uint64_t stack_top) {
  * LC_UNIXTHREAD entry point and lets the binary call exit() itself.
  */
 
+/* Go binaries use %gs segment for thread-local storage (goroutine pointer
+ * at gs:0x30, etc.). On macOS, the kernel sets up %gs base during thread
+ * creation. On Linux, %gs base is 0 by default, so Go crashes on the first
+ * gs:0x30 access. We set up %gs base to a writable page before calling main.
+ *
+ * ARCH_SET_GS = 0x1001 (arch_prctl syscall on Linux x86_64)
+ * arch_prctl(ARCH_SET_GS, addr) sets the GS base address. */
+#include <sys/syscall.h>
+static void setup_gs_base(void) {
+    /* Allocate a page for the GS base */
+    static char gs_page[4096] __attribute__((aligned(4096)));
+    /* Zero it out */
+    memset(gs_page, 0, sizeof(gs_page));
+    /* Set GS base to our page using arch_prctl */
+    syscall(158, 0x1001, gs_page);  /* ARCH_SET_GS = 0x1001 */
+}
+
 __attribute__((noreturn))
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
+    /* Set up %gs base for Go binaries that use gs:0x30 for goroutine TLS.
+     * This is a no-op for C/Rust binaries that don't use %gs. */
+    setup_gs_base();
+
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
      * macOS binaries use printf/fwrite which buffer output internally. */

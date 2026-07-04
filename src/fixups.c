@@ -545,7 +545,21 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                         const char *sym = sym_name;
                         if (sym[0] == '_') sym++;
 
-                        void *addr = resolve_symbol(lib_ordinal - 1, sym);
+                        /* Handle special ordinals:
+                         *   0x00 (0)   = flat lookup (search all libraries)
+                         *   0xFB (251) = self
+                         *   0xFC (252) = main executable
+                         *   0xFD (253) = flat lookup
+                         *   0xFE (254) = main executable
+                         *   0xFF (255) = flat lookup
+                         * For all special ordinals, use flat namespace lookup. */
+                        void *addr;
+                        if (lib_ordinal == 0 || lib_ordinal >= 0xFB) {
+                            /* Flat namespace lookup — search all loaded libraries */
+                            addr = resolve_symbol(-1, sym);
+                        } else {
+                            addr = resolve_symbol(lib_ordinal - 1, sym);
+                        }
                         if (addr) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
                             if (strcmp(sym, "malloc_size") == 0) {

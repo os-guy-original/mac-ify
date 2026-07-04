@@ -71,19 +71,50 @@ void register_extra_handle(void *handle) {
 /* Look up a symbol from a dylib, trying shim → libc → libm → extra → $-suffix strip.
  * Returns the symbol address or NULL. */
 void *resolve_symbol(int ordinal_idx, const char *sym) {
-    /* ordinal -1 = flat namespace: search all loaded libraries */
+    /* ordinal -1 = flat namespace: search all loaded libraries.
+     * IMPORTANT: check shim FIRST, then libc/libm, then RTLD_DEFAULT.
+     * This ensures our overrides (mmap, open, connect, etc.) take
+     * priority over glibc's versions, which don't translate macOS flags. */
     if (ordinal_idx == -1) {
-        void *addr = dlsym(RTLD_DEFAULT, sym);
-        if (addr) return addr;
+        /* Check shim → libc → libm for each dylib entry */
         for (int i = 0; i < g_ndylibs; i++) {
-            addr = dlsym(g_dylibs[i].handle, sym);
+            void *addr = dlsym(g_dylibs[i].handle, sym);
             if (!addr && g_dylibs[i].libc_handle) addr = dlsym(g_dylibs[i].libc_handle, sym);
             if (!addr && g_dylibs[i].libm_handle) addr = dlsym(g_dylibs[i].libm_handle, sym);
             if (addr) return addr;
         }
+        /* Check extra handles */
         for (int i = 0; i < g_n_extra_handles; i++) {
-            addr = dlsym(g_extra_handles[i], sym);
+            void *addr = dlsym(g_extra_handles[i], sym);
             if (addr) return addr;
+        }
+        /* Last resort: RTLD_DEFAULT (searches all loaded libraries) */
+        {
+            void *addr = dlsym(RTLD_DEFAULT, sym);
+            if (addr) return addr;
+        }
+        /* Try stripping $-suffix for flat namespace too
+         * (e.g. fdopendir$INODE64 -> fdopendir, realpath$DARWIN_EXTSN -> realpath) */
+        {
+            char base_sym[256];
+            strncpy(base_sym, sym, 255);
+            base_sym[255] = '\0';
+            char *dollar = strchr(base_sym, '$');
+            if (dollar) {
+                *dollar = '\0';
+                void *addr = dlsym(RTLD_DEFAULT, base_sym);
+                if (addr) return addr;
+                for (int i = 0; i < g_ndylibs; i++) {
+                    addr = dlsym(g_dylibs[i].handle, base_sym);
+                    if (!addr && g_dylibs[i].libc_handle) addr = dlsym(g_dylibs[i].libc_handle, base_sym);
+                    if (!addr && g_dylibs[i].libm_handle) addr = dlsym(g_dylibs[i].libm_handle, base_sym);
+                    if (addr) return addr;
+                }
+                for (int i = 0; i < g_n_extra_handles; i++) {
+                    addr = dlsym(g_extra_handles[i], base_sym);
+                    if (addr) return addr;
+                }
+            }
         }
         return NULL;
     }
