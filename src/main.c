@@ -491,21 +491,10 @@ int main(int argc, char **argv, char **envp) {
             sigaction(SIGSEGV, &sa2, NULL);
             sigaction(SIGBUS, &sa2, NULL);
             sigaction(SIGABRT, &sa2, NULL);
+            sigaction(SIGFPE,  &sa2, NULL);   /* reinstall for SIGFPE so div-by-zero
+                                               * gets the full crash dump too */
         }
-        /* Debug: verify chained fixups ran */
-        { const char m[] = "CHAINED FIXUPS DONE\n"; write(2, m, sizeof(m)-1); }
-        /* Verify GOT before main */
-        {
-            for (int i = 0; i < g_nsegments; i++) {
-                if (strcmp(g_segments[i].name, "__DATA_CONST") == 0) {
-                    uint64_t *got = (uint64_t *)(g_segments[i].vmaddr + 0x2b0);
-                    char b[128];
-                    int n = snprintf(b, sizeof(b), "GOT[86] before main = 0x%lx\n", (unsigned long)*got);
-                    write(2, b, n);
-                    break;
-                }
-            }
-        }
+        if (g_verbose) { const char m[] = "CHAINED FIXUPS DONE\n"; write(2, m, sizeof(m)-1); }
         call_main_and_exit(g_entry_rip, stack_top);
     } else {
         jump_to_entry(g_entry_rip, stack_top);

@@ -724,22 +724,49 @@ int __localtime_r(const time_t *timep, struct tm *result) {
 
 /* ── macOS malloc zone API (sqlite3 uses these) ── */
 
+/* IMPORTANT: this struct must match the macOS _malloc_zone_t layout exactly,
+ * because native macOS binaries compute offsets into it directly (e.g. they
+ * call *(zone + 0x10) for the `size` method).  Apple's struct layout
+ * (from mach/malloc.h) is:
+ *   0x00  reserved1, reserved2
+ *   0x10  size(zone, ptr)
+ *   0x18  malloc(zone, size)
+ *   0x20  calloc(zone, n, size)
+ *   0x28  valloc(zone, size)
+ *   0x30  free(zone, ptr)
+ *   0x38  realloc(zone, ptr, size)
+ *   0x40  destroy(zone)
+ *   0x48  zone_name
+ *   0x50  batch_malloc (unsigned), batch_free (unsigned)
+ *   0x58  introspect
+ *   0x60  reserved5, reserved6, reserved7
+ *
+ * The previous layout put `malloc` at offset 0x10, which caused sqlite3's
+ * sqlite3MemSize to call our `malloc(zone, ptr_as_size)` instead of `size(zone, ptr)`,
+ * allocating a huge buffer, returning NULL, and triggering a divide-by-zero
+ * in sqlite3HashInsert. */
 struct _malloc_zone_t {
-    void *reserved1, *reserved2;
-    void *(*malloc)(struct _malloc_zone_t *, size_t);
-    void *(*calloc)(struct _malloc_zone_t *, size_t, size_t);
-    void *(*valloc)(struct _malloc_zone_t *, size_t);
-    void  (*free)(struct _malloc_zone_t *, void *);
-    void *(*realloc)(struct _malloc_zone_t *, void *, size_t);
-    void  (*destroy)(struct _malloc_zone_t *);
-    const char *zone_name;
-    unsigned batch_malloc, batch_free;
-    void *introspect;
-    void *reserved5, *reserved6, *reserved7;
+    void *reserved1, *reserved2;                                            /* 0x00 */
+    size_t (*size)(struct _malloc_zone_t *, const void *);                   /* 0x10 */
+    void *(*malloc)(struct _malloc_zone_t *, size_t);                        /* 0x18 */
+    void *(*calloc)(struct _malloc_zone_t *, size_t, size_t);                /* 0x20 */
+    void *(*valloc)(struct _malloc_zone_t *, size_t);                        /* 0x28 */
+    void  (*free)(struct _malloc_zone_t *, void *);                          /* 0x30 */
+    void *(*realloc)(struct _malloc_zone_t *, void *, size_t);               /* 0x38 */
+    void  (*destroy)(struct _malloc_zone_t *);                               /* 0x40 */
+    const char *zone_name;                                                   /* 0x48 */
+    unsigned batch_malloc, batch_free;                                       /* 0x50 */
+    void *introspect;                                                        /* 0x58 */
+    void *reserved5, *reserved6, *reserved7;                                 /* 0x60 */
     /* Pad to match macOS struct size (~256 bytes) */
     char _pad[128];
 };
 
+static size_t zs(struct _malloc_zone_t *z, const void *p) {
+    (void)z;
+    if (!p) return 0;
+    return malloc_usable_size((void *)p);
+}
 static void *zm(struct _malloc_zone_t *z, size_t s) { (void)z; return malloc(s); }
 static void *zc(struct _malloc_zone_t *z, size_t n, size_t s) { (void)z; return calloc(n, s); }
 static void *zv(struct _malloc_zone_t *z, size_t s) { (void)z; return malloc(s); }
@@ -748,7 +775,7 @@ static void *zr(struct _malloc_zone_t *z, void *p, size_t s) { (void)z; return r
 static void  zd(struct _malloc_zone_t *z) { (void)z; }
 
 static struct _malloc_zone_t macify_zone = {
-    .malloc = zm, .calloc = zc, .valloc = zv,
+    .size = zs, .malloc = zm, .calloc = zc, .valloc = zv,
     .free = zf, .realloc = zr, .destroy = zd,
     .zone_name = "macify",
 };
@@ -759,12 +786,52 @@ void malloc_set_zone_name(void *zone, const char *name) { (void)zone; (void)name
 size_t malloc_size(const void *ptr) {
     if (!ptr) return 0;
     size_t r = malloc_usable_size((void *)ptr);
-    char b[128];
-    int n = snprintf(b, sizeof(b), "macify: malloc_size(%p) -> %zu\n", ptr, r);
-    (void)write(2, b, n);
+    if (getenv("MACIFY_MALLOC_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "macify: malloc_size(%p) -> %zu\n", ptr, r);
+        (void)write(2, b, n);
+    }
     return r;
 }
-void *malloc_zone_malloc(void *zone, size_t size) { (void)zone; return malloc(size); }
-void *malloc_zone_realloc(void *zone, void *ptr, size_t size) { (void)zone; return realloc(ptr, size); }
-void malloc_zone_free(void *zone, void *ptr) { (void)zone; free(ptr); }
+void *malloc_zone_malloc(void *zone, size_t size) {
+    void *r = malloc(size);
+    if (getenv("MACIFY_MALLOC_DEBUG")) {
+        char b[160];
+        int n = snprintf(b, sizeof(b), "macify: malloc_zone_malloc(zone=%p, %zu) -> %p\n", zone, size, r);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+void *malloc_zone_realloc(void *zone, void *ptr, size_t size) {
+    void *r = realloc(ptr, size);
+    if (getenv("MACIFY_MALLOC_DEBUG")) {
+        char b[160];
+        int n = snprintf(b, sizeof(b), "macify: malloc_zone_realloc(zone=%p, %p, %zu) -> %p\n", zone, ptr, size, r);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+void malloc_zone_free(void *zone, void *ptr) {
+    if (getenv("MACIFY_MALLOC_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "macify: malloc_zone_free(zone=%p, %p)\n", zone, ptr);
+        (void)write(2, b, n);
+    }
+    free(ptr);
+}
+void *malloc_zone_calloc(void *zone, size_t n, size_t size) {
+    void *r = calloc(n, size);
+    if (getenv("MACIFY_MALLOC_DEBUG")) {
+        char b[160];
+        int m = snprintf(b, sizeof(b), "macify: malloc_zone_calloc(zone=%p, %zu, %zu) -> %p\n", zone, n, size, r);
+        (void)write(2, b, m);
+    }
+    return r;
+}
+void *malloc_zone_memalign(void *zone, size_t align, size_t size) {
+    void *r = NULL;
+    (void)zone;
+    posix_memalign(&r, align, size);
+    return r;
+}
 
