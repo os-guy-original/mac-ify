@@ -92,11 +92,11 @@ int main(int argc, char **argv, char **envp) {
     crash_sa.sa_sigaction = crash_handler;
     crash_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigemptyset(&crash_sa.sa_mask);
-    syscall(SYS_rt_sigaction, SIGSEGV, &crash_sa, NULL, 8);
-    syscall(SYS_rt_sigaction, SIGBUS,  &crash_sa, NULL, 8);
-    syscall(SYS_rt_sigaction, SIGFPE,  &crash_sa, NULL, 8);
-    syscall(SYS_rt_sigaction, SIGABRT, &crash_sa, NULL, 8);
-    syscall(SYS_rt_sigaction, SIGTRAP, &crash_sa, NULL, 8);
+    sigaction(SIGSEGV, &crash_sa, NULL);
+    sigaction(SIGBUS,  &crash_sa, NULL);
+    sigaction(SIGFPE,  &crash_sa, NULL);
+    sigaction(SIGABRT, &crash_sa, NULL);
+    sigaction(SIGTRAP, &crash_sa, NULL);
 
     /* ASLR/PIE slide computation.
      *
@@ -335,8 +335,23 @@ int main(int argc, char **argv, char **envp) {
 
     /* Execute chained fixups (modern macOS 11+ format; replaces LC_DYLD_INFO
      * bind/rebase opcodes for newer binaries). */
+    { const char m[] = "BEFORE CHAINED\n"; write(2, m, sizeof(m)-1); }
     if (g_has_chained_fixups) {
         if (execute_chained_fixups(file_data, file_size) < 0) return 1;
+    }
+    { const char m[] = "AFTER CHAINED\n"; write(2, m, sizeof(m)-1); }
+    /* Skip __DATA_CONST reprotect for now */
+    /* Verify malloc_size GOT entry */
+    {
+        for (int i = 0; i < g_nsegments; i++) {
+            if (strcmp(g_segments[i].name, "__DATA_CONST") == 0) {
+                uint64_t *got = (uint64_t *)(g_segments[i].vmaddr + 0x2b0);
+                char b[128];
+                int n = snprintf(b, sizeof(b), "GOT[86] after fixups = 0x%lx\n", (unsigned long)*got);
+                write(2, b, n);
+                break;
+            }
+        }
     }
 
     /* Set up TLV (Thread-Local Variable) info in the shim. Find __thread_data
@@ -466,6 +481,31 @@ int main(int argc, char **argv, char **envp) {
     /* If LC_MAIN is present, call main() as a C function and exit with its
      * return value. Otherwise, jump to the LC_UNIXTHREAD entry point. */
     if (have_main) {
+        /* Reinstall crash handler before main */
+        {
+            struct sigaction sa2;
+            memset(&sa2, 0, sizeof(sa2));
+            sa2.sa_sigaction = crash_handler;
+            sa2.sa_flags = SA_SIGINFO | SA_NODEFER;
+            sigemptyset(&sa2.sa_mask);
+            sigaction(SIGSEGV, &sa2, NULL);
+            sigaction(SIGBUS, &sa2, NULL);
+            sigaction(SIGABRT, &sa2, NULL);
+        }
+        /* Debug: verify chained fixups ran */
+        { const char m[] = "CHAINED FIXUPS DONE\n"; write(2, m, sizeof(m)-1); }
+        /* Verify GOT before main */
+        {
+            for (int i = 0; i < g_nsegments; i++) {
+                if (strcmp(g_segments[i].name, "__DATA_CONST") == 0) {
+                    uint64_t *got = (uint64_t *)(g_segments[i].vmaddr + 0x2b0);
+                    char b[128];
+                    int n = snprintf(b, sizeof(b), "GOT[86] before main = 0x%lx\n", (unsigned long)*got);
+                    write(2, b, n);
+                    break;
+                }
+            }
+        }
         call_main_and_exit(g_entry_rip, stack_top);
     } else {
         jump_to_entry(g_entry_rip, stack_top);

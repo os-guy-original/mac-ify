@@ -415,6 +415,8 @@ int execute_lazy_binds(uint8_t *file_data, size_t file_size) {
  */
 
 int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
+    fprintf(stderr, "macify: execute_chained_fixups called (off=%u size=%u)\n",
+            g_chained_fixups_off, g_chained_fixups_size);
     if (!g_has_chained_fixups || g_chained_fixups_size == 0) return 0;
     if (g_chained_fixups_off + g_chained_fixups_size > file_size) {
         fprintf(stderr, "macify: chained fixups extend past EOF\n");
@@ -474,6 +476,8 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
         /* Process each page */
         for (uint16_t page_idx = 0; page_idx < page_count; page_idx++) {
             uint16_t page_start = page_starts[page_idx];
+            fprintf(stderr, "macify:   page %u: start=0x%x\n", page_idx, page_start);
+            fflush(stderr);
             if (page_start == 0xFFFF) continue;  /* DYLD_CHAINED_PTR_START_NONE */
             /* page_start=0 means fixups start at beginning of page (valid) */
 
@@ -544,6 +548,11 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                         void *addr = resolve_symbol(lib_ordinal - 1, sym);
                         if (addr) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
+                            if (strcmp(sym, "malloc_size") == 0) {
+                                fprintf(stderr, "macify: chained fixup malloc_size at chain_ptr=%p (page+0x%lx) -> %p\n",
+                                        (void*)chain_ptr, (unsigned long)(chain_ptr - page_base), addr);
+                                fflush(stderr);
+                            }
                         } else {
                             fprintf(stderr, "macify: chained fixup UNRESOLVED: sym=%s lib_ordinal=%d\n",
                                     sym, lib_ordinal);

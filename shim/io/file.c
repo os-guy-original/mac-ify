@@ -147,6 +147,8 @@ static int (*real_fstat)(int, struct stat *);
 int macify_stat(const char *path, struct macos_stat *buf) __asm__("stat");
 int macify_stat(const char *path, struct macos_stat *buf) {
     if (!real_stat) real_stat = dlsym(RTLD_NEXT, "stat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_stat(path, (struct stat *)buf);
     struct stat ls;
     int ret = real_stat(path, &ls);
     if (ret == 0) translate_stat(&ls, buf);
@@ -156,6 +158,8 @@ int macify_stat(const char *path, struct macos_stat *buf) {
 int macify_lstat(const char *path, struct macos_stat *buf) __asm__("lstat");
 int macify_lstat(const char *path, struct macos_stat *buf) {
     if (!real_lstat) real_lstat = dlsym(RTLD_NEXT, "lstat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_lstat(path, (struct stat *)buf);
     struct stat ls;
     int ret = real_lstat(path, &ls);
     if (ret == 0) translate_stat(&ls, buf);
@@ -165,6 +169,8 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
 int macify_fstat(int fd, struct macos_stat *buf) __asm__("fstat");
 int macify_fstat(int fd, struct macos_stat *buf) {
     if (!real_fstat) real_fstat = dlsym(RTLD_NEXT, "fstat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_fstat(fd, (struct stat *)buf);
     struct stat ls;
     int ret = real_fstat(fd, &ls);
     if (ret == 0) translate_stat(&ls, buf);

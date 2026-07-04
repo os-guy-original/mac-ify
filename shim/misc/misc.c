@@ -3,6 +3,7 @@
 #include <sys/mount.h>
 #include <ucontext.h>
 #include <stdarg.h>
+#include <malloc.h>
 
 /* ── libgcc_s loading for _Unwind_* functions ────────────────── */
 
@@ -735,6 +736,8 @@ struct _malloc_zone_t {
     unsigned batch_malloc, batch_free;
     void *introspect;
     void *reserved5, *reserved6, *reserved7;
+    /* Pad to match macOS struct size (~256 bytes) */
+    char _pad[128];
 };
 
 static void *zm(struct _malloc_zone_t *z, size_t s) { (void)z; return malloc(s); }
@@ -753,7 +756,15 @@ static struct _malloc_zone_t macify_zone = {
 void *malloc_create_zone(size_t start, unsigned flags) { (void)start; (void)flags; return &macify_zone; }
 void *malloc_default_zone(void) { return &macify_zone; }
 void malloc_set_zone_name(void *zone, const char *name) { (void)zone; (void)name; }
-size_t malloc_size(const void *ptr) { (void)ptr; return 0; }
+size_t malloc_size(const void *ptr) {
+    if (!ptr) return 0;
+    size_t r = malloc_usable_size((void *)ptr);
+    char b[128];
+    int n = snprintf(b, sizeof(b), "macify: malloc_size(%p) -> %zu\n", ptr, r);
+    (void)write(2, b, n);
+    return r;
+}
 void *malloc_zone_malloc(void *zone, size_t size) { (void)zone; return malloc(size); }
 void *malloc_zone_realloc(void *zone, void *ptr, size_t size) { (void)zone; return realloc(ptr, size); }
 void malloc_zone_free(void *zone, void *ptr) { (void)zone; free(ptr); }
+
