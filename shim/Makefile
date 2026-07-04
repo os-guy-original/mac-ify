@@ -7,8 +7,12 @@ LDFLAGS ?= -shared -lpthread -ldl -lm
 BIN_DIR  = ../build
 LIB      = $(BIN_DIR)/libmacify_shim.so
 
+# Core shim files
 SRC = shim_core.c shim_mach.c shim_objc.c shim_tlv.c shim_pthread.c \
-      shim_signal.c shim_io.c shim_misc.c shim_spawn.c
+      shim_signal.c shim_spawn.c \
+      io/flags.c io/file.c io/net.c io/process.c io/dirent.c io/dl.c \
+      misc/rune.c misc/cf.c misc/iokit.c misc/sysctl.c misc/string.c misc/misc.c
+
 OBJ = $(SRC:.c=.o)
 
 .PHONY: all clean
@@ -18,7 +22,7 @@ all: $(LIB)
 $(LIB): $(OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -shared -o $@ $(OBJ) $(LDFLAGS)
 
-%.o: %.c shim.h
+%.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BIN_DIR):
