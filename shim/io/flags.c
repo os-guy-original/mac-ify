@@ -108,16 +108,21 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 
 int open(const char *pathname, int flags, ...) {
     LAZY_INIT_IO();
-    int linux_flags = (int)translate_open_flags((unsigned int)flags);
     mode_t mode = 0;
+    /* Only translate flags for macOS callers */
+    int linux_flags;
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        linux_flags = (int)translate_open_flags((unsigned int)flags);
+    } else {
+        linux_flags = flags; /* Linux caller — flags are already Linux */
+    }
     if (linux_flags & LINUX_O_CREAT) {
         va_list ap;
         va_start(ap, flags);
         mode = va_arg(ap, int);
         va_end(ap);
     }
-    int r = real_open(pathname, linux_flags, mode);
-    return r;
+    return real_open(pathname, linux_flags, mode);
 }
 
 int madvise(void *addr, size_t length, int advice) {

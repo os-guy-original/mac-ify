@@ -720,3 +720,40 @@ int __localtime_r(const time_t *timep, struct tm *result) {
 }
 
 
+
+/* ── macOS malloc zone API (sqlite3 uses these) ── */
+
+struct _malloc_zone_t {
+    void *reserved1, *reserved2;
+    void *(*malloc)(struct _malloc_zone_t *, size_t);
+    void *(*calloc)(struct _malloc_zone_t *, size_t, size_t);
+    void *(*valloc)(struct _malloc_zone_t *, size_t);
+    void  (*free)(struct _malloc_zone_t *, void *);
+    void *(*realloc)(struct _malloc_zone_t *, void *, size_t);
+    void  (*destroy)(struct _malloc_zone_t *);
+    const char *zone_name;
+    unsigned batch_malloc, batch_free;
+    void *introspect;
+    void *reserved5, *reserved6, *reserved7;
+};
+
+static void *zm(struct _malloc_zone_t *z, size_t s) { (void)z; return malloc(s); }
+static void *zc(struct _malloc_zone_t *z, size_t n, size_t s) { (void)z; return calloc(n, s); }
+static void *zv(struct _malloc_zone_t *z, size_t s) { (void)z; return malloc(s); }
+static void  zf(struct _malloc_zone_t *z, void *p) { (void)z; free(p); }
+static void *zr(struct _malloc_zone_t *z, void *p, size_t s) { (void)z; return realloc(p, s); }
+static void  zd(struct _malloc_zone_t *z) { (void)z; }
+
+static struct _malloc_zone_t macify_zone = {
+    .malloc = zm, .calloc = zc, .valloc = zv,
+    .free = zf, .realloc = zr, .destroy = zd,
+    .zone_name = "macify",
+};
+
+void *malloc_create_zone(size_t start, unsigned flags) { (void)start; (void)flags; return &macify_zone; }
+void *malloc_default_zone(void) { return &macify_zone; }
+void malloc_set_zone_name(void *zone, const char *name) { (void)zone; (void)name; }
+size_t malloc_size(const void *ptr) { (void)ptr; return 0; }
+void *malloc_zone_malloc(void *zone, size_t size) { (void)zone; return malloc(size); }
+void *malloc_zone_realloc(void *zone, void *ptr, size_t size) { (void)zone; return realloc(ptr, size); }
+void malloc_zone_free(void *zone, void *ptr) { (void)zone; free(ptr); }

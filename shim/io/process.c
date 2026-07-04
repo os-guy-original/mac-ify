@@ -113,3 +113,19 @@ FILE *macify_fopen(const char *path, const char *mode) {
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
     return real_fopen(path, mode);
 }
+
+int macify_msync(void *addr, size_t length, int flags) __asm__("msync");
+int macify_msync(void *addr, size_t length, int flags) {
+    static int (*real_msync)(void *, size_t, int) = NULL;
+    if (!real_msync) real_msync = dlsym(RTLD_NEXT, "msync");
+    /* Round address to page boundary */
+    size_t ps = sysconf(_SC_PAGESIZE);
+    uintptr_t a = (uintptr_t)addr;
+    size_t adj = a % ps;
+    int r = real_msync((void *)(a - adj), length + adj, flags);
+    if (r == -1 && (errno == EINVAL || errno == ENOMEM)) {
+        errno = 0;
+        return 0; /* macOS is more lenient */
+    }
+    return r;
+}

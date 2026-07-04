@@ -7,6 +7,13 @@
 
 int fcntl(int fd, int cmd, ...) {
     LAZY_INIT_IO();
+    /* Only translate for macOS callers. Linux libraries (libedit, glibc)
+     * call fcntl with Linux constants — translating those corrupts data. */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        va_list ap; va_start(ap, cmd);
+        void *arg = va_arg(ap, void *); va_end(ap);
+        return real_fcntl(fd, cmd, arg);
+    }
     int linux_cmd = translate_fcntl_cmd(cmd);
     if (cmd == 1) return real_fcntl(fd, linux_cmd);
     if (cmd == 3) {
