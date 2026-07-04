@@ -428,14 +428,26 @@ int macify_connect(int sockfd, const void *addr, socklen_t addrlen) {
              p[1] >= 1 && p[1] <= 30 && addrlen >= 8) is_macos = 1;
 
     if (is_macos) {
-        /* macOS sockaddr: [sa_len(1)] [sa_family(1)] [port(2)] [addr(4)] [pad...]
-         * Linux sockaddr: [sa_family(2)] [port(2)] [addr(4)] [pad...] */
         uint16_t family = p[1];
-        if (family == MACOS_AF_INET6) family = LINUX_AF_INET6;
-        memcpy(linux_addr + 0, &family, 2);   /* sa_family (2 bytes LE) */
-        memcpy(linux_addr + 2, p + 2, 2);     /* sin_port (2 bytes) */
-        memcpy(linux_addr + 4, p + 4, 4);     /* sin_addr (4 bytes) */
-        addrlen = 16;
+        if (family == MACOS_AF_INET6) {
+            /* IPv6: macOS sockaddr_in6 (28 bytes) → Linux sockaddr_in6 (28 bytes)
+             * macOS: [sa_len(1)] [sa_family(1)] [port(2)] [flowinfo(4)] [addr(16)] [scope(4)]
+             * Linux: [family(2)] [port(2)] [flowinfo(4)] [addr(16)] [scope(4)] */
+            uint16_t lf = LINUX_AF_INET6;
+            memcpy(linux_addr + 0, &lf, 2);
+            memcpy(linux_addr + 2, p + 2, 2);      /* port */
+            memcpy(linux_addr + 4, p + 4, 4);      /* flowinfo */
+            memcpy(linux_addr + 8, p + 8, 16);     /* addr (16 bytes!) */
+            memcpy(linux_addr + 24, p + 24, 4);    /* scope_id */
+            addrlen = 28;
+        } else {
+            /* IPv4: macOS sockaddr_in (16 bytes) → Linux sockaddr_in (16 bytes) */
+            uint16_t lf = 2; /* AF_INET */
+            memcpy(linux_addr + 0, &lf, 2);
+            memcpy(linux_addr + 2, p + 2, 2);      /* port */
+            memcpy(linux_addr + 4, p + 4, 4);      /* addr */
+            addrlen = 16;
+        }
 
         /* Redirect 127.0.0.1:53 (c-ares's hardcoded fallback) to the real
          * DNS server from /etc/resolv.conf. c-ares on macOS uses
@@ -463,7 +475,7 @@ int macify_connect(int sockfd, const void *addr, socklen_t addrlen) {
         memcpy(linux_addr, p, cl);
     }
 
-    macify_net_dbg_hex("connect: linux addr:", linux_addr, 16);
+    macify_net_dbg_hex("connect: linux addr:", linux_addr, addrlen > 32 ? 32 : addrlen);
     static int (*real_connect)(int, const struct sockaddr *, socklen_t) = NULL;
     if (!real_connect) real_connect = dlsym(RTLD_NEXT, "connect");
     int r = real_connect(sockfd, (const struct sockaddr *)linux_addr, addrlen);
@@ -489,18 +501,20 @@ int macify_bind(int sockfd, const void *addr, socklen_t addrlen) {
     const uint8_t *p = (const uint8_t *)addr;
     uint8_t linux_addr[256];
     memset(linux_addr, 0, sizeof(linux_addr));
-    if (p[0] == 16 && addrlen >= 8) {
-        uint16_t family = p[1];
-        if (family == MACOS_AF_INET6) family = LINUX_AF_INET6;
-        memcpy(linux_addr + 0, &family, 2);
-        memcpy(linux_addr + 2, p + 2, 2);  /* sin_port */
-        memcpy(linux_addr + 4, p + 4, 4);  /* sin_addr */
-        addrlen = 16;
-    } else if (p[0] == 28 && addrlen >= 8) {
-        uint16_t family = LINUX_AF_INET6;
-        memcpy(linux_addr + 0, &family, 2);
-        memcpy(linux_addr + 2, p + 2, addrlen - 2);
+    if (p[1] == MACOS_AF_INET6 && (p[0] == 28 || p[0] == 0) && addrlen >= 28) {
+        uint16_t lf = LINUX_AF_INET6;
+        memcpy(linux_addr + 0, &lf, 2);
+        memcpy(linux_addr + 2, p + 2, 2);      /* port */
+        memcpy(linux_addr + 4, p + 4, 4);      /* flowinfo */
+        memcpy(linux_addr + 8, p + 8, 16);     /* addr */
+        memcpy(linux_addr + 24, p + 24, 4);    /* scope_id */
         addrlen = 28;
+    } else if ((p[0] == 16 || p[0] == 0) && p[1] == 2 && addrlen >= 8) {
+        uint16_t lf = 2;
+        memcpy(linux_addr + 0, &lf, 2);
+        memcpy(linux_addr + 2, p + 2, 2);
+        memcpy(linux_addr + 4, p + 4, 4);
+        addrlen = 16;
     } else {
         size_t cl = addrlen; if (cl > sizeof(linux_addr)) cl = sizeof(linux_addr);
         memcpy(linux_addr, p, cl);
@@ -523,22 +537,26 @@ ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
     if (dest_addr && addrlen >= 2) {
         const uint8_t *p = (const uint8_t *)dest_addr;
         memset(linux_addr, 0, sizeof(linux_addr));
-        if (p[0] == 16 && addrlen >= 8) {
-            uint16_t family = p[1];
-            if (family == MACOS_AF_INET6) family = LINUX_AF_INET6;
-            memcpy(linux_addr + 0, &family, 2);
-            memcpy(linux_addr + 2, p + 2, 2);  /* sin_port */
-            memcpy(linux_addr + 4, p + 4, 4);  /* sin_addr */
-        } else if (p[0] == 28 && addrlen >= 8) {
-            uint16_t family = LINUX_AF_INET6;
-            memcpy(linux_addr + 0, &family, 2);
-            memcpy(linux_addr + 2, p + 2, addrlen - 2);
+        if (p[1] == MACOS_AF_INET6 && (p[0] == 28 || p[0] == 0) && addrlen >= 28) {
+            uint16_t lf = LINUX_AF_INET6;
+            memcpy(linux_addr + 0, &lf, 2);
+            memcpy(linux_addr + 2, p + 2, 2);
+            memcpy(linux_addr + 4, p + 4, 4);
+            memcpy(linux_addr + 8, p + 8, 16);
+            memcpy(linux_addr + 24, p + 24, 4);
+            linux_addrlen = 28;
+        } else if ((p[0] == 16 || p[0] == 0) && p[1] == 2 && addrlen >= 8) {
+            uint16_t lf = 2;
+            memcpy(linux_addr + 0, &lf, 2);
+            memcpy(linux_addr + 2, p + 2, 2);
+            memcpy(linux_addr + 4, p + 4, 4);
+            linux_addrlen = 16;
         } else {
             size_t cl = addrlen; if (cl > sizeof(linux_addr)) cl = sizeof(linux_addr);
             memcpy(linux_addr, p, cl);
+            linux_addrlen = cl;
         }
         p_addr = (const struct sockaddr *)linux_addr;
-        linux_addrlen = addrlen;
     }
     static ssize_t (*real_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t) = NULL;
     if (!real_sendto) real_sendto = dlsym(RTLD_NEXT, "sendto");
@@ -688,7 +706,7 @@ int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) __asm__("gets
 int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) {
     static int (*real)(int, struct sockaddr *, socklen_t *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getsockname");
-    socklen_t saved_len = addrlen ? *addrlen : 0;
+    
     int ret = real(sockfd, (struct sockaddr *)addr, addrlen);
     if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
         linux_to_macos_sockaddr(addr, *addrlen);

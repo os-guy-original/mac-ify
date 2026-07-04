@@ -128,3 +128,9 @@ extern int16_t macify_mapupper[256];
 #define MACIFY_MAX_KEYS 256
 
 #endif /* MACIFY_SHIM_H */
+
+/* Errno translation: use at end of functions returning -1 on error */
+#define TRANSLATE_ERRNO(r) do { \
+    if ((r) == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) \
+        errno = macify_linux_to_macos_errno(errno); \
+} while (0)

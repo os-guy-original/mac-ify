@@ -4,10 +4,13 @@
 
 #define MACOS_RTLD_DEFAULT ((void *)-2)
 #define MACOS_RTLD_SELF    ((void *)-3)
-#define MACOS_RTLD_MAIN_ONLY ((void *)-5)
 
 static void *macify_sc_fake_handle = (void *)&macify_sc_fake_handle;
 
+/* Define real_dlsym (declared extern in shim.h) */
+void *(*real_dlsym)(void *, const char *);
+
+/* Forward declarations (defined in cf.c) */
 void *macify_SCDynamicStoreCreate(void *alloc, const void *name, void *cb, void *ctx);
 void *macify_SCDynamicStoreCopyValue(void *store, const void *key);
 void macify_CFRelease(void *cf);
@@ -21,15 +24,41 @@ const void *CFDictionaryGetValue(const void *dict, const void *key);
 void *macify_dns_configuration_copy(void);
 void macify_dns_configuration_free(void *config);
 
-void *(*real_dlsym)(void *, const char *);
-
-static int find_dlsym_callback(struct dl_phdr_info *info, size_t size, void *data) {
+/* Find glibc's real dlsym by walking libc.so's ELF dynamic symbol table.
+ * We can't use dlsym(RTLD_NEXT, "dlsym") because that would recurse. */
+static int find_dlsym_cb(struct dl_phdr_info *info, size_t size, void *data) {
     (void)size;
     if (!info->dlpi_name || !strstr(info->dlpi_name, "libc.so"))
         return 0;
-    void **pp = (void **)data;
-    pp[0] = (void *)info->dlpi_addr;
-    return 1;
+    ElfW(Dyn) *dyn = NULL;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+            dyn = (ElfW(Dyn) *)(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+            break;
+        }
+    }
+    if (!dyn) return 0;
+    ElfW(Sym) *symtab = NULL;
+    const char *strtab = NULL;
+    uint32_t *hash = NULL;
+    for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_SYMTAB) symtab = (ElfW(Sym) *)d->d_un.d_ptr;
+        else if (d->d_tag == DT_STRTAB) strtab = (const char *)d->d_un.d_ptr;
+        else if (d->d_tag == DT_HASH) hash = (uint32_t *)d->d_un.d_ptr;
+    }
+    if (!symtab || !strtab) return 0;
+    /* Use DT_HASH to get symbol count (nchain = hash[1]) */
+    int nsyms = hash ? (int)hash[1] : 4096; /* fallback limit */
+    for (int i = 0; i < nsyms; i++) {
+        ElfW(Sym) *s = &symtab[i];
+        const char *name = strtab + s->st_name;
+        if (!name[0]) continue;
+        if (strcmp(name, "dlsym") == 0 && s->st_value) {
+            *((void **)data) = (void *)(info->dlpi_addr + s->st_value);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void *dlopen(const char *filename, int flag) {
@@ -42,51 +71,50 @@ void *dlopen(const char *filename, int flag) {
 }
 
 void *dlsym(void *handle, const char *symbol) {
-    if (!real_dlsym) {
-        void *libc_base = NULL;
-        dl_iterate_phdr(find_dlsym_callback, &libc_base);
-        if (libc_base) {
-            real_dlsym = (void *(*)(void *, const char *))
-                ((char *)libc_base + ((char *)dlsym - (char *)NULL));
-        }
-        if (!real_dlsym) real_dlsym = dlsym(RTLD_DEFAULT, "dlsym");
-    }
-    if (handle == MACOS_RTLD_DEFAULT || handle == MACOS_RTLD_SELF) {
-        handle = NULL;
-    }
+    /* Intercept dlsym for our fake SystemConfiguration handle. */
     if (handle == macify_sc_fake_handle) {
         if (strcmp(symbol, "SCDynamicStoreCreate") == 0)
             return (void *)macify_SCDynamicStoreCreate;
-        else if (strcmp(symbol, "SCDynamicStoreCopyValue") == 0)
+        if (strcmp(symbol, "SCDynamicStoreCopyValue") == 0)
             return (void *)macify_SCDynamicStoreCopyValue;
-        else if (strcmp(symbol, "CFRelease") == 0)
+        if (strcmp(symbol, "CFRelease") == 0)
             return (void *)macify_CFRelease;
-        else if (strcmp(symbol, "CFStringCreateWithCString") == 0)
+        if (strcmp(symbol, "CFRetain") == 0)
+            return (void *)macify_CFRelease;
+        if (strcmp(symbol, "CFStringCreateWithCString") == 0)
             return (void *)CFStringCreateWithCString;
-        else if (strcmp(symbol, "CFStringGetCString") == 0)
+        if (strcmp(symbol, "CFStringGetCString") == 0)
             return (void *)CFStringGetCString;
-        else if (strcmp(symbol, "CFStringGetLength") == 0)
+        if (strcmp(symbol, "CFStringGetLength") == 0)
             return (void *)CFStringGetLength;
-        else if (strcmp(symbol, "CFStringGetMaximumSizeForEncoding") == 0)
+        if (strcmp(symbol, "CFStringGetMaximumSizeForEncoding") == 0)
             return (void *)CFStringGetMaximumSizeForEncoding;
-        else if (strcmp(symbol, "CFArrayGetCount") == 0)
+        if (strcmp(symbol, "CFArrayGetCount") == 0)
             return (void *)CFArrayGetCount;
-        else if (strcmp(symbol, "CFArrayGetValueAtIndex") == 0)
+        if (strcmp(symbol, "CFArrayGetValueAtIndex") == 0)
             return (void *)CFArrayGetValueAtIndex;
-        else if (strcmp(symbol, "CFDictionaryGetValue") == 0)
+        if (strcmp(symbol, "CFDictionaryGetValue") == 0)
             return (void *)CFDictionaryGetValue;
-        else if (strcmp(symbol, "dns_configuration_copy") == 0)
+        if (strcmp(symbol, "dns_configuration_copy") == 0)
             return (void *)macify_dns_configuration_copy;
-        else if (strcmp(symbol, "dns_configuration_free") == 0)
+        if (strcmp(symbol, "dns_configuration_free") == 0)
             return (void *)macify_dns_configuration_free;
         return NULL;
     }
+    /* Find real glibc dlsym on first call */
+    if (!real_dlsym) {
+        dl_iterate_phdr(find_dlsym_cb, &real_dlsym);
+        if (!real_dlsym) return NULL;
+    }
+    if (handle == MACOS_RTLD_DEFAULT || handle == MACOS_RTLD_SELF)
+        handle = NULL;
     return real_dlsym(handle, symbol);
 }
 
 int dlclose(void *handle) {
     if (handle == macify_sc_fake_handle) return 0;
     static int (*real_dlclose)(void *) = NULL;
-    if (!real_dlclose) real_dlclose = dlsym(RTLD_DEFAULT, "dlclose");
-    return real_dlclose(handle);
+    if (!real_dlclose) real_dlclose = real_dlsym ? real_dlsym(RTLD_DEFAULT, "dlclose") : NULL;
+    if (real_dlclose) return real_dlclose(handle);
+    return 0;
 }
