@@ -961,79 +961,35 @@ void macify_force_ssl_init_success(void) {
         }
     }
 
-    /* Test: call SSL_CTX_new to see if it succeeds in isolation */
+    /* Test: check provider availability */
     {
-        typedef void *(*ssl_ctx_new_fn)(void *);
-        ssl_ctx_new_fn ctx_new =
-            (ssl_ctx_new_fn)(0x1001a5020UL + slide);
-        /* TLS_method is at... let me find it */
-        typedef void *(*tls_method_fn)(void);
-        tls_method_fn tls_method =
-            (tls_method_fn)(0x10018e650UL + slide);  /* TLS_method */
-        void *method = tls_method();
-        void *ctx = ctx_new(method);
-        if (getenv("MACIFY_SSL_DEBUG")) {
-            /* Call ERR_get_error to see what error was queued */
-            typedef unsigned long (*err_get_error_fn)(void);
-            err_get_error_fn get_err =
-                (err_get_error_fn)(0x1003107c0UL + slide);
-            unsigned long err1 = get_err();
-            unsigned long err2 = get_err();
-            char b[256];
-            int n = snprintf(b, sizeof(b),
-                "SSL_DEBUG: SSL_CTX_new(method=%p) = %p, ERR=%#lx, ERR2=%#lx\n",
-                method, ctx, err1, err2);
-            (void)write(2, b, n);
-        }
+        unsigned long (*err_get_error_fn)(void) = (unsigned long (*)(void))(uintptr_t)(0x1003107c0UL + slide);
+        int (*prov_avail_fn)(void *, const char *) = (int (*)(void *, const char *))(uintptr_t)(0x10035e400UL + slide);
+        int (*rand_status_fn)(void) = (int (*)(void))(uintptr_t)(0x1004446a0UL + slide);
+        void *(*tls_client_method_fn)(void) = (void *(*)(void))(uintptr_t)(0x10018e6f0UL + slide);
+        void *(*ssl_ctx_new_ex_fn)(void *, void *, void *) = (void *(*)(void *, void *, void *))(uintptr_t)(0x1001a4990UL + slide);
+
+        int avail_default = prov_avail_fn(NULL, "default");
+        int rand_ok = rand_status_fn();
+        void *method = tls_client_method_fn();
+        /* Call SSL_CTX_new_ex(NULL, NULL, method) — same as curl does */
+        void *ctx = ssl_ctx_new_ex_fn(NULL, NULL, method);
+        unsigned long e1 = err_get_error_fn();
+
+        char b[512];
+        int n = snprintf(b, sizeof(b),
+            "SSL_DEBUG: provider check:\n"
+            "  OSSL_PROVIDER_available(NULL,\"default\")=%d\n"
+            "  RAND_status()=%d\n"
+            "  TLS_client_method()=%p\n"
+            "  SSL_CTX_new_ex(NULL,NULL,method)=%p\n"
+            "  ERR1=%#lx\n",
+            avail_default, rand_ok, method, ctx, e1);
+        (void)write(2, b, n);
     }
 
-    /* Inline-hook OSSL_LIB_CTX_new so that every NEW libctx also gets the
-     * default provider loaded. curl creates its own OSSL_LIB_CTX via
-     * OSSL_LIB_CTX_new() and passes it to SSL_CTX_new_ex. Without the
-     * default provider loaded in that libctx, EVP_CIPHER_fetch returns NULL
-     * and SSL_CTX_new_ex fails with "reason(20)".
-     *
-     * The hook works by:
-     * 1. Saving the first 5 bytes of OSSL_LIB_CTX_new (push rbp; mov rbp,rsp; push rbx)
-     * 2. Writing a 5-byte JMP (E9 rel32) to our hook function
-     * 3. Creating a trampoline that executes the saved 5 bytes + JMP back
-     * 4. Our hook calls the trampoline (original function), then calls
-     *    OSSL_PROVIDER_load(new_libctx, "default") before returning. */
-    {
-        /* OSSL_LIB_CTX_new @ static 0x10034cca0 */
-        uint8_t *target = (uint8_t *)(0x10034cca0UL + slide);
-
-        /* Make the page writable */
-        uintptr_t page = (uintptr_t)target & ~0xFFFUL;
-        if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
-            /* Save original first 5 bytes */
-            static uint8_t saved_bytes[5];
-            static int hook_installed = 0;
-            if (!hook_installed) {
-                memcpy(saved_bytes, target, 5);
-                hook_installed = 1;
-
-                /* Create trampoline: saved bytes + JMP back to target+5 */
-                static uint8_t trampoline[16] __attribute__((aligned(4096)));
-                memcpy(trampoline, saved_bytes, 5);
-                trampoline[5] = 0xE9;  /* JMP rel32 */
-                uint32_t jmp_back = (uint32_t)((uintptr_t)(target + 5) - (uintptr_t)(trampoline + 10));
-                memcpy(trampoline + 6, &jmp_back, 4);
-
-                /* Write JMP to our hook at the start of target */
-                target[0] = 0xE9;  /* JMP rel32 */
-                uint32_t jmp_to_hook = (uint32_t)((uintptr_t)macify_ossl_lib_ctx_hook - (uintptr_t)(target + 5));
-                memcpy(target + 1, &jmp_to_hook, 4);
-
-                /* Store trampoline and provider_load addresses for the hook */
-                macify_original_lib_ctx_new = (void *(*)(void))trampoline;
-                macify_provider_load = provider_load;
-
-                if (getenv("MACIFY_SSL_DEBUG")) {
-                    const char msg[] = "SSL_DEBUG: hooked OSSL_LIB_CTX_new\n";
-                    (void)write(2, msg, sizeof(msg)-1);
-                }
-            }
-        }
-    }
+    /* Note: we previously tried inline-hooking OSSL_LIB_CTX_new to load the
+     * default provider into new libctxs, but curl doesn't call OSSL_LIB_CTX_new
+     * (it uses the global default libctx). The hook also caused a segfault
+     * due to trampoline alignment issues. Removed. */
 }
