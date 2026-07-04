@@ -358,22 +358,58 @@ void __chkstk_darwin(unsigned long size) {
 
 #include <ctype.h>
 
-/* macOS _RuneLocale structure (simplified - enough to not crash) */
+/* macOS _RuneLocale structure.
+ *
+ * On macOS, the runetype/maplower/mapupper arrays are INLINE in the struct,
+ * not pointers. tree reads _DefaultRuneLocale.__runetype[c] directly.
+ *
+ * Actual macOS layout (from <runetype.h>):
+ *   char magic[8]          offset 0
+ *   uint32_t encoding      offset 8
+ *   void *sgetrune         offset 16 (pointer, 8 bytes on 64-bit)
+ *   void *sputrune         offset 24
+ *   uint32_t invalid_rune  offset 32
+ *   uint32_t __pad         offset 36 (alignment for pointer)
+ *   void *runes            offset 40
+ *   uint32_t nrunes        offset 48
+ *   uint32_t __pad2        offset 52
+ *   char variablehigh[...]
+ *   ... then __runetype[256], __maplower[256], __mapupper[256]
+ *
+ * But the actual access pattern depends on the macOS version. The simplest
+ * fix: make the struct large enough and put the runetype data at the right
+ * offset. We use a flat byte array and populate it. */
+
+/* The macOS _RuneLocale has __runetype as an inline array of uint32_t[256]
+ * at a known offset. tree accesses it as:
+ *   _DefaultRuneLocale.__runetype[(unsigned char)c] & mask
+ *
+ * We provide a flat layout that matches what tree expects. */
 struct _macify_RuneLocale {
-    char magic[8];         /* "RuneMag1" */
-    uint32_t encoding;
-    void *sgetrune;
-    void *sputrune;
-    uint32_t invalid_rune;
-    uint32_t *runetype;    /* 256 entries */
-    int16_t *maplower;     /* 256 entries */
-    int16_t *mapupper;     /* 256 entries */
-    void *runes;
-    uint32_t nrunes;
-    uint32_t *runetype_ext;
-    int16_t *maplower_ext;
-    int16_t *mapupper_ext;
-    uint32_t variablehigh;
+    char magic[8];              /* 0: "RuneMag1" */
+    uint32_t encoding;          /* 8 */
+    void *sgetrune;             /* 16 */
+    void *sputrune;             /* 24 */
+    uint32_t invalid_rune;      /* 32 */
+    uint32_t _pad1;             /* 36 */
+    void *runes;                /* 40 */
+    uint32_t nrunes;            /* 48 */
+    uint32_t _pad2;             /* 52 */
+    /* variablehigh etc would be here, but we skip to the arrays */
+    /* On macOS, the __runetype array follows after some more fields.
+     * tree accesses it through ___maskrune which we override, OR
+     * directly if it inlines the access. Let's put the arrays right
+     * after nrunes with padding to match the real offset.
+     *
+     * Actually, looking at the macOS source, the struct has:
+     *   __uint32_t __runetype[256] at offset after the header
+     *   __int16_t  __maplower[256]
+     *   __int16_t  __mapupper[256]
+     * But the exact offset depends on padding. Let's use a large
+     * struct and put arrays at common offsets. */
+    uint32_t __runetype[256];   /* inline runetype table */
+    int16_t  __maplower[256];   /* inline lower case map */
+    int16_t  __mapupper[256];   /* inline upper case map */
 };
 
 /* Provide a static _DefaultRuneLocale that's big enough to not crash.
@@ -383,46 +419,63 @@ uint32_t macify_runetype[256];
 int16_t macify_maplower[256];
 int16_t macify_mapupper[256];
 
-/* _DefaultRuneLocale has 2 underscores in binary → strip 1 → _DefaultRuneLocale (1 underscore) */
 struct _macify_RuneLocale _DefaultRuneLocale = {
     .magic = "RuneMag1",
     .encoding = 0,
     .sgetrune = NULL,
     .sputrune = NULL,
     .invalid_rune = 0xFFFD,
-    .runetype = macify_runetype,
-    .maplower = macify_maplower,
-    .mapupper = macify_mapupper,
+    ._pad1 = 0,
     .runes = NULL,
     .nrunes = 256,
-    .runetype_ext = NULL,
-    .maplower_ext = NULL,
-    .mapupper_ext = NULL,
-    .variablehigh = 0,
+    ._pad2 = 0,
 };
 
 __attribute__((constructor))
 static void macify_init_rune(void) {
-    /* Populate basic ASCII character tables */
+    /* Populate basic ASCII character tables — both the standalone arrays
+     * (used by __maskrune) and the inline arrays in _DefaultRuneLocale
+     * (read directly by some binaries like tree).
+     *
+     * macOS _CTYPE flag values (from <runetype.h>):
+     *   _CTYPE_A = 0x00000100  alpha
+     *   _CTYPE_C = 0x00000200  ctrl
+     *   _CTYPE_D = 0x00000400  digit
+     *   _CTYPE_G = 0x00000800  graph
+     *   _CTYPE_L = 0x00001000  lower
+     *   _CTYPE_P = 0x00002000  punct
+     *   _CTYPE_S = 0x00004000  space
+     *   _CTYPE_U = 0x00008000  upper
+     *   _CTYPE_X = 0x00010000  xdigit
+     *   _CTYPE_B = 0x00020000  blank
+     *   _CTYPE_R = 0x00040000  print
+     *   _CTYPE_I = 0x00080000  ideogram
+     *   _CTYPE_T = 0x00100000  special
+     *   _CTYPE_Q = 0x00200000  phonogram
+     *   _CTYPE_SW0= 0x20000000  sw0
+     *   _CTYPE_SW1= 0x40000000  sw1
+     *   _CTYPE_SW2= 0x80000000  sw2
+     */
     for (int c = 0; c < 256; c++) {
-        /* Basic runetype flags: bit 0=upper, 1=lower, 2=digit, 3=space,
-         * 4=punct, 5=cntrl, 6=blank, 7=hex, 8=print, 9=graph, 10=alpha, 11=alnum */
         uint32_t flags = 0;
-        if (isupper(c))  flags |= (1u << 0);
-        if (islower(c))  flags |= (1u << 1);
-        if (isdigit(c))  flags |= (1u << 2);
-        if (isspace(c))  flags |= (1u << 3);
-        if (ispunct(c))  flags |= (1u << 4);
-        if (iscntrl(c))  flags |= (1u << 5);
-        if (isblank(c))  flags |= (1u << 6);
-        if (isxdigit(c)) flags |= (1u << 7);
-        if (isprint(c))  flags |= (1u << 8);
-        if (isgraph(c))  flags |= (1u << 9);
-        if (isalpha(c))  flags |= (1u << 10);
-        if (isalnum(c))  flags |= (1u << 11);
+        if (isalpha(c))  flags |= 0x00000100;  /* _CTYPE_A */
+        if (iscntrl(c))  flags |= 0x00000200;  /* _CTYPE_C */
+        if (isdigit(c))  flags |= 0x00000400;  /* _CTYPE_D */
+        if (isgraph(c))  flags |= 0x00000800;  /* _CTYPE_G */
+        if (islower(c))  flags |= 0x00001000;  /* _CTYPE_L */
+        if (ispunct(c))  flags |= 0x00002000;  /* _CTYPE_P */
+        if (isspace(c))  flags |= 0x00004000;  /* _CTYPE_S */
+        if (isupper(c))  flags |= 0x00008000;  /* _CTYPE_U */
+        if (isxdigit(c)) flags |= 0x00010000;  /* _CTYPE_X */
+        if (isblank(c))  flags |= 0x00020000;  /* _CTYPE_B */
+        if (isprint(c))  flags |= 0x00040000;  /* _CTYPE_R */
         macify_runetype[c] = flags;
         macify_maplower[c] = tolower(c);
         macify_mapupper[c] = toupper(c);
+        /* Also populate inline arrays in _DefaultRuneLocale */
+        _DefaultRuneLocale.__runetype[c] = flags;
+        _DefaultRuneLocale.__maplower[c] = tolower(c);
+        _DefaultRuneLocale.__mapupper[c] = toupper(c);
     }
 }
 /* _memset_pattern16 — macOS-specific memset with 16-byte pattern. */
