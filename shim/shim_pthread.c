@@ -1,6 +1,8 @@
 #include "shim.h"
 #include <time.h>
 #include <sched.h>
+#include <sys/mman.h>   /* mprotect */
+#include <string.h>     /* memcpy */
 
 /* macOS clock ID constants differ from Linux:
  *   macOS CLOCK_REALTIME=0, CLOCK_MONOTONIC=6, CLOCK_PROCESS_CPUTIME_ID=12,
@@ -192,7 +194,10 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
     } else {
         glibc_key_used[k] = 1;
         macify_destructors[k] = destructor;
-        *key = (pthread_key_t)k;
+        /* macOS pthread_key_t is unsigned long (8 bytes), but glibc's is
+         * unsigned int (4 bytes). Write the full 8 bytes to match the macOS
+         * ABI, so the macOS binary reads the correct key value. */
+        *(unsigned long *)key = (unsigned long)k;
         r = 0;
     }
     if (getenv("MACIFY_SSL_DEBUG")) {
@@ -281,19 +286,36 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
                              (void *)once_control, (void *)init_routine);
                     (void)write(2, b, strlen(b));
                 }
-                __atomic_store_n((long *)once_control, 1, __ATOMIC_RELEASE);
+
+                /* Debug: check which ret_ globals are 0 after this init */
+                if (ssl_debug && macify_image_header &&
+                    getenv("MACIFY_FORCE_SSL")) {
+                    uint64_t slide = macify_image_header - 0x100000000;
+                    for (int i = 0; ret_global_entries[i].name; i++) {
+                        uint64_t actual = ret_global_entries[i].static_addr + slide;
+                        int *p = (int *)actual;
+                        if (*p == 0) {
+                            char b[256];
+                            int n = snprintf(b, sizeof(b),
+                                "SSL_DEBUG:   FAILED: %s @ 0x%lx = 0\n",
+                                ret_global_entries[i].name, (unsigned long)actual);
+                            (void)write(2, b, n);
+                        }
+                    }
+                }
 
                 /* After the init_routine runs, force ALL OpenSSL
                  * ossl_init_*_ret_ globals to 1 (success) — but ONLY for
                  * curl/wget (which have these globals at the hardcoded
-                 * addresses). For other binaries, skip this entirely. */
+                 * addresses). For other binaries, skip this entirely.
+                 *
+                 * CRITICAL: This MUST happen BEFORE the release store to
+                 * once_control below. If we mark once_control as "done"
+                 * first, a concurrent thread calling RUN_ONCE will see
+                 * "done" but read ret_=0 (not yet forced), causing it to
+                 * treat the init as failed. */
                 static int force_ssl_check = -1;
                 if (force_ssl_check < 0) {
-                    /* Check if the loaded binary is curl/wget by examining
-                     * the image header. If macify_image_header is set AND
-                     * the binary contains the ossl_init_* symbols, we force.
-                     * Simple heuristic: only force if MACIFY_FORCE_SSL env
-                     * var is set (the loader sets this for curl/wget). */
                     force_ssl_check = getenv("MACIFY_FORCE_SSL") ? 1 : 0;
                 }
                 if (force_ssl_check && macify_image_header) {
@@ -304,6 +326,8 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
                         if (*p == 0) *p = 1;
                     }
                 }
+
+                __atomic_store_n((long *)once_control, 1, __ATOMIC_RELEASE);
                 return 0;
             }
             /* CAS failed — another thread claimed it, fall through to wait */
@@ -822,6 +846,32 @@ static void register_ret_global_printer(void) {
  *
  * Called by the macify loader AFTER setting the image header. */
 
+/* Hook globals for OSSL_LIB_CTX_new inline hook.
+ * The hook calls the original OSSL_LIB_CTX_new (via trampoline), then
+ * loads the default provider into the new libctx before returning. */
+static void *(*macify_original_lib_ctx_new)(void) = NULL;
+static void *(*macify_provider_load)(void *, const char *) = NULL;
+
+/* Our hook for OSSL_LIB_CTX_new.
+ * Calling convention: System V AMD64, no args, returns OSSL_LIB_CTX*.
+ * We call the original (via trampoline), then load the default provider. */
+void *macify_ossl_lib_ctx_hook(void) {
+    /* Call original OSSL_LIB_CTX_new */
+    void *ctx = macify_original_lib_ctx_new();
+    if (ctx && macify_provider_load) {
+        /* Load the default provider into this new libctx */
+        void *prov = macify_provider_load(ctx, "default");
+        if (getenv("MACIFY_SSL_DEBUG")) {
+            char b[160];
+            int n = snprintf(b, sizeof(b),
+                "SSL_DEBUG: hook: OSSL_LIB_CTX_new()=%p, OSSL_PROVIDER_load(ctx,\"default\")=%p\n",
+                ctx, prov);
+            (void)write(2, b, n);
+        }
+    }
+    return ctx;
+}
+
 void macify_force_ssl_init_success(void) {
     if (!macify_image_header) return;
     /* static base of the macOS binary is 0x100000000 */
@@ -842,6 +892,148 @@ void macify_force_ssl_init_success(void) {
             int n = snprintf(b, sizeof(b), "SSL_DEBUG:  [%d] %s @ 0x%lx: %d -> 1\n",
                     i, ret_global_entries[i].name, (unsigned long)actual, old);
             (void)write(2, b, n);
+        }
+    }
+
+    /* Explicitly call OPENSSL_init_crypto and OSSL_PROVIDER_load("default")
+     * to ensure the default provider is loaded and activated before SSL_CTX_new_ex.
+     *
+     * The function addresses are hardcoded from the static symbol table:
+     *   OPENSSL_init_crypto @ 0x1005b0dd0
+     *   OSSL_PROVIDER_load   @ 0x10035ac30
+     *
+     * We call them via function pointers computed from the slide.
+     * This is safe because these functions are idempotent (RUN_ONCE guarded). */
+    typedef int (*openssl_init_crypto_fn)(uint64_t, void *);
+    typedef void *(*ossl_provider_load_fn)(void *, const char *);
+
+    openssl_init_crypto_fn init_crypto =
+        (openssl_init_crypto_fn)(0x1005b0dd0UL + slide);
+    ossl_provider_load_fn provider_load =
+        (ossl_provider_load_fn)(0x10035ac30UL + slide);
+
+    /* Initialize OpenSSL crypto (idempotent) */
+    int crypto_ret = init_crypto(0, NULL);
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "SSL_DEBUG: OPENSSL_init_crypto() = %d\n", crypto_ret);
+        (void)write(2, b, n);
+    }
+
+    /* Explicitly load the default provider (idempotent) */
+    void *prov = provider_load(NULL, "default");
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "SSL_DEBUG: OSSL_PROVIDER_load(\"default\") = %p\n", prov);
+        (void)write(2, b, n);
+    }
+
+    /* Test: call EVP_CIPHER_fetch to see if ciphers are available */
+    {
+        typedef void *(*evp_cipher_fetch_fn)(void *, const char *, const char *);
+        evp_cipher_fetch_fn cipher_fetch =
+            (evp_cipher_fetch_fn)(0x100323c00UL + slide);
+        void *cipher = cipher_fetch(NULL, "AES-256-CBC", NULL);
+        if (getenv("MACIFY_SSL_DEBUG")) {
+            char b[128];
+            int n = snprintf(b, sizeof(b), "SSL_DEBUG: EVP_CIPHER_fetch(NULL,\"AES-256-CBC\",NULL) = %p\n", cipher);
+            (void)write(2, b, n);
+        }
+    }
+
+    /* Test: call ssl3_get_tls13_cipher_by_std_name to see if TLS 1.3 ciphers are found */
+    {
+        typedef void *(*ssl3_get_cipher_fn)(const char *);
+        ssl3_get_cipher_fn get_cipher =
+            (ssl3_get_cipher_fn)(0x100190d40UL + slide);
+        void *c1 = get_cipher("TLS_AES_256_GCM_SHA384");
+        void *c2 = get_cipher("TLS_CHACHA20_POLY1305_SHA256");
+        void *c3 = get_cipher("TLS_AES_128_GCM_SHA256");
+        if (getenv("MACIFY_SSL_DEBUG")) {
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "SSL_DEBUG: ssl3_get_tls13_cipher_by_std_name:\n"
+                "  TLS_AES_256_GCM_SHA384 = %p\n"
+                "  TLS_CHACHA20_POLY1305_SHA256 = %p\n"
+                "  TLS_AES_128_GCM_SHA256 = %p\n",
+                c1, c2, c3);
+            (void)write(2, b, n);
+        }
+    }
+
+    /* Test: call SSL_CTX_new to see if it succeeds in isolation */
+    {
+        typedef void *(*ssl_ctx_new_fn)(void *);
+        ssl_ctx_new_fn ctx_new =
+            (ssl_ctx_new_fn)(0x1001a5020UL + slide);
+        /* TLS_method is at... let me find it */
+        typedef void *(*tls_method_fn)(void);
+        tls_method_fn tls_method =
+            (tls_method_fn)(0x10018e650UL + slide);  /* TLS_method */
+        void *method = tls_method();
+        void *ctx = ctx_new(method);
+        if (getenv("MACIFY_SSL_DEBUG")) {
+            /* Call ERR_get_error to see what error was queued */
+            typedef unsigned long (*err_get_error_fn)(void);
+            err_get_error_fn get_err =
+                (err_get_error_fn)(0x1003107c0UL + slide);
+            unsigned long err1 = get_err();
+            unsigned long err2 = get_err();
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "SSL_DEBUG: SSL_CTX_new(method=%p) = %p, ERR=%#lx, ERR2=%#lx\n",
+                method, ctx, err1, err2);
+            (void)write(2, b, n);
+        }
+    }
+
+    /* Inline-hook OSSL_LIB_CTX_new so that every NEW libctx also gets the
+     * default provider loaded. curl creates its own OSSL_LIB_CTX via
+     * OSSL_LIB_CTX_new() and passes it to SSL_CTX_new_ex. Without the
+     * default provider loaded in that libctx, EVP_CIPHER_fetch returns NULL
+     * and SSL_CTX_new_ex fails with "reason(20)".
+     *
+     * The hook works by:
+     * 1. Saving the first 5 bytes of OSSL_LIB_CTX_new (push rbp; mov rbp,rsp; push rbx)
+     * 2. Writing a 5-byte JMP (E9 rel32) to our hook function
+     * 3. Creating a trampoline that executes the saved 5 bytes + JMP back
+     * 4. Our hook calls the trampoline (original function), then calls
+     *    OSSL_PROVIDER_load(new_libctx, "default") before returning. */
+    {
+        /* OSSL_LIB_CTX_new @ static 0x10034cca0 */
+        uint8_t *target = (uint8_t *)(0x10034cca0UL + slide);
+
+        /* Make the page writable */
+        uintptr_t page = (uintptr_t)target & ~0xFFFUL;
+        if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            /* Save original first 5 bytes */
+            static uint8_t saved_bytes[5];
+            static int hook_installed = 0;
+            if (!hook_installed) {
+                memcpy(saved_bytes, target, 5);
+                hook_installed = 1;
+
+                /* Create trampoline: saved bytes + JMP back to target+5 */
+                static uint8_t trampoline[16] __attribute__((aligned(4096)));
+                memcpy(trampoline, saved_bytes, 5);
+                trampoline[5] = 0xE9;  /* JMP rel32 */
+                uint32_t jmp_back = (uint32_t)((uintptr_t)(target + 5) - (uintptr_t)(trampoline + 10));
+                memcpy(trampoline + 6, &jmp_back, 4);
+
+                /* Write JMP to our hook at the start of target */
+                target[0] = 0xE9;  /* JMP rel32 */
+                uint32_t jmp_to_hook = (uint32_t)((uintptr_t)macify_ossl_lib_ctx_hook - (uintptr_t)(target + 5));
+                memcpy(target + 1, &jmp_to_hook, 4);
+
+                /* Store trampoline and provider_load addresses for the hook */
+                macify_original_lib_ctx_new = (void *(*)(void))trampoline;
+                macify_provider_load = provider_load;
+
+                if (getenv("MACIFY_SSL_DEBUG")) {
+                    const char msg[] = "SSL_DEBUG: hooked OSSL_LIB_CTX_new\n";
+                    (void)write(2, msg, sizeof(msg)-1);
+                }
+            }
         }
     }
 }

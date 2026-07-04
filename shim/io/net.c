@@ -619,7 +619,6 @@ ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
         macify_net_dbg(b);
     }
     TRANSLATE_ERRNO(r);
-        errno = macify_linux_to_macos_errno(saved);
     return r;
 }
 
@@ -639,7 +638,6 @@ ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) {
         macify_net_dbg(b);
     }
     TRANSLATE_ERRNO(r);
-        errno = macify_linux_to_macos_errno(saved);
     return r;
 }
 
@@ -660,7 +658,6 @@ ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) {
         macify_net_dbg(b);
     }
     TRANSLATE_ERRNO(r);
-        errno = macify_linux_to_macos_errno(saved);
     return r;
 }
 
@@ -702,7 +699,6 @@ ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) {
         macify_net_dbg(b);
     }
     TRANSLATE_ERRNO(r);
-        errno = macify_linux_to_macos_errno(saved);
     return r;
 }
 
@@ -720,7 +716,6 @@ ssize_t macify_recvmsg(int sockfd, void *msg, int flags) {
         macify_net_dbg(b);
     }
     TRANSLATE_ERRNO(r);
-        errno = macify_linux_to_macos_errno(saved);
     return r;
 }
 
