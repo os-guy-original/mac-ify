@@ -75,4 +75,18 @@ void init_real_io_funcs(void);
     if (!real_mmap) init_real_io_funcs(); \
 } while (0)
 
+/* ── Sockaddr translation ────────────────────────────────────── */
+
+#define MACOS_AF_INET6  30
+#define LINUX_AF_INET6  10
+
+/* Translate macOS sockaddr → Linux sockaddr. Returns 1 if it was a macOS
+ * sockaddr (and linux_addr is filled), 0 if it was already Linux format.
+ * Defined in net.c. */
+int macos_to_linux_sockaddr(const void *macos_addr, uint8_t *linux_addr, socklen_t *addrlen);
+
+/* Translate Linux sockaddr → macOS sockaddr (in-place).
+ * Defined in net.c (not inline — used across multiple .c files). */
+void linux_to_macos_sockaddr(void *addr, socklen_t addrlen);
+
 #endif /* IO_INTERNAL_H */

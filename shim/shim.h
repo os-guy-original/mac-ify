@@ -1,9 +1,4 @@
-/* shim.h — shared header for the mac-ify libSystem shim.
- *
- * All shim_*.c files include this. It provides common includes,
- * shared types, extern declarations for cross-file globals, and
- * macOS/Linux ABI constants.
- */
+/* shim.h — shared header for the mac-ify libSystem shim. */
 #ifndef MACIFY_SHIM_H
 #define MACIFY_SHIM_H
 
@@ -32,99 +27,64 @@
 #include <link.h>
 #include <elf.h>
 
-/* ── Shared types ─────────────────────────────────────────────── */
+/* ── Helper: lazy-load a glibc function ─────────────────────────
+ * Usage: REAL_FUNC(write, ssize_t, (int fd, const void *buf, size_t n))
+ * Expands to a static pointer that's resolved on first use via dlsym. */
+#define REAL_FUNC(name, ret, args) \
+    static ret (*real_##name)args = NULL; \
+    if (!real_##name) real_##name = dlsym(RTLD_NEXT, #name)
 
-/* macOS TLV descriptor (x86_64). Code accesses a TLV by calling
- * desc->thunk(desc), which returns a pointer to the variable's storage. */
+#define REAL_FUNC_DECL(name, ret, args) \
+    static ret (*real_##name)args
+
+/* ── Types ── */
+
 struct tlv_descriptor {
     void *(*thunk)(struct tlv_descriptor *);
     void *key;
     unsigned long offset;
 };
 
-/* macOS struct sigaction layout (x86_64):
- *   offset 0:  handler function pointer (8 bytes)
- *   offset 8:  sa_mask (4 bytes, sigset_t = uint32_t)
- *   offset 12: sa_flags (4 bytes)
- * Linux's is ~144 bytes with a 128-byte sa_mask. */
 struct macos_sigaction {
     void (*handler)(int);
     uint32_t mask;
     int flags;
 };
 
-/* macOS pthread_attr_t is 16 bytes (long sig + pointer); glibc's is 56.
- * We store a heap-allocated glibc attr pointer in the macOS struct. */
 struct macos_pthread_attr {
     long sig;
     void *opaque;
 };
 
-/* ── Shared globals (extern — defined in their respective .c files) ── */
+/* ── Globals ── */
 
-/* shim_core.c */
 extern char **environ;
 extern char *___progname;
 extern char *__progname;
 extern uintptr_t __stack_chk_guard;
 extern uintptr_t _STACK_CHK_GUARD;
-extern FILE *__stderrp;
-extern FILE *__stdinp;
-extern FILE *__stdoutp;
-
-/* Linux → macOS errno translator (defined in shim_core.c). Call this
- * before returning -1 from any shim function that wraps a Linux syscall
- * whose errno is then read by the macOS binary. */
-int macify_linux_to_macos_errno(int linux_errno);
-
-/* shim_pthread.c — our allocated stack info (set by the loader) */
+extern FILE *__stderrp, *__stdinp, *__stdoutp;
 extern void *macify_main_stack_base;
 extern size_t macify_main_stack_size;
+extern void *(*real_dlsym)(void *, const char *);
+extern uintptr_t macify_text_lo, macify_text_hi;
+extern uint32_t macify_runetype[256];
+extern int16_t macify_maplower[256], macify_mapupper[256];
 
-/* shim_signal.c */
-extern int (*real_sigaction)(int, const struct sigaction *, struct sigaction *);
+/* ── Functions ── */
+
+int macify_linux_to_macos_errno(int linux_errno);
+void __macify_set_text_range(uint64_t lo, uint64_t hi);
+int macify_caller_is_macos_text(void *ret_addr);
 void macify_crash_handler(int sig, siginfo_t *info, void *uctx);
 
-/* shim_io.c */
-extern void *(*real_dlsym)(void *, const char *);
+/* ── Constants ── */
 
-/* __TEXT range of the loaded macOS main image, set by the loader via
- * __macify_set_text_range(). Used by the network shim functions to decide
- * whether to translate Linux errno → macOS errno before returning.
- *
- * Background: errno translation is needed when the macOS binary reads errno
- * directly (it expects macOS errno values). But when a Linux library such
- * as libgnutls.so.30 calls our shim (because we override the global symbol,
- * e.g. for `recv`), the Linux library expects Linux errno values. If we
- * translate the errno in that case, EAGAIN (Linux 11) becomes 35 (macOS
- * EAGAIN), which on Linux is EDEADLK — GnuTLS misreads this as a fatal
- * error and the TLS handshake stalls forever.
- *
- * Heuristic: if `__builtin_return_address(0)` (the address of the
- * instruction immediately after the `call` site) is inside the macOS
- * binary's __TEXT segment, the caller is the macOS binary and we translate
- * errno. Otherwise the caller is a Linux library and we leave errno alone. */
-extern uintptr_t macify_text_lo;
-extern uintptr_t macify_text_hi;
-void __macify_set_text_range(uint64_t lo, uint64_t hi);
-
-/* Returns 1 if the immediate caller (by return address) is the macOS main
- * image's __TEXT segment. Used to gate errno translation. */
-int macify_caller_is_macos_text(void *ret_addr);
-
-/* shim_misc.c — rune/locale tables */
-extern uint32_t macify_runetype[256];
-extern int16_t macify_maplower[256];
-extern int16_t macify_mapupper[256];
-
-/* ── Shared macros ────────────────────────────────────────────── */
-
-/* macOS pthread synchronization object signatures */
 #define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u
 #define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
 #define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
-#define MACOS_PTHREAD_ATTR_SIG   0x54485241
-#define MACOS_PTHREAD_ONCE_INIT  0x30B1BCBA
+#define MACOS_PTHREAD_ATTR_SIG   0x54485241u
+#define MACOS_PTHREAD_ONCE_INIT  0x30B1BCBAu
 #define MACIFY_MAX_KEYS 256
 
-#endif /* MACIFY_SHIM_H */
+#endif

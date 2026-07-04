@@ -599,7 +599,7 @@ ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) {
 }
 
 /* Forward declaration — defined after accept/getsockname section */
-static void linux_to_macos_sockaddr(void *addr, socklen_t addrlen);
+void linux_to_macos_sockaddr(void *addr, socklen_t addrlen);
 
 /* recvfrom — convert Linux sockaddr to macOS format */
 ssize_t macify_recvfrom(int sockfd, void *buf, size_t len, int flags,
@@ -674,7 +674,7 @@ int macify_accept(int sockfd, void *addr, socklen_t *addrlen) {
  * Linux sockaddr: [sa_family(2)] [data(14)]
  * macOS sockaddr:  [sa_len(1)] [sa_family(1)] [data(14)]
  * curl reads sa_family from offset 1 (macOS layout), so we must shift. */
-static void linux_to_macos_sockaddr(void *addr, socklen_t addrlen) {
+void linux_to_macos_sockaddr(void *addr, socklen_t addrlen) {
     if (!addr || addrlen < 2) return;
     uint8_t *p = (uint8_t *)addr;
     uint8_t linux_family = p[0];  /* Linux: family is at offset 0 (low byte) */

@@ -74,7 +74,10 @@ ssize_t macify_write(int fd, const void *buf, size_t count) __asm__("write");
 ssize_t macify_write(int fd, const void *buf, size_t count) {
     static ssize_t (*real_write)(int, const void *, size_t) = NULL;
     if (!real_write) real_write = dlsym(RTLD_NEXT, "write");
-    return real_write(fd, buf, count);
+    ssize_t r = real_write(fd, buf, count);
+    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+        errno = macify_linux_to_macos_errno(errno);
+    return r;
 }
 
 ssize_t macify_writev(int fd, const struct iovec *iov, int iovcnt) __asm__("writev");

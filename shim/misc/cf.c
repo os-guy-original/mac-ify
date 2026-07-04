@@ -142,6 +142,7 @@ void macify_CFRelease(void *cf) {
 }
 
 /* CFStringCreateWithCString — create a fake CFString from a C string. */
+void *macify_CFStringCreateWithCString(void *alloc, const char *cstr, unsigned int encoding) __asm__("CFStringCreateWithCString");
 void *macify_CFStringCreateWithCString(void *alloc, const char *cstr, unsigned int encoding) {
     (void)alloc; (void)encoding;
     if (!cstr) return NULL;
@@ -153,6 +154,7 @@ void *macify_CFStringCreateWithCString(void *alloc, const char *cstr, unsigned i
 }
 
 /* CFStringGetCString — extract the C string from a fake CFString. */
+int macify_CFStringGetCString(const void *cfstr, char *buf, long buf_size, unsigned int encoding) __asm__("CFStringGetCString");
 int macify_CFStringGetCString(const void *cfstr, char *buf, long buf_size, unsigned int encoding) {
     (void)encoding;
     if (!cfstr || !buf || buf_size <= 0) return 0;
@@ -163,6 +165,7 @@ int macify_CFStringGetCString(const void *cfstr, char *buf, long buf_size, unsig
     return 1;
 }
 
+long macify_CFStringGetLength(const void *cfstr) __asm__("CFStringGetLength");
 long macify_CFStringGetLength(const void *cfstr) {
     if (!cfstr) return 0;
     const struct sc_obj *s = (const struct sc_obj *)cfstr;
@@ -170,6 +173,7 @@ long macify_CFStringGetLength(const void *cfstr) {
     return (long)s->count;
 }
 
+long macify_CFStringGetMaximumSizeForEncoding(long length, unsigned int encoding) __asm__("CFStringGetMaximumSizeForEncoding");
 long macify_CFStringGetMaximumSizeForEncoding(long length, unsigned int encoding) {
     (void)encoding;
     return length * 4 + 1;  /* worst case UTF-8 expansion */
@@ -245,18 +249,8 @@ const char *CFStringGetCStringPtr(void *theString, unsigned long encoding) {
     return NULL;
 }
 
-/* CFStringGetLength: return the number of characters in a CFString.
- * Return 0 for our NULL/stub strings. */
-long CFStringGetLength(void *theString) {
-    (void)theString;
-    return 0;
-}
-
-/* CFTimeZoneCopySystem: return a copy of the system timezone.
- * Return NULL — the caller should handle this gracefully. */
-void *CFTimeZoneCopySystem(void) {
-    return NULL;
-}
+/* CFTimeZoneCopySystem: return NULL — the caller handles gracefully. */
+void *CFTimeZoneCopySystem(void) { return NULL; }
 
 /* CFTimeZoneGetName: return the name of a timezone.
  * Return NULL — the caller should handle this gracefully. */

@@ -11,10 +11,10 @@ static void *macify_sc_fake_handle = (void *)&macify_sc_fake_handle;
 void *macify_SCDynamicStoreCreate(void *alloc, const void *name, void *cb, void *ctx);
 void *macify_SCDynamicStoreCopyValue(void *store, const void *key);
 void macify_CFRelease(void *cf);
-void *macify_CFStringCreateWithCString(void *alloc, const char *cstr, unsigned int encoding);
-int macify_CFStringGetCString(const void *cfstr, char *buf, long buf_size, unsigned int encoding);
-long macify_CFStringGetLength(const void *cfstr);
-long macify_CFStringGetMaximumSizeForEncoding(long length, unsigned int encoding);
+void *CFStringCreateWithCString(void *alloc, const char *cstr, unsigned int encoding);
+int CFStringGetCString(const void *cfstr, char *buf, long buf_size, unsigned int encoding);
+long CFStringGetLength(const void *cfstr);
+long CFStringGetMaximumSizeForEncoding(long length, unsigned int encoding);
 long CFArrayGetCount(const void *arr);
 const void *CFArrayGetValueAtIndex(const void *arr, long idx);
 const void *CFDictionaryGetValue(const void *dict, const void *key);
@@ -62,13 +62,13 @@ void *dlsym(void *handle, const char *symbol) {
         else if (strcmp(symbol, "CFRelease") == 0)
             return (void *)macify_CFRelease;
         else if (strcmp(symbol, "CFStringCreateWithCString") == 0)
-            return (void *)macify_CFStringCreateWithCString;
+            return (void *)CFStringCreateWithCString;
         else if (strcmp(symbol, "CFStringGetCString") == 0)
-            return (void *)macify_CFStringGetCString;
+            return (void *)CFStringGetCString;
         else if (strcmp(symbol, "CFStringGetLength") == 0)
-            return (void *)macify_CFStringGetLength;
+            return (void *)CFStringGetLength;
         else if (strcmp(symbol, "CFStringGetMaximumSizeForEncoding") == 0)
-            return (void *)macify_CFStringGetMaximumSizeForEncoding;
+            return (void *)CFStringGetMaximumSizeForEncoding;
         else if (strcmp(symbol, "CFArrayGetCount") == 0)
             return (void *)CFArrayGetCount;
         else if (strcmp(symbol, "CFArrayGetValueAtIndex") == 0)
