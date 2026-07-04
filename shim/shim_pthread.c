@@ -964,28 +964,37 @@ void macify_force_ssl_init_success(void) {
     /* Test: check provider availability */
     {
         unsigned long (*err_get_error_fn)(void) = (unsigned long (*)(void))(uintptr_t)(0x1003107c0UL + slide);
-        int (*prov_avail_fn)(void *, const char *) = (int (*)(void *, const char *))(uintptr_t)(0x10035e400UL + slide);
-        int (*rand_status_fn)(void) = (int (*)(void))(uintptr_t)(0x1004446a0UL + slide);
         void *(*tls_client_method_fn)(void) = (void *(*)(void))(uintptr_t)(0x10018e6f0UL + slide);
         void *(*ssl_ctx_new_ex_fn)(void *, void *, void *) = (void *(*)(void *, void *, void *))(uintptr_t)(0x1001a4990UL + slide);
+        /* ERR_get_error_all gives file, line, function, data */
+        unsigned long (*err_get_all_fn)(const char **, int *, const char **, const char **, int *) =
+            (unsigned long (*)(const char **, int *, const char **, const char **, int *))(uintptr_t)(0x100310ba0UL + slide);
+        void *(*sk_new_null_fn)(void) = (void *(*)(void))(uintptr_t)(0x1004846e0UL + slide);
+        int (*sk_num_fn)(void *) = (int (*)(void *))(uintptr_t)(0x100485190UL + slide);
+        /* CONF_parse_list(list, sep, nosplit, fn, arg) */
+        int (*conf_parse_list_fn)(const char *, char, int, void *, void *) =
+            (int (*)(const char *, char, int, void *, void *))(uintptr_t)(0x100290b10UL + slide);
 
-        int avail_default = prov_avail_fn(NULL, "default");
-        int rand_ok = rand_status_fn();
+        /* Test: sk_new_null + sk_num work? */
+        void *sk = sk_new_null_fn();
+        int sk_count = sk ? sk_num_fn(sk) : -999;
+
         void *method = tls_client_method_fn();
-        /* Call SSL_CTX_new_ex(NULL, NULL, method) — same as curl does */
         void *ctx = ssl_ctx_new_ex_fn(NULL, NULL, method);
-        unsigned long e1 = err_get_error_fn();
+
+        const char *file = NULL, *func = NULL, *data = NULL;
+        int line = 0, flags = 0;
+        unsigned long e1 = err_get_all_fn(&file, &line, &func, &data, &flags);
 
         char b[512];
         int n = snprintf(b, sizeof(b),
-            "SSL_DEBUG: provider check:\n"
-            "  OSSL_PROVIDER_available(NULL,\"default\")=%d\n"
-            "  RAND_status()=%d\n"
-            "  TLS_client_method()=%p\n"
-            "  SSL_CTX_new_ex(NULL,NULL,method)=%p\n"
-            "  ERR1=%#lx\n",
-            avail_default, rand_ok, method, ctx, e1);
+            "SSL_DEBUG: SSL_CTX_new_ex trace:\n"
+            "  sk_new_null=%p sk_num=%d\n"
+            "  ctx=%p ERR=%#lx line=%d\n",
+            sk, sk_count, ctx, e1, line);
         (void)write(2, b, n);
+        (void)err_get_error_fn;
+        (void)conf_parse_list_fn;
     }
 
     /* Note: we previously tried inline-hooking OSSL_LIB_CTX_new to load the
