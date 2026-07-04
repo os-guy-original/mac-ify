@@ -101,6 +101,10 @@ void jump_to_entry(uint64_t entry, uint64_t stack_top) {
 
 __attribute__((noreturn))
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
+    /* The asm block switches to the macOS binary's stack, calls main(),
+     * then returns here. We flush stdio buffers before exiting because
+     * macOS binaries use printf/fwrite which buffer output internally. */
+    int ret;
     __asm__ volatile (
         "mov %[entry], %%r11\n\t"          /* save entry in r11 */
         "mov %[stk], %%rsp\n\t"            /* switch to new stack */
@@ -121,13 +125,21 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         "jne 1b\n\t"
         /* Call main(argc, argv, envp, apple) */
         "call *%%r11\n\t"
-        /* main() returned; exit with return value */
-        "mov %%eax, %%edi\n\t"
+        /* main() returned; save return value */
+        "mov %%eax, %[ret]\n\t"
+        : [ret] "=r"(ret)
+        : [entry] "r"(entry), [stk] "r"(stack_top)
+        : "rax", "rcx", "rdx", "rsi", "rdi", "r11", "memory"
+    );
+    /* Flush stdio buffers before exiting — macOS binaries use buffered I/O */
+    fflush(NULL);
+    __asm__ volatile (
+        "mov %[code], %%edi\n\t"
         "mov $231, %%eax\n\t"             /* SYS_exit_group */
         "syscall\n\t"
         :
-        : [entry] "r"(entry), [stk] "r"(stack_top)
-        : "rax", "rcx", "rdx", "rsi", "rdi", "r11", "memory"
+        : [code] "r"(ret)
+        : "rax", "rdi"
     );
     __builtin_unreachable();
 }
