@@ -961,40 +961,6 @@ void macify_force_ssl_init_success(void) {
         }
     }
 
-    /* Test: check provider availability */
-    {
-        void *(*sk_new_null_fn)(void) = (void *(*)(void))(uintptr_t)(0x1004846e0UL + slide);
-        int (*sk_num_fn)(void *) = (int (*)(void *))(uintptr_t)(0x100485190UL + slide);
-        int (*sk_push_fn)(void *, void *) = (int (*)(void *, void *))(uintptr_t)(0x100484fe0UL + slide);
-        void *(*ssl3_get_cipher_fn)(const char *) = (void *(*)(const char *))(uintptr_t)(0x100190d40UL + slide);
-        void *(*tls_client_method_fn)(void) = (void *(*)(void))(uintptr_t)(0x10018e6f0UL + slide);
-        void *(*ssl_ctx_new_ex_fn)(void *, void *, void *) = (void *(*)(void *, void *, void *))(uintptr_t)(0x1001a4990UL + slide);
-        unsigned long (*err_get_all_fn)(const char **, int *, const char **, const char **, int *) =
-            (unsigned long (*)(const char **, int *, const char **, const char **, int *))(uintptr_t)(0x100310ba0UL + slide);
-
-        /* Get a real cipher */
-        void *cipher = ssl3_get_cipher_fn("TLS_AES_256_GCM_SHA384");
-        /* Create a stack and push the cipher */
-        void *sk = sk_new_null_fn();
-        int push_ret = sk ? sk_push_fn(sk, cipher) : -999;
-        int count = sk ? sk_num_fn(sk) : -999;
-
-        void *method = tls_client_method_fn();
-        void *ctx = ssl_ctx_new_ex_fn(NULL, NULL, method);
-
-        const char *file = NULL, *func = NULL, *data = NULL;
-        int line = 0, flags = 0;
-        unsigned long e1 = err_get_all_fn(&file, &line, &func, &data, &flags);
-
-        char b[512];
-        int n = snprintf(b, sizeof(b),
-            "SSL_DEBUG: sk_push test:\n"
-            "  cipher=%p sk=%p sk_push=%d sk_num=%d\n"
-            "  ctx=%p ERR=%#lx line=%d\n",
-            cipher, sk, push_ret, count, ctx, e1, line);
-        (void)write(2, b, n);
-    }
-
     /* Note: we previously tried inline-hooking OSSL_LIB_CTX_new to load the
      * default provider into new libctxs, but curl doesn't call OSSL_LIB_CTX_new
      * (it uses the global default libctx). The hook also caused a segfault
