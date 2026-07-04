@@ -2112,7 +2112,18 @@ def build_hello_tlv():
         BIND_OPCODE_DONE,
     ])
 
-    bind_fileoff = data_fileoff + data_filesize
+    # Rebase bytecodes: rebase the pointer in __thread_data (points to msg)
+    # __thread_data is at offset thread_data_off in __DATA segment (index 2)
+    rebase_bc = bytearray([
+        REBASE_OPCODE_SET_TYPE_IMM | REBASE_TYPE_POINTER,
+        REBASE_OPCODE_SET_SEGMENT_RELATIVE_OFFSET_ULEB | 2,
+    ]) + uleb128(thread_data_off) + bytearray([
+        REBASE_OPCODE_DO_REBASE_IMM_TIMES | 1,
+        REBASE_OPCODE_DONE,
+    ])
+
+    rebase_fileoff = data_fileoff + data_filesize
+    bind_fileoff = rebase_fileoff + len(rebase_bc)
     total_size = bind_fileoff + len(bind_bc)
 
     # Segments
@@ -2144,7 +2155,8 @@ def build_hello_tlv():
         VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE,
         data_nsects, 0) + got_section + tlv_vars_section + thread_data_section
 
-    dyld_info = dyld_info_command(bind_off=bind_fileoff, bind_size=len(bind_bc))
+    dyld_info = dyld_info_command(rebase_off=rebase_fileoff, rebase_size=len(rebase_bc),
+                                  bind_off=bind_fileoff, bind_size=len(bind_bc))
     main_cmd = main_command(entryoff=code_offset)
 
     header = mach_header(ncmds=ncmds, sizeofcmds=sizeofcmds, flags=0)
@@ -2161,6 +2173,7 @@ def build_hello_tlv():
     result += struct.pack('<QQQ', 0, 0, 0)  # __got[0,1,2] = 0
     result += tlv_desc                       # __thread_vars[0]
     result += thread_data                    # __thread_data[0] = msg ptr
+    result += rebase_bc
     result += bind_bc
 
     # Patch code displacements

@@ -563,8 +563,13 @@ int main(int argc, char **argv, char **envp) {
                                                * gets the full crash dump too */
         }
         if (g_verbose) { const char m[] = "CHAINED FIXUPS DONE\n"; write(2, m, sizeof(m)-1); }
+        /* Clear errno before entering the macOS binary. Our shim's
+         * constructor code (sigaction, dladdr, etc.) may set errno,
+         * and macOS binaries expect errno to be 0 at program start. */
+        errno = 0;
         call_main_and_exit(g_entry_rip, stack_top);
     } else {
+        errno = 0;
         jump_to_entry(g_entry_rip, stack_top);
     }
 }
