@@ -6,10 +6,19 @@
  */
 
 uint64_t setup_stack(int argc, char **argv, char **envp, void **out_stack_base, size_t *out_stack_size) {
-    const size_t stack_size = 64 * 1024 * 1024;  /* 64MB — Go needs a large stack */
+    /* Stack size: 8MB is enough for most binaries. Go binaries need more
+     * because Go's runtime sets g0's stack to (rsp - 0x10000) and uses
+     * deep recursion during init. We try 64MB first, then fall back. */
+    size_t stack_size = 64 * 1024 * 1024;
     void *stack = mmap(NULL, stack_size,
                        PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (stack == MAP_FAILED) {
+        stack_size = 8 * 1024 * 1024;
+        stack = mmap(NULL, stack_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
     if (stack == MAP_FAILED) { perror("mmap stack"); exit(1); }
 
     /* Export stack base/size so the loader can pass it to the shim via

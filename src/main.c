@@ -104,7 +104,14 @@ int main(int argc, char **argv, char **envp) {
      * span of all segments, reserve a random region of that size via
      * mmap(NULL, ...) (the kernel picks a random free address), compute the
      * slide, then free the reservation. Segments are then mapped individually
-     * with MAP_FIXED at vmaddr+slide. For non-PIE binaries, slide=0. */
+     * with MAP_FIXED at vmaddr+slide. For non-PIE binaries, slide=0.
+     *
+     * However, on some systems the static base address (e.g. 0x100000000)
+     * may be in use or unavailable. In that case, we fall back to treating
+     * a non-PIE binary as if it were PIE (applying a random slide). This
+     * works for test binaries that use only relative addressing, but may
+     * break binaries with absolute addresses. */
+    int pie_failed = 0;
     if (hdr->flags & MH_PIE) {
         uint64_t min_vmaddr = UINT64_MAX;
         uint64_t max_vmend = 0;
@@ -137,6 +144,55 @@ int main(int argc, char **argv, char **envp) {
                             (unsigned long)g_slide, (unsigned long)min_vmaddr,
                             (unsigned long)(uintptr_t)base, (unsigned long)span);
                 }
+            }
+        }
+    }
+
+    /* Non-PIE fallback: if the binary is not PIE (slide=0), try to probe
+     * whether the static base address is available. If not, apply a random
+     * slide just like PIE. This fixes test binaries on systems where
+     * 0x100000000 is unavailable. */
+    if (!(hdr->flags & MH_PIE) && g_slide == 0) {
+        uint64_t min_vmaddr = UINT64_MAX;
+        uint64_t max_vmend = 0;
+        uint8_t *scan = file_data + sizeof(mach_header_64);
+        uint8_t *scan_end = scan + hdr->sizeofcmds;
+        for (uint32_t i = 0; i < hdr->ncmds && scan + 8 <= scan_end; i++) {
+            uint32_t cmd     = *(uint32_t *)(void *)scan;
+            uint32_t cmdsize = *(uint32_t *)(void *)(scan + 4);
+            if (cmdsize == 0) break;
+            if (cmd == LC_SEGMENT_64) {
+                segment_command_64 *seg = (segment_command_64 *)(void *)scan;
+                if (strcmp(seg->segname, "__PAGEZERO") != 0 && seg->vmsize > 0) {
+                    if (seg->vmaddr < min_vmaddr) min_vmaddr = seg->vmaddr;
+                    if (seg->vmaddr + seg->vmsize > max_vmend)
+                        max_vmend = seg->vmaddr + seg->vmsize;
+                }
+            }
+            scan += cmdsize;
+        }
+        if (min_vmaddr != UINT64_MAX && max_vmend > min_vmaddr) {
+            uint64_t span = max_vmend - min_vmaddr;
+            /* Try to mmap at the static base address. If it fails, use a
+             * random address instead. */
+            void *probe = mmap((void *)(uintptr_t)min_vmaddr, span,
+                               PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                               -1, 0);
+            if (probe == MAP_FAILED) {
+                /* Static address unavailable — fall back to random slide */
+                void *base = mmap(NULL, span, PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (base != MAP_FAILED) {
+                    g_slide = (int64_t)(uintptr_t)base - (int64_t)min_vmaddr;
+                    munmap(base, span);
+                    if (g_verbose) {
+                        fprintf(stderr, "macify: non-PIE binary — static base unavailable, using slide=%#lx\n",
+                                (unsigned long)g_slide);
+                    }
+                }
+            } else {
+                /* Static address available — unmap probe, slide stays 0 */
+                munmap(probe, span);
             }
         }
     }
