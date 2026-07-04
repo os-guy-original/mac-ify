@@ -46,6 +46,37 @@ int main(int argc, char **argv, char **envp) {
     uint8_t *file_data = load_file(path, &file_size);
     if (!file_data) return 1;
 
+    if (file_size < 4) {
+        fprintf(stderr, "macify: file too small (%zu bytes)\n", file_size);
+        return 1;
+    }
+
+    /* Handle fat/universal binaries (FAT_MAGIC = 0xCAFEBABE).
+     * Extract the x86_64 slice and adjust file_data/file_size. */
+    uint32_t magic_be = *(uint32_t *)file_data;
+    if (magic_be == 0xBEBAFECA) {  /* 0xCAFEBABE in little-endian */
+        if (file_size < 8) {
+            fprintf(stderr, "macify: fat binary too small\n");
+            return 1;
+        }
+        uint32_t nfat = __builtin_bswap32(*(uint32_t *)(file_data + 4));
+        for (uint32_t i = 0; i < nfat && i < 16; i++) {
+            uint32_t *fat_arch = (uint32_t *)(file_data + 8 + i * 20);
+            uint32_t cputype = __builtin_bswap32(fat_arch[0]);
+            uint32_t offset  = __builtin_bswap32(fat_arch[2]);
+            uint32_t size    = __builtin_bswap32(fat_arch[3]);
+            if (cputype == 0x01000007) {  /* CPU_TYPE_X86_64 */
+                if (offset + size > file_size) {
+                    fprintf(stderr, "macify: fat binary x86_64 slice extends past EOF\n");
+                    return 1;
+                }
+                file_data = file_data + offset;
+                file_size = size;
+                break;
+            }
+        }
+    }
+
     if (file_size < sizeof(mach_header_64)) {
         fprintf(stderr, "macify: file too small (%zu bytes) to be Mach-O\n", file_size);
         return 1;
