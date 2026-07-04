@@ -288,6 +288,132 @@ int sigismember(const sigset_t *set, int signum) {
     return (mask & (1u << (signum - 1))) ? 1 : 0;
 }
 
+/* ── pthread_sigmask / sigprocmask ────────────────────────────
+ *
+ * macOS sigset_t = 4 bytes (uint32_t), Linux sigset_t = 128 bytes.
+ * Go's runtime calls pthread_sigmask with a 4-byte sigset, but glibc's
+ * pthread_sigmask reads 128 bytes, getting garbage in bytes 4-127.
+ * This causes EINVAL for signals > 31, making Go abort during init.
+ *
+ * We override to translate between 4-byte (macOS) and 128-byte (Linux)
+ * sigsets. The caller check ensures we only translate for macOS callers;
+ * glibc's internal calls pass through unmodified. */
+
+/* Expand a 4-byte macOS sigset to a 128-byte Linux sigset */
+static void macos_to_linux_sigset(const void *macos_set, sigset_t *linux_set) {
+    uint32_t macos_mask = *(const uint32_t *)macos_set;
+    /* Use glibc's sigemptyset (not our override) to properly zero 128 bytes */
+    static int (*real_sigemptyset)(sigset_t *) = NULL;
+    if (!real_sigemptyset) real_sigemptyset = dlsym(RTLD_NEXT, "sigemptyset");
+    real_sigemptyset(linux_set);
+    for (int i = 1; i <= 31; i++) {
+        if (macos_mask & (1u << (i - 1))) {
+            /* Use glibc's sigaddset */
+            static int (*real_sigaddset)(sigset_t *, int) = NULL;
+            if (!real_sigaddset) real_sigaddset = dlsym(RTLD_NEXT, "sigaddset");
+            real_sigaddset(linux_set, i);
+        }
+    }
+}
+
+/* Compress a 128-byte Linux sigset to a 4-byte macOS sigset */
+static void linux_to_macos_sigset(const sigset_t *linux_set, void *macos_set) {
+    uint32_t macos_mask = 0;
+    static int (*real_sigismember)(const sigset_t *, int) = NULL;
+    if (!real_sigismember) real_sigismember = dlsym(RTLD_NEXT, "sigismember");
+    for (int i = 1; i <= 31; i++) {
+        if (real_sigismember(linux_set, i)) {
+            macos_mask |= (1u << (i - 1));
+        }
+    }
+    *(uint32_t *)macos_set = macos_mask;
+}
+
+int macify_pthread_sigmask(int how, const void *set, void *oldset) __asm__("pthread_sigmask");
+int macify_pthread_sigmask(int how, const void *set, void *oldset) {
+    /* If the caller is NOT macOS text, pass through to glibc.
+     * glibc internally calls pthread_sigmask with 128-byte sigsets. */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static int (*real_pthread_sigmask)(int, const sigset_t *, sigset_t *) = NULL;
+        if (!real_pthread_sigmask) real_pthread_sigmask = dlsym(RTLD_NEXT, "pthread_sigmask");
+        return real_pthread_sigmask(how, (const sigset_t *)set, (sigset_t *)oldset);
+    }
+
+    /* Translate macOS sigset how values to Linux:
+     *   macOS: SIG_BLOCK=1, SIG_UNBLOCK=2, SIG_SETMASK=3
+     *   Linux: SIG_BLOCK=0, SIG_UNBLOCK=1, SIG_SETMASK=2
+     * Go passes macOS values, which glibc rejects as invalid. */
+    int linux_how;
+    switch (how) {
+        case 1: linux_how = SIG_BLOCK; break;    /* macOS SIG_BLOCK -> Linux SIG_BLOCK */
+        case 2: linux_how = SIG_UNBLOCK; break;  /* macOS SIG_UNBLOCK -> Linux SIG_UNBLOCK */
+        case 3: linux_how = SIG_SETMASK; break;  /* macOS SIG_SETMASK -> Linux SIG_SETMASK */
+        default: linux_how = how; break;  /* already Linux value or unknown */
+    }
+
+    /* macOS caller: translate 4-byte sigset to 128-byte */
+    sigset_t linux_set, linux_oldset;
+    sigset_t *p_linux_set = NULL;
+    sigset_t *p_linux_oldset = NULL;
+
+    if (set) {
+        macos_to_linux_sigset(set, &linux_set);
+        p_linux_set = &linux_set;
+    }
+    if (oldset) {
+        p_linux_oldset = &linux_oldset;
+    }
+
+    static int (*real_pthread_sigmask)(int, const sigset_t *, sigset_t *) = NULL;
+    if (!real_pthread_sigmask) real_pthread_sigmask = dlsym(RTLD_NEXT, "pthread_sigmask");
+    int result = real_pthread_sigmask(linux_how, p_linux_set, p_linux_oldset);
+
+    if (oldset && result == 0) {
+        linux_to_macos_sigset(&linux_oldset, oldset);
+    }
+    return result;
+}
+
+int macify_sigprocmask(int how, const void *set, void *oldset) __asm__("sigprocmask");
+int macify_sigprocmask(int how, const void *set, void *oldset) {
+    /* If the caller is NOT macOS text, pass through to glibc. */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static int (*real_sigprocmask)(int, const sigset_t *, sigset_t *) = NULL;
+        if (!real_sigprocmask) real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
+        return real_sigprocmask(how, (const sigset_t *)set, (sigset_t *)oldset);
+    }
+
+    /* Translate macOS how values to Linux */
+    int linux_how;
+    switch (how) {
+        case 1: linux_how = SIG_BLOCK; break;
+        case 2: linux_how = SIG_UNBLOCK; break;
+        case 3: linux_how = SIG_SETMASK; break;
+        default: linux_how = how; break;
+    }
+
+    sigset_t linux_set, linux_oldset;
+    sigset_t *p_linux_set = NULL;
+    sigset_t *p_linux_oldset = NULL;
+
+    if (set) {
+        macos_to_linux_sigset(set, &linux_set);
+        p_linux_set = &linux_set;
+    }
+    if (oldset) {
+        p_linux_oldset = &linux_oldset;
+    }
+
+    static int (*real_sigprocmask)(int, const sigset_t *, sigset_t *) = NULL;
+    if (!real_sigprocmask) real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
+    int result = real_sigprocmask(linux_how, p_linux_set, p_linux_oldset);
+
+    if (oldset && result == 0) {
+        linux_to_macos_sigset(&linux_oldset, oldset);
+    }
+    return result;
+}
+
 /* sigaltstack: the Rust runtime calls sigaltstack to set up its own alt
  * stack, which may be in a bad location (within the guard page area). We
  * no-op this call so our constructor's alt stack (set up via raw syscall)

@@ -102,25 +102,65 @@ void jump_to_entry(uint64_t entry, uint64_t stack_top) {
 /* Go binaries use %gs segment for thread-local storage (goroutine pointer
  * at gs:0x30, etc.). On macOS, the kernel sets up %gs base during thread
  * creation. On Linux, %gs base is 0 by default, so Go crashes on the first
- * gs:0x30 access. We set up %gs base to a writable page before calling main.
+ * gs:0x30 access.
  *
- * ARCH_SET_GS = 0x1001 (arch_prctl syscall on Linux x86_64)
- * arch_prctl(ARCH_SET_GS, addr) sets the GS base address. */
+ * Go's rt0_go entry point tests GS by:
+ *   1. Writing 0x123 to gs:0x30
+ *   2. Reading a global variable (tls_g) that should be at gs:0x30
+ *   3. Comparing — if they match, GS base is correct
+ *
+ * For this test to pass, GS base must be set to (tls_g_addr - 0x30).
+ * We scan the entry point for the test pattern to find tls_g's address. */
 #include <sys/syscall.h>
-static void setup_gs_base(void) {
-    /* Allocate a page for the GS base */
-    static char gs_page[4096] __attribute__((aligned(4096)));
-    /* Zero it out */
-    memset(gs_page, 0, sizeof(gs_page));
-    /* Set GS base to our page using arch_prctl */
-    syscall(158, 0x1001, gs_page);  /* ARCH_SET_GS = 0x1001 */
+
+/* Pattern: mov qword ptr gs:[0x30], 0x123
+ * Bytes: 65 48 c7 04 25 30 00 00 00 23 01 00 00
+ * Followed by: mov rax, [rip + disp32]
+ * Bytes: 48 8b 05 XX XX XX XX */
+static const uint8_t gs_test_pattern[] = {
+    0x65, 0x48, 0xc7, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0x23, 0x01, 0x00, 0x00
+};
+
+static void setup_gs_base(uint64_t entry_rip) {
+    /* Scan the first 0x400 bytes of the entry point for the GS test pattern */
+    uint8_t *code = (uint8_t *)entry_rip;
+    uint64_t tls_g_addr = 0;
+
+    for (int i = 0; i < 0x400 - sizeof(gs_test_pattern) - 7; i++) {
+        if (memcmp(code + i, gs_test_pattern, sizeof(gs_test_pattern)) == 0) {
+            /* Found the pattern. Next instruction should be: mov rax, [rip + disp32]
+             * 48 8b 05 XX XX XX XX (7 bytes) */
+            uint8_t *next = code + i + sizeof(gs_test_pattern);
+            if (next[0] == 0x48 && next[1] == 0x8b && next[2] == 0x05) {
+                int32_t disp = *(int32_t *)(next + 3);
+                /* RIP-relative: target = address_of_next_instruction + disp
+                 * next_instruction = entry_rip + i + sizeof(gs_test_pattern) + 7 */
+                uint64_t next_insn_addr = entry_rip + i + sizeof(gs_test_pattern) + 7;
+                tls_g_addr = next_insn_addr + disp;
+                break;
+            }
+        }
+    }
+
+    if (tls_g_addr) {
+        /* Set GS base so that gs:0x30 points to tls_g */
+        uint64_t gs_base = tls_g_addr - 0x30;
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+    } else {
+        /* Not a Go binary (no GS test pattern found).
+         * Set GS base to a zeroed page as a safe default. */
+        static char gs_page[4096] __attribute__((aligned(4096)));
+        memset(gs_page, 0, sizeof(gs_page));
+        syscall(158, 0x1001, gs_page);
+    }
 }
 
 __attribute__((noreturn))
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
     /* Set up %gs base for Go binaries that use gs:0x30 for goroutine TLS.
-     * This is a no-op for C/Rust binaries that don't use %gs. */
-    setup_gs_base();
+     * For Go binaries, GS base is set to (tls_g_addr - 0x30) so the GS
+     * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
+    setup_gs_base(entry);
 
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
