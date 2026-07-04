@@ -53,19 +53,13 @@ struct _macify_RuneLocale {
     void *runes;                /* 40 */
     uint32_t nrunes;            /* 48 */
     uint32_t _pad2;             /* 52 */
-    /* variablehigh etc would be here, but we skip to the arrays */
-    /* On macOS, the __runetype array follows after some more fields.
-     * tree accesses it through ___maskrune which we override, OR
-     * directly if it inlines the access. Let's put the arrays right
-     * after nrunes with padding to match the real offset.
-     *
-     * Actually, looking at the macOS source, the struct has:
-     *   __uint32_t __runetype[256] at offset after the header
-     *   __int16_t  __maplower[256]
-     *   __int16_t  __mapupper[256]
-     * But the exact offset depends on padding. Let's use a large
-     * struct and put arrays at common offsets. */
-    uint32_t __runetype[256];   /* inline runetype table */
+    /* macOS _RuneLocale has __runetype at offset 0x3c (60).
+     * Confirmed by disassembling CONF_parse_list which accesses
+     * [rcx + char*4 + 0x3c] where rcx = _DefaultRuneLocale.
+     * The 4 bytes between _pad2 (52) and __runetype (60) are
+     * likely __variablehigh or another field. */
+    uint32_t _pad3;             /* 56 */
+    uint32_t __runetype[256];   /* 60: inline runetype table */
     int16_t  __maplower[256];   /* inline lower case map */
     int16_t  __mapupper[256];   /* inline upper case map */
 };
