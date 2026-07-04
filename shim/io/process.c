@@ -3,6 +3,7 @@
 #include "io_internal.h"
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <poll.h>
 
 int macify_wait4(int pid, int *status, int options, void *rusage) __asm__("wait4");
 int macify_wait4(int pid, int *status, int options, void *rusage) {
@@ -63,10 +64,22 @@ int macify_pipe(int *pipefd) {
     return real_pipe(pipefd);
 }
 
+/* read — if reading from a pipe (FIFO) and no data is available,
+ * return EOF. This prevents deadlocks when glibc's NSS tries to
+ * fork helper processes (which are blocked by our clone override).
+ * Without this, the parent blocks forever waiting for data from
+ * a child that can never write. */
 ssize_t macify_read(int fd, void *buf, size_t count) __asm__("read");
 ssize_t macify_read(int fd, void *buf, size_t count) {
     static ssize_t (*real_read)(int, void *, size_t) = NULL;
     if (!real_read) real_read = dlsym(RTLD_NEXT, "read");
+    /* Check if fd is a pipe (FIFO) */
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode)) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, 0);
+        if (pr == 0) return 0; /* No data — pipe has no writer */
+    }
     return real_read(fd, buf, count);
 }
 
@@ -98,9 +111,5 @@ FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
-    if (mode[0] == 'r' && strchr(path, '/')) {
-        FILE *f = real_fopen(path, mode);
-        if (f) return f;
-    }
     return real_fopen(path, mode);
 }

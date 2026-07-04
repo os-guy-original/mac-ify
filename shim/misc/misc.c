@@ -49,12 +49,6 @@ void __chkstk_darwin(unsigned long size) {
     __asm__ volatile("" ::: "memory");
 }
 
-/* The _Unwind_* functions have a standardized ABI (Itanium C++ ABI).
- * We forward to libgcc_s. If libgcc_s is not available, we use stubs. */
-
-struct _Unwind_Exception;
-struct _Unwind_Context;
-typedef int (*_Unwind_Stop_Fn)(int, struct _Unwind_Exception *, struct _Unwind_Context *);
 void dispatch_async(void *queue, void *block) {
     (void)queue; (void)block;
     /* No-op for now */

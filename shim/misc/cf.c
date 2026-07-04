@@ -334,3 +334,19 @@ void *macify_dns_configuration_copy(void) {
 void macify_dns_configuration_free(void *config) {
     (void)config;
 }
+
+/* ── CFArray/CFData stubs (curl, sqlite3 use these) ── */
+
+void *CFArrayCreateMutable(void *alloc, long cap, const void *cb) {
+    (void)alloc; (void)cap; (void)cb;
+    return NULL;
+}
+
+void CFArrayAppendValue(void *arr, const void *val) {
+    (void)arr; (void)val;
+}
+
+void *CFDataCreate(void *alloc, const void *bytes, long length) {
+    (void)alloc; (void)length;
+    return bytes ? (void *)bytes : NULL;
+}
