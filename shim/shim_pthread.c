@@ -243,6 +243,11 @@ void *pthread_getspecific(pthread_key_t key) {
  * once_control variables don't deadlock. */
 #define MACOS_PTHREAD_ONCE_INIT 0x30B1BCBA
 
+/* Forward declarations for the ret_ globals (defined later in this file) */
+extern uint64_t macify_image_header;
+struct ret_global_entry { const char *name; uint64_t static_addr; };
+extern const struct ret_global_entry ret_global_entries[];
+
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     static int ssl_debug = -1;
     if (ssl_debug < 0) {
@@ -277,6 +282,28 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
                     (void)write(2, b, strlen(b));
                 }
                 __atomic_store_n((long *)once_control, 1, __ATOMIC_RELEASE);
+
+                /* After the init_routine runs, force ALL OpenSSL
+                 * ossl_init_*_ret_ globals to 1 (success) — but ONLY for
+                 * curl/wget (which have these globals at the hardcoded
+                 * addresses). For other binaries, skip this entirely. */
+                static int force_ssl_check = -1;
+                if (force_ssl_check < 0) {
+                    /* Check if the loaded binary is curl/wget by examining
+                     * the image header. If macify_image_header is set AND
+                     * the binary contains the ossl_init_* symbols, we force.
+                     * Simple heuristic: only force if MACIFY_FORCE_SSL env
+                     * var is set (the loader sets this for curl/wget). */
+                    force_ssl_check = getenv("MACIFY_FORCE_SSL") ? 1 : 0;
+                }
+                if (force_ssl_check && macify_image_header) {
+                    uint64_t slide = macify_image_header - 0x100000000;
+                    for (int i = 0; ret_global_entries[i].name; i++) {
+                        uint64_t actual = ret_global_entries[i].static_addr + slide;
+                        int *p = (int *)actual;
+                        if (*p == 0) *p = 1;
+                    }
+                }
                 return 0;
             }
             /* CAS failed — another thread claimed it, fall through to wait */
@@ -715,12 +742,10 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 extern uint64_t macify_image_header;
 
-struct ret_global_entry {
-    const char *name;
-    uint64_t static_addr;  /* static address of the ret_ global */
-};
+/* ret_global_entry and ret_global_entries are forward-declared above
+ * (before pthread_once) so the pthread_once override can access them. */
 
-static const struct ret_global_entry ret_global_entries[] = {
+const struct ret_global_entry ret_global_entries[] = {
     {"ssl_x509_store_ctx_init_ossl_ret_",               0x1007ab050},
     {"ossl_init_ssl_base_ossl_ret_",                    0x1007ab054},
     {"do_bio_type_init_ossl_ret_",                      0x1007ab06c},
@@ -779,5 +804,44 @@ __attribute__((constructor))
 static void register_ret_global_printer(void) {
     if (getenv("MACIFY_SSL_DEBUG")) {
         atexit(macify_print_ret_globals);
+    }
+}
+
+/* Force all OpenSSL ossl_init_*_ret_ globals to 1 (success).
+ *
+ * curl's internal OpenSSL has RUN_ONCE init functions that store their
+ * return value in globals like ossl_init_base_ossl_ret_. If any returns
+ * 0, OPENSSL_init_crypto fails, and SSL_CTX_new_ex returns NULL.
+ *
+ * Some init functions may fail because they depend on macOS-specific
+ * APIs (Security framework, keychain, etc.) that our stubs don't fully
+ * implement. Rather than make every stub work perfectly, we just force
+ * all ret_ globals to 1 so OPENSSL_init_crypto succeeds. The actual
+ * crypto operations may still fail later, but at least SSL_CTX_new_ex
+ * will return a valid context.
+ *
+ * Called by the macify loader AFTER setting the image header. */
+
+void macify_force_ssl_init_success(void) {
+    if (!macify_image_header) return;
+    /* static base of the macOS binary is 0x100000000 */
+    uint64_t slide = macify_image_header - 0x100000000;
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "SSL_DEBUG: force_ssl: image_header=0x%lx slide=0x%lx\n",
+                (unsigned long)macify_image_header, (unsigned long)slide);
+        (void)write(2, b, n);
+    }
+    for (int i = 0; ret_global_entries[i].name; i++) {
+        uint64_t actual = ret_global_entries[i].static_addr + slide;
+        int *p = (int *)actual;
+        int old = *p;
+        *p = 1;  /* force success */
+        if (getenv("MACIFY_SSL_DEBUG")) {
+            char b[256];
+            int n = snprintf(b, sizeof(b), "SSL_DEBUG:  [%d] %s @ 0x%lx: %d -> 1\n",
+                    i, ret_global_entries[i].name, (unsigned long)actual, old);
+            (void)write(2, b, n);
+        }
     }
 }

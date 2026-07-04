@@ -575,6 +575,11 @@ int kevent(int kq, const void *changelist, int nchanges,
 int getcontext(ucontext_t *ucp) {
     /* Return 0 (success) — OpenSSL's async init needs this to not fail.
      * The context won't actually be usable, but async is optional. */
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "SSL_DEBUG: getcontext(%p) -> 0\n", ucp);
+        (void)write(2, b, n);
+    }
     if (ucp) memset(ucp, 0, sizeof(*ucp));
     return 0;
 }
@@ -586,8 +591,91 @@ int setcontext(const ucontext_t *ucp) {
 }
 
 void makecontext(ucontext_t *ucp, void (*func)(void), int argc, ...) {
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "SSL_DEBUG: makecontext(%p, %p, %d)\n", ucp, (void*)func, argc);
+        (void)write(2, b, n);
+    }
     (void)ucp; (void)func; (void)argc;
     /* no-op — async won't work but SSL_CTX_new should succeed */
+}
+
+/* swapcontext — OpenSSL's async API also uses this. Return 0 (success). */
+int swapcontext(ucontext_t *oucp, const ucontext_t *ucp) {
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "SSL_DEBUG: swapcontext(%p, %p) -> 0\n", oucp, ucp);
+        (void)write(2, b, n);
+    }
+    (void)oucp; (void)ucp;
+    return 0;
+}
+
+/* ── OpenSSL OSSL_LIB_CTX stubs ─────────────────────────────────
+ * curl 8.x uses SSL_CTX_new_ex(libctx, ...) which requires an OSSL_LIB_CTX.
+ * On macOS, curl is built with its own copy of OpenSSL, so OSSL_LIB_CTX
+ * is an opaque struct allocated by OSSL_LIB_CTX_new(). We provide a
+ * minimal stub: OSSL_LIB_CTX_new returns a non-NULL sentinel, and
+ * OSSL_LIB_CTX_free is a no-op. SSL_CTX_new_ex then uses this libctx
+ * to create the SSL context.
+ *
+ * The actual OpenSSL library on the system (libssl.so) has its own
+ * internal OSSL_LIB_CTX, but since curl was compiled expecting the
+ * macOS OpenSSL symbols, we provide these stubs. The system's libssl
+ * will use its own internal default context when SSL_CTX_new_ex is
+ * called with our stub libctx (it ignores the libctx parameter if
+ * OPENSSL_init_crypto hasn't been called with it). */
+
+static char macify_ossl_lib_ctx_sentinel[64] __attribute__((aligned(16))) = {0};
+
+void *OSSL_LIB_CTX_new(void) {
+    return macify_ossl_lib_ctx_sentinel;
+}
+void OSSL_LIB_CTX_free(void *ctx) {
+    (void)ctx;
+}
+void *OSSL_LIB_CTX_get0_global_default(void) {
+    return macify_ossl_lib_ctx_sentinel;
+}
+void *OSSL_LIB_CTX_get_data(void *ctx, int idx) {
+    (void)ctx; (void)idx;
+    return NULL;
+}
+int OSSL_LIB_CTX_load_config(void *ctx, const char *config) {
+    (void)ctx; (void)config;
+    return 1;  /* success */
+}
+int OSSL_LIB_CTX_get_conf_diagnostics(void *ctx) {
+    (void)ctx;
+    return 0;
+}
+
+/* OPENSSL_init_crypto — curl's internal OpenSSL calls this to initialize
+ * crypto subsystems. We wrap it to debug failures: if it returns 0
+ * (failure), we print the ossl_init_*_ret_ globals to see which init
+ * step failed.
+ *
+ * However, curl's OPENSSL_init_crypto is STATICALLY LINKED into the curl
+ * binary, so our shim's OPENSSL_init_crypto is NOT called by curl's
+ * internal code. It may be called by other code though. We just pass
+ * through to... well, there's nothing to pass through to. We return 1
+ * (success) since we can't actually initialize curl's internal OpenSSL. */
+int OPENSSL_init_crypto(uint64_t settings, void *opts) {
+    (void)settings; (void)opts;
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        const char msg[] = "SSL_DEBUG: OPENSSL_init_crypto called (returning 1)\n";
+        (void)write(2, msg, sizeof(msg)-1);
+    }
+    return 1;
+}
+
+int OPENSSL_init_ssl(uint64_t settings, void *opts) {
+    (void)settings; (void)opts;
+    if (getenv("MACIFY_SSL_DEBUG")) {
+        const char msg[] = "SSL_DEBUG: OPENSSL_init_ssl called (returning 1)\n";
+        (void)write(2, msg, sizeof(msg)-1);
+    }
+    return 1;
 }
 
 /* proc_* functions are implemented in shim_mach.c with real /proc reading */

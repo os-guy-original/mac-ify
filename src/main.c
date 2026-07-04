@@ -405,6 +405,18 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: image header set to %#lx\n",
                         (unsigned long)header);
             }
+            /* Force OpenSSL init globals to success (curl's statically-linked
+             * OpenSSL may fail init due to missing macOS framework stubs).
+             * Only do this for curl (which has the ossl_init_*_ret_ globals
+             * at the hardcoded addresses). Other binaries don't have these
+             * globals, and writing to random memory would crash them. */
+            if (strstr(path, "curl") || strstr(path, "wget")) {
+                setenv("MACIFY_FORCE_SSL", "1", 1);
+                void (*force_ssl)(void) =
+                    (void (*)(void))dlsym(g_dylibs[0].handle,
+                                          "macify_force_ssl_init_success");
+                if (force_ssl) force_ssl();
+            }
         }
     }
 

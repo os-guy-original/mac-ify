@@ -156,12 +156,45 @@ int macify_getaddrinfo(const char *node, const char *service,
     static int (*real_gai)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
     if (!real_gai) real_gai = dlsym(RTLD_NEXT, "getaddrinfo");
 
+    /* Translate macOS hints → Linux hints.
+     * The first 16 bytes (flags/family/socktype/protocol) are at the same
+     * offsets, but the flag BIT VALUES differ between macOS and Linux.
+     * Also, macOS socklen_t is 4 bytes vs Linux's 8, so ai_addrlen is at
+     * a different effective width. We rebuild a clean Linux addrinfo. */
+    struct addrinfo linux_hints;
+    memset(&linux_hints, 0, sizeof(linux_hints));
+    if (hints) {
+        const struct macos_addrinfo *mh = (const struct macos_addrinfo *)hints;
+        /* Translate ai_flags: macOS uses different bit values */
+        int mf = mh->ai_flags;
+        int lf = 0;
+        /* Common flags that are the SAME on both: */
+        /* AI_PASSIVE=1, AI_CANONNAME=2, AI_NUMERICHOST=4 — same on both */
+        if (mf & 0x01) lf |= 0x01;  /* AI_PASSIVE */
+        if (mf & 0x02) lf |= 0x02;  /* AI_CANONNAME */
+        if (mf & 0x04) lf |= 0x04;  /* AI_NUMERICHOST */
+        /* macOS AI_V4MAPPED=8, Linux AI_V4MAPPED=8 — same */
+        if (mf & 0x08) lf |= 0x08;  /* AI_V4MAPPED */
+        /* macOS AI_ALL=16, Linux AI_ALL=16 — same */
+        if (mf & 0x10) lf |= 0x10;  /* AI_ALL */
+        /* macOS AI_ADDRCONFIG=256, Linux AI_ADDRCONFIG=32 */
+        if (mf & 0x100) lf |= 0x20; /* AI_ADDRCONFIG */
+        /* macOS AI_NUMERICSERV=1024, Linux AI_NUMERICSERV=1024 — same! */
+        if (mf & 0x400) lf |= 0x400; /* AI_NUMERICSERV */
+        /* macOS AI_UNUSABLE=0x1000 → not directly mappable, ignore */
+        linux_hints.ai_flags = lf;
+        linux_hints.ai_family = mh->ai_family;
+        linux_hints.ai_socktype = mh->ai_socktype;
+        linux_hints.ai_protocol = mh->ai_protocol;
+    }
+
     struct addrinfo *linux_res = NULL;
-    int r = real_gai(node, service, (const struct addrinfo *)hints, &linux_res);
+    int r = real_gai(node, service, hints ? &linux_hints : NULL, &linux_res);
     char buf[256];
 
     if (r != 0 || !linux_res) {
-        snprintf(buf, sizeof(buf), "getaddrinfo: ret=%d errno=%d\n", r, errno);
+        snprintf(buf, sizeof(buf), "getaddrinfo: ret=%d errno=%d gai_strerror=%s\n",
+                 r, errno, gai_strerror(r));
         macify_net_dbg(buf);
         if (res) *res = NULL;
         return r;
@@ -184,15 +217,32 @@ int macify_getaddrinfo(const char *node, const char *service,
         m->ai_addr     = NULL;
         m->ai_next     = NULL;
 
-        /* Copy the sockaddr (we keep it in glibc's layout — the offsets of
-         * sin_addr (4) and sin6_addr (8) / sin6_scope_id (24) are identical
-         * in both Linux and macOS sockaddr layouts, so a macOS binary reading
-         * address bytes via ai_addr works fine. If the binary later passes
-         * ai_addr to connect(), the connect() shim auto-detects the format.) */
+        /* Copy the sockaddr and convert from Linux to macOS format.
+         * Linux sockaddr: sa_family(2) at offset 0, then port/addr
+         * macOS sockaddr: sin_len(1) at offset 0, sin_family(1) at offset 1,
+         *                 then port/addr
+         * A macOS binary reads sin_family from offset 1, so if we leave the
+         * Linux format, it sees 0x00 (high byte of AF_INET=2) and fails
+         * with EAFNOSUPPORT when calling inet_ntop. */
         if (p->ai_addr && p->ai_addrlen > 0) {
-            void *addr_copy = malloc(p->ai_addrlen);
+            uint8_t *addr_copy = (uint8_t *)malloc(p->ai_addrlen);
             if (addr_copy) {
-                memcpy(addr_copy, p->ai_addr, p->ai_addrlen);
+                memset(addr_copy, 0, p->ai_addrlen);
+                if (p->ai_family == 2) { /* AF_INET */
+                    /* macOS sockaddr_in: sin_len=16, sin_family=2, port, addr */
+                    addr_copy[0] = 16;  /* sin_len */
+                    addr_copy[1] = 2;   /* sin_family = AF_INET */
+                    memcpy(addr_copy + 2, (uint8_t *)p->ai_addr + 2, 2);  /* port */
+                    memcpy(addr_copy + 4, (uint8_t *)p->ai_addr + 4, 4);  /* addr */
+                } else if (p->ai_family == 10) { /* AF_INET6 (Linux) */
+                    /* macOS sockaddr_in6: sin6_len=28, sin6_family=30, port, flowinfo, addr, scope */
+                    addr_copy[0] = 28;  /* sin6_len */
+                    addr_copy[1] = 30;  /* sin6_family = AF_INET6 (macOS) */
+                    memcpy(addr_copy + 2, (uint8_t *)p->ai_addr + 2, 26); /* port+flowinfo+addr+scope */
+                } else {
+                    /* Unknown family — copy as-is */
+                    memcpy(addr_copy, p->ai_addr, p->ai_addrlen);
+                }
                 m->ai_addr = (struct sockaddr *)addr_copy;
             }
         }
@@ -741,11 +791,14 @@ int macify_socket(int domain, int type, int protocol) {
     static int (*real_socket)(int, int, int) = NULL;
     if (!real_socket) real_socket = dlsym(RTLD_NEXT, "socket");
     int r = real_socket(domain, type, protocol);
+    int saved_errno = errno;
+    /* Only translate errno on FAILURE. On success, errno may contain a
+     * stale value from a previous syscall, and translating it would set
+     * a bogus macOS errno that confuses the caller. */
     if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) {
-        int saved = errno;
-        errno = macify_linux_to_macos_errno(saved);
+        errno = macify_linux_to_macos_errno(saved_errno);
     }
-    snprintf(buf, sizeof(buf), "socket: ret=%d errno=%d\n", r, errno);
+    snprintf(buf, sizeof(buf), "socket: ret=%d errno=%d\n", r, r == -1 ? errno : saved_errno);
     macify_net_dbg(buf);
     return r;
 }
@@ -758,11 +811,7 @@ const char *macify_inet_ntop(int af, const void *src, char *dst, socklen_t size)
         const char *e = getenv("MACIFY_NET_DEBUG");
         macify_net_debug_enabled = (e && e[0]) ? 1 : 0;
     }
-    if (macify_net_debug_enabled) {
-        char b[128];
-        snprintf(b, sizeof(b), "inet_ntop: af=%d src=%p\n", af, src);
-        (void)write(2, b, strlen(b));
-    }
+    int orig_af = af;
     /* Translate macOS address family constants to Linux */
     if (af == MACOS_AF_INET6) af = LINUX_AF_INET6;
     /* Also handle macOS sa_len being passed as AF (16 for IPv4, 28 for IPv6) */
@@ -772,9 +821,10 @@ const char *macify_inet_ntop(int af, const void *src, char *dst, socklen_t size)
     if (!real) real = dlsym(RTLD_NEXT, "inet_ntop");
     const char *result = real(af, src, dst, size);
     if (macify_net_debug_enabled) {
-        char b[128];
-        snprintf(b, sizeof(b), "inet_ntop: result=%p dst=%s errno=%d\n",
-                 (void *)result, result ? dst : "(null)", errno);
+        char b[256];
+        const char *show = result ? dst : "(null)";
+        snprintf(b, sizeof(b), "inet_ntop: orig_af=%d af=%d src=%p size=%d result=%p dst=%s errno=%d\n",
+                 orig_af, af, src, (int)size, (void *)result, show, errno);
         (void)write(2, b, strlen(b));
     }
     return result;
