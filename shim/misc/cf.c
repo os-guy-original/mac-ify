@@ -320,6 +320,11 @@ void *CFURLCreateWithFileSystemPath(void *allocator, void *filePath, int pathSty
 /* kCFAllocatorDefault — macOS global. We provide a NULL pointer. */
 void *kCFAllocatorDefault = NULL;
 
+/* kCFAllocatorNull — a special allocator that never allocates (always returns NULL).
+ * Some CF functions check for this to skip allocation. We provide a sentinel. */
+static char cf_alloc_null_sentinel[16] = {0};
+void *kCFAllocatorNull = cf_alloc_null_sentinel;
+
 /* __CFConstantStringClassReference — macOS global for CFSTR() literals.
  * htop uses CFSTR() which creates constant CFString references.
  * We provide a dummy class. */
@@ -335,7 +340,7 @@ void macify_dns_configuration_free(void *config) {
     (void)config;
 }
 
-/* ── CFArray/CFData stubs (curl, sqlite3 use these) ── */
+/* ── CFArray/CFData stubs (curl, sqlite3, dust use these) ── */
 
 void *CFArrayCreateMutable(void *alloc, long cap, const void *cb) {
     (void)alloc; (void)cap; (void)cb;
@@ -349,4 +354,131 @@ void CFArrayAppendValue(void *arr, const void *val) {
 void *CFDataCreate(void *alloc, const void *bytes, long length) {
     (void)alloc; (void)length;
     return bytes ? (void *)bytes : NULL;
+}
+
+/* CFDataGetLength — return the length of a CFData.
+ * Since our CFDataCreate returns the raw bytes pointer, we can't know
+ * the length. Return 0 as a safe default. */
+long CFDataGetLength(const void *data) {
+    (void)data;
+    return 0;
+}
+
+/* CFDataGetBytes — see cf_compat.c (avoids system header conflict) */
+
+/* CFDataGetBytePtr — return pointer to the bytes. Since our CFData
+ * IS the bytes pointer, just return it. */
+const void *CFDataGetBytePtr(const void *data) {
+    return data;
+}
+
+/* CFDataCreateMutable — create a mutable CFData. Return NULL. */
+void *CFDataCreateMutable(void *alloc, long cap) {
+    (void)alloc; (void)cap;
+    return NULL;
+}
+
+/* CFDataCreateMutableCopy — copy a CFData. Return NULL. */
+void *CFDataCreateMutableCopy(void *alloc, long cap, const void *data) {
+    (void)alloc; (void)cap; (void)data;
+    return NULL;
+}
+
+/* CFDataAppendBytes — append bytes to a mutable CFData. No-op. */
+void CFDataAppendBytes(void *data, const void *bytes, long length) {
+    (void)data; (void)bytes; (void)length;
+}
+
+/* CFDictionaryCreateMutable — create a mutable CFDictionary. Return NULL. */
+void *CFDictionaryCreateMutable(void *alloc, long cap, const void *keyCb, const void *valCb) {
+    (void)alloc; (void)cap; (void)keyCb; (void)valCb;
+    return NULL;
+}
+
+/* CFDictionarySetValue — set a key-value pair. No-op. */
+void CFDictionarySetValue(void *dict, const void *key, const void *val) {
+    (void)dict; (void)key; (void)val;
+}
+
+/* CFDictionaryAddValue — add a key-value pair. No-op. */
+void CFDictionaryAddValue(void *dict, const void *key, const void *val) {
+    (void)dict; (void)key; (void)val;
+}
+
+/* CFDictionaryGetCount — return number of entries. */
+long CFDictionaryGetCount(const void *dict) {
+    (void)dict;
+    return 0;
+}
+
+/* CFDictionaryApplyFunction — iterate over entries. No-op. */
+void CFDictionaryApplyFunction(const void *dict, void *func, void *context) {
+    (void)dict; (void)func; (void)context;
+}
+
+/* CFNumberCreate — create a CFNumber. Return NULL. */
+void *CFNumberCreate(void *alloc, int type, const void *valuePtr) {
+    (void)alloc; (void)type; (void)valuePtr;
+    return NULL;
+}
+
+/* CFNumberGetValue, CFGetTypeID, CFStringCreateWithFormat, CFStringGetCStringPtr
+ * conflict with system CoreFoundation headers. These are implemented in
+ * cf_compat.c which avoids including system headers. */
+
+/* CFArrayCreate — create an immutable CFArray. Return NULL. */
+void *CFArrayCreate(void *alloc, const void **values, long numValues, const void *cb) {
+    (void)alloc; (void)values; (void)numValues; (void)cb;
+    return NULL;
+}
+
+/* CFRetain — retain a CF object. No-op (return the object). */
+const void *CFRetain(const void *cf) {
+    return cf;
+}
+
+/* CFShow — print a CF object to stderr. No-op. */
+void CFShow(const void *cf) {
+    (void)cf;
+}
+
+/* CFCopyDescription — return a description string. Return NULL. */
+void *CFCopyDescription(const void *cf) {
+    (void)cf;
+    return NULL;
+}
+
+/* CFEqual — compare two CF objects. */
+int CFEqual(const void *cf1, const void *cf2) {
+    return cf1 == cf2;
+}
+
+/* CFHash — hash a CF object. */
+unsigned long CFHash(const void *cf) {
+    return (unsigned long)(uintptr_t)cf;
+}
+
+/* CFGetRetainCount — return retain count. */
+long CFGetRetainCount(const void *cf) {
+    (void)cf;
+    return 1;
+}
+
+/* CFStringCreateWithCStringNoCopy — create a CFString without copying. */
+void *CFStringCreateWithCStringNoCopy(void *alloc, const char *cStr, int encoding, void *contentsDeallocator) {
+    (void)alloc; (void)encoding; (void)contentsDeallocator;
+    return (void *)cStr;  /* just return the C string pointer */
+}
+
+/* CFStringCreateWithFormat, CFStringGetCStringPtr — see cf_compat.c */
+
+/* CFStringGetSystemEncoding — return the system encoding. */
+int CFStringGetSystemEncoding(void) {
+    return 0x0600;  /* kCFStringEncodingUTF8 */
+}
+
+/* CFStringGetFastestEncoding — return the fastest encoding. */
+int CFStringGetFastestEncoding(const void *str) {
+    (void)str;
+    return 0x0600;  /* kCFStringEncodingUTF8 */
 }

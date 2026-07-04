@@ -321,6 +321,65 @@ int SecTrustSetOCSPResponse(void *trust, void *response) {
     return 0;
 }
 
+/* CoreServices framework stubs — nvim and other binaries reference these. */
+
+/* LocaleRefGetPartString — gets a locale string part (language, country, etc.)
+ * Signature: OSStatus LocaleRefGetPartString(LocaleRef loc, LocalePartCode partCode,
+ *              Boolean wantVerbatim, ByteCount maxStringLen, char *resultString)
+ * We return "en" / "US" / "en_US" for the common parts. */
+int LocaleRefGetPartString(int loc, int partCode, int wantVerbatim,
+                           unsigned int maxStringLen, char *resultString) {
+    if (!resultString || maxStringLen == 0) return -50;  /* paramErr */
+    switch (partCode) {
+        case 0:  /* language */
+            strncpy(resultString, "en", maxStringLen);
+            break;
+        case 1:  /* country */
+            strncpy(resultString, "US", maxStringLen);
+            break;
+        default:
+            strncpy(resultString, "en_US", maxStringLen);
+            break;
+    }
+    return 0;  /* noErr */
+}
+
+/* ── Objective-C Block runtime stubs ──────────────────────────
+ * macOS uses blocks (^{}), which are implemented via _NSConcreteGlobalBlock
+ * and _NSConcreteStackBlock class objects. Binaries that use blocks (like
+ * starship, written in Rust but using macOS APIs) reference these as
+ * global symbols. We provide sentinel values — the actual block runtime
+ * isn't needed for most CLI tools. */
+static char ns_block_global_sentinel[64] = {0};
+static char ns_block_stack_sentinel[64] = {0};
+void *_NSConcreteGlobalBlock = ns_block_global_sentinel;
+void *_NSConcreteStackBlock = ns_block_stack_sentinel;
+void *_NSConcreteMallocBlock = ns_block_stack_sentinel;
+void *_NSConcreteAutoBlock = ns_block_stack_sentinel;
+void *_NSConcreteFinalizingBlock = ns_block_stack_sentinel;
+void *_NSConcreteWeakBlockVariable = ns_block_stack_sentinel;
+
+/* ── DWARF exception frame registration ──────────────────────
+ * __register_frame / __deregister_frame are from libgcc, used for
+ * DWARF-based exception handling. On macOS these are in libSystem.
+ * On Linux, glibc provides them in libgcc_s. We provide no-op stubs
+ * since our translated binaries handle exceptions differently. */
+void __register_frame(const void *begin) { (void)begin; }
+void __deregister_frame(const void *begin) { (void)begin; }
+
+/* _dispatch_main_q — GCD (Grand Central Dispatch) main queue global.
+ * starship and other Rust binaries reference this. We provide a sentinel. */
+static char dispatch_main_q_sentinel[64] = {0};
+void *_dispatch_main_q = dispatch_main_q_sentinel;
+
+/* mach_continuous_time — returns continuous monotonic time in nanoseconds.
+ * Like mach_absolute_time but doesn't reset on sleep. */
+unsigned long long mach_continuous_time(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return (unsigned long long)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
 /* notify_* — macOS notification system. Stub to no-op. */
 int notify_register_file_descriptor(const char *name, int *fd, int flags, int *token) {
     (void)name; (void)flags;

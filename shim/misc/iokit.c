@@ -4,6 +4,10 @@
 /* ── IOKit stubs for htop ───────────────────────────────────────
  * htop uses IOKit for power source info (battery). We stub these. */
 
+/* kIOMasterPortDefault — deprecated alias for kIOMainPortDefault.
+ * Many binaries still reference this. Both should be 0 (the default
+ * master port). */
+void *kIOMasterPortDefault = (void *)0;
 void *kIOMainPortDefault = (void *)0;
 
 void *IOServiceMatching(const char *name) {

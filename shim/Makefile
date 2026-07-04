@@ -10,7 +10,7 @@ LIB      = $(BIN_DIR)/libmacify_shim.so
 SRC = shim_core.c shim_mach.c shim_objc.c shim_tlv.c shim_pthread.c \
       shim_signal.c shim_spawn.c \
       io/flags.c io/file.c io/net.c io/process.c io/dirent.c io/dl.c \
-      misc/rune.c misc/cf.c misc/iokit.c misc/sysctl.c misc/string.c misc/misc.c misc/unwind.c
+      misc/rune.c misc/cf.c misc/cf_compat.c misc/iokit.c misc/sysctl.c misc/string.c misc/misc.c misc/unwind.c
 
 OBJ = $(SRC:.c=.o)
 
