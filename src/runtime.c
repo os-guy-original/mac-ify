@@ -6,7 +6,7 @@
  */
 
 uint64_t setup_stack(int argc, char **argv, char **envp, void **out_stack_base, size_t *out_stack_size) {
-    const size_t stack_size = 8 * 1024 * 1024;
+    const size_t stack_size = 64 * 1024 * 1024;  /* 64MB — Go needs a large stack */
     void *stack = mmap(NULL, stack_size,
                        PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

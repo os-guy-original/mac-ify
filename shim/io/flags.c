@@ -80,6 +80,8 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         flags = (flags & ~MACOS_MAP_ANON) | LINUX_MAP_ANONYMOUS;
         fd = -1;
     }
+    /* MAP_FIXED: macOS 0x10 = Linux 0x10 (same value, no translation needed).
+     * Page-align the address if needed. */
     if ((flags & 0x10) && addr != NULL) {
         size_t page_size = sysconf(_SC_PAGESIZE);
         uintptr_t a = (uintptr_t)addr;
@@ -92,10 +94,16 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     }
     void *result = real_mmap(addr, length, prot, flags, fd, offset);
     if (result == (void *)-1) {
-        if ((orig_flags & 0x10) && orig_addr != NULL) return orig_addr;
-    } else if ((orig_flags & 0x10) && result != orig_addr) {
-        return orig_addr;
+        /* MAP_FIXED failure: On macOS, MAP_FIXED that fails is fatal.
+         * Previously we returned orig_addr, which made the caller think
+         * the mmap succeeded at the requested address, but the memory
+         * was actually something else. This corrupted data.
+         * Now we return MAP_FAILED so the caller can handle the error. */
+        return (void *)-1;
     }
+    /* With MAP_FIXED, real_mmap always returns the requested addr
+     * (or fails). The old "result != orig_addr" check was for a
+     * macOS-specific behavior that doesn't apply on Linux. */
     if (prot == 0 && macify_main_stack_base && result != (void *)-1) {
         uintptr_t stack_lo = (uintptr_t)macify_main_stack_base;
         uintptr_t stack_hi = stack_lo + macify_main_stack_size;
