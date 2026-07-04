@@ -1,5 +1,6 @@
 #include "shim.h"
 #include <sys/utsname.h>
+#include <sys/mman.h>     /* mmap, munmap */
 
 /* ── Mach message/trap stubs ──────────────────────────────────── */
 
@@ -35,8 +36,12 @@ int mach_port_insert_right(uint32_t task, uint32_t name, uint32_t right, int msg
 
 /* ── VM (virtual memory) stubs ────────────────────────────────── */
 
-/* vm_page_size — global variable (not a function). htop reads this. */
-uint32_t vm_page_size = 4096;
+/* vm_page_size — global variable (not a function). htop reads this.
+ * On macOS x86_64, vm_size_t is 'unsigned long' (8 bytes), so this MUST
+ * be 8 bytes too. htop loads it with 'mov rsi, qword ptr [rax]' (8-byte
+ * load). If we declare it as uint32_t (4 bytes), the upper 4 bytes read
+ * as garbage, producing a huge size value passed to munmap(). */
+unsigned long vm_page_size = 4096;
 
 int vm_region_64(uint32_t target_task, uint32_t *address, uint32_t *size,
                  int flavor, void *info, int *count) {
@@ -195,6 +200,14 @@ int host_statistics(uint32_t host_priv, int flavor, void *host_info_out,
 
 /* ── host_processor_info ──────────────────────────────────────── */
 
+/* On macOS, host_processor_info allocates the returned buffer via vm_allocate,
+ * which is page-aligned and a multiple of vm_page_size. Callers (like htop)
+ * free this buffer with munmap(ptr, vm_page_size) or vm_deallocate.
+ *
+ * We MUST use mmap (not malloc) so the buffer is page-aligned and can be
+ * freed by munmap. Also, each call must return a NEW buffer (not a static
+ * one), because callers may hold onto multiple buffers simultaneously
+ * (htop allocates a new one before freeing the old one). */
 int host_processor_info(uint32_t host, int flavor, uint32_t *out_processor_count,
                         uint32_t **out_processor_info, uint32_t *out_processor_info_cnt) {
     (void)host;
@@ -215,16 +228,21 @@ int host_processor_info(uint32_t host, int flavor, uint32_t *out_processor_count
     fclose(fp);
     if (ncpu == 0) ncpu = 1;
 
-    /* Use static buffer to avoid vm_deallocate issues */
-    static uint32_t *info = NULL;
-    static int prev_ncpu = 0;
-    if (!info || prev_ncpu != ncpu) {
-        if (info) free(info);
-        info = (uint32_t *)malloc(ncpu * 4 * sizeof(uint32_t));
-        if (!info) return 2;
-        prev_ncpu = ncpu;
+    /* Allocate a full page via mmap. ncpu * 16 bytes always fits in 4096
+     * for any realistic CPU count (up to 256 CPUs). Page-aligned and
+     * page-multiple so callers can free it with munmap. */
+    long psz = sysconf(_SC_PAGESIZE);
+    if (psz < 1) psz = 4096;
+    size_t alloc_size = (size_t)psz;
+    /* If ncpu is huge, round up to next page */
+    size_t needed = (size_t)ncpu * 4 * sizeof(uint32_t);
+    if (needed > alloc_size) {
+        alloc_size = (needed + psz - 1) & ~(size_t)(psz - 1);
     }
-    memset(info, 0, ncpu * 4 * sizeof(uint32_t));
+    uint32_t *info = (uint32_t *)mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
+                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (info == MAP_FAILED) return 2;
+    memset(info, 0, alloc_size);
 
     fp = fopen("/proc/stat", "r");
     if (fp) {

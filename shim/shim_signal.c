@@ -31,6 +31,17 @@ static void macify_init_stdio(void) {
     __stdinp = stdin;
     __stdoutp = stdout;
 
+    /* Print shim load address for debugging */
+    if (getenv("MACIFY_SHIM_DEBUG")) {
+        Dl_info info;
+        if (dladdr((void*)macify_init_stdio, &info)) {
+            char b[128];
+            int n = snprintf(b, sizeof(b), "macify: shim base = %p (macify_init_stdio at %p)\n",
+                    info.dli_fbase, (void*)macify_init_stdio);
+            (void)write(2, b, n);
+        }
+    }
+
     /* Allocate a dedicated signal stack (256KB) so our crash handler can
      * run even if the main stack overflows. Without this, a stack overflow
      * kills the process silently (signal handler can't push a frame). */
@@ -110,34 +121,65 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     greg_t *regs = uc->uc_mcontext.gregs;
 
+    char buf[128];
+
     /* Write the signal number and fault address */
-    char buf[64];
     buf[0] = '\n';
     buf[1] = 's'; buf[2] = 'i'; buf[3] = 'g'; buf[4] = '=';
     buf[5] = '0' + (sig / 10);
     buf[6] = '0' + (sig % 10);
-    buf[7] = '\n';
-    write(2, buf, 8);
-
-    /* Write rip */
-    uint64_t rip = (uint64_t)regs[REG_RIP];
-    buf[0] = 'r'; buf[1] = 'i'; buf[2] = 'p'; buf[3] = '=';
+    buf[7] = ' ';
+    buf[8] = 'a'; buf[9] = 'd'; buf[10] = 'r'; buf[11] = '=';
+    uint64_t fault_addr = (uint64_t)info->si_addr;
     for (int i = 0; i < 16; i++) {
-        int nibble = (rip >> (60 - i*4)) & 0xf;
-        buf[4+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+        int nibble = (fault_addr >> (60 - i*4)) & 0xf;
+        buf[12+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
     }
-    buf[20] = '\n';
-    write(2, buf, 21);
+    buf[28] = '\n';
+    write(2, buf, 29);
 
-    /* Write rsp */
-    uint64_t rsp = (uint64_t)regs[REG_RSP];
-    buf[0] = 'r'; buf[1] = 's'; buf[2] = 'p'; buf[3] = '=';
-    for (int i = 0; i < 16; i++) {
-        int nibble = (rsp >> (60 - i*4)) & 0xf;
-        buf[4+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+    /* Helper to print a register */
+    #define PRINT_REG(name, val) do { \
+        buf[0] = name[0]; buf[1] = name[1]; buf[2] = name[2]; buf[3] = '='; \
+        for (int i = 0; i < 16; i++) { \
+            int nibble = ((val) >> (60 - i*4)) & 0xf; \
+            buf[4+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10; \
+        } \
+        buf[20] = '\n'; \
+        write(2, buf, 21); \
+    } while(0)
+
+    PRINT_REG("rip", (uint64_t)regs[REG_RIP]);
+    PRINT_REG("rsp", (uint64_t)regs[REG_RSP]);
+    PRINT_REG("rbp", (uint64_t)regs[REG_RBP]);
+    PRINT_REG("rax", (uint64_t)regs[REG_RAX]);
+    PRINT_REG("rbx", (uint64_t)regs[REG_RBX]);
+    PRINT_REG("rcx", (uint64_t)regs[REG_RCX]);
+    PRINT_REG("rdx", (uint64_t)regs[REG_RDX]);
+    PRINT_REG("rdi", (uint64_t)regs[REG_RDI]);
+    PRINT_REG("rsi", (uint64_t)regs[REG_RSI]);
+    PRINT_REG("r8 ", (uint64_t)regs[REG_R8]);
+    PRINT_REG("r9 ", (uint64_t)regs[REG_R9]);
+    PRINT_REG("r10", (uint64_t)regs[REG_R10]);
+    PRINT_REG("r11", (uint64_t)regs[REG_R11]);
+    PRINT_REG("r12", (uint64_t)regs[REG_R12]);
+    PRINT_REG("r13", (uint64_t)regs[REG_R13]);
+    PRINT_REG("r14", (uint64_t)regs[REG_R14]);
+    PRINT_REG("r15", (uint64_t)regs[REG_R15]);
+
+    /* Print first 8 stack entries */
+    write(2, "stack:\n", 7);
+    uint64_t *sp = (uint64_t *)regs[REG_RSP];
+    for (int s = 0; s < 8; s++) {
+        uint64_t val = sp[s];
+        buf[0] = 's'; buf[1] = 'p'; buf[2] = '+'; buf[3] = '0' + s; buf[4] = ':';
+        for (int i = 0; i < 16; i++) {
+            int nibble = (val >> (60 - i*4)) & 0xf;
+            buf[5+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+        }
+        buf[21] = '\n';
+        write(2, buf, 22);
     }
-    buf[20] = '\n';
-    write(2, buf, 21);
 
     _exit(128 + sig);
 }

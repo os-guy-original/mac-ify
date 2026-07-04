@@ -1,6 +1,8 @@
 /* flags.c — macOS/Linux flag translation and low-level I/O overrides
  * (mmap, open, madvise, mprotect, munmap, fcntl) */
 #include "io_internal.h"
+#include <errno.h>
+#include <string.h>
 
 int macify_net_debug_enabled = -1;
 
@@ -160,5 +162,13 @@ int munmap(void *addr, size_t length) {
     }
     static int (*real_munmap)(void *, size_t) = NULL;
     if (!real_munmap) real_munmap = dlsym(RTLD_NEXT, "munmap");
-    return real_munmap(addr, length);
+    int ret = real_munmap(addr, length);
+    if (getenv("MACIFY_MACH_DEBUG") && ret != 0) {
+        char b[160];
+        int n = snprintf(b, sizeof(b),
+            "macify: munmap(%p, %zu) = %d (errno=%d %s)\n",
+            addr, length, ret, errno, strerror(errno));
+        (void)write(2, b, n);
+    }
+    return ret;
 }
