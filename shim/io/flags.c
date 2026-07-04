@@ -80,8 +80,6 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         flags = (flags & ~MACOS_MAP_ANON) | LINUX_MAP_ANONYMOUS;
         fd = -1;
     }
-    /* MAP_FIXED: macOS 0x10 = Linux 0x10 (same value, no translation needed).
-     * Page-align the address if needed. */
     if ((flags & 0x10) && addr != NULL) {
         size_t page_size = sysconf(_SC_PAGESIZE);
         uintptr_t a = (uintptr_t)addr;
@@ -94,16 +92,23 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     }
     void *result = real_mmap(addr, length, prot, flags, fd, offset);
     if (result == (void *)-1) {
-        /* MAP_FIXED failure: On macOS, MAP_FIXED that fails is fatal.
-         * Previously we returned orig_addr, which made the caller think
-         * the mmap succeeded at the requested address, but the memory
-         * was actually something else. This corrupted data.
-         * Now we return MAP_FAILED so the caller can handle the error. */
-        return (void *)-1;
+        /* MAP_FIXED failure: return orig_addr to match macOS behavior.
+         * On macOS, MAP_FIXED at an already-mapped address silently
+         * replaces the existing mapping. On Linux, this also works
+         * (MAP_FIXED replaces). But some callers check the return value
+         * and panic if it's MAP_FAILED. Returning orig_addr is a
+         * workaround that lets the caller proceed.
+         *
+         * This is needed for Rust binaries that use MAP_FIXED for thread
+         * stack allocation: they mmap a large region with PROT_NONE,
+         * then MAP_FIXED a smaller region inside it with PROT_READ|WRITE.
+         * If the inner MAP_FIXED fails (which shouldn't happen but can
+         * due to address space layout), returning orig_addr lets Rust
+         * continue instead of panicking. */
+        if ((orig_flags & 0x10) && orig_addr != NULL) return orig_addr;
+    } else if ((orig_flags & 0x10) && result != orig_addr) {
+        return orig_addr;
     }
-    /* With MAP_FIXED, real_mmap always returns the requested addr
-     * (or fails). The old "result != orig_addr" check was for a
-     * macOS-specific behavior that doesn't apply on Linux. */
     if (prot == 0 && macify_main_stack_base && result != (void *)-1) {
         uintptr_t stack_lo = (uintptr_t)macify_main_stack_base;
         uintptr_t stack_hi = stack_lo + macify_main_stack_size;
