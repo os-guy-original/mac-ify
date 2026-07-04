@@ -115,6 +115,29 @@ static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
     [461] = SYS_pwrite64,   /* pwrite (modern macOS)  */
     [465] = SYS_pread64,    /* pread_nocancel         */
     [466] = SYS_pwrite64,   /* pwrite_nocancel        */
+    /* Go binaries use modern macOS syscall numbers (400+) */
+    [477] = SYS_mmap,       /* mmap (modern macOS)    (ARG_MMAP_FLAGS) */
+    [478] = SYS_lseek,      /* lseek (modern macOS)   */
+    [480] = SYS_ftruncate,  /* ftruncate (modern macOS) */
+    [481] = SYS_truncate,   /* truncate (modern macOS) */
+    [482] = SYS_stat,       /* stat (modern macOS)    */
+    [483] = SYS_fstat,      /* fstat (modern macOS)   */
+    [484] = SYS_lstat,      /* lstat (modern macOS)   */
+    [485] = SYS_unlink,     /* unlink (modern macOS)  */
+    [486] = SYS_access,     /* access (modern macOS)  */
+    [488] = SYS_read,       /* read_nocancel (modern) */
+    [489] = SYS_write,      /* write_nocancel (modern) */
+    [490] = SYS_open,       /* open_nocancel (modern) (ARG_OPEN_FLAGS) */
+    [491] = SYS_close,      /* close_nocancel (modern) */
+    [492] = SYS_getpid,     /* getpid (modern macOS)  */
+    [493] = SYS_getuid,     /* getuid (modern macOS)  */
+    [494] = SYS_geteuid,    /* geteuid (modern macOS) */
+    [495] = SYS_getgid,     /* getgid (modern macOS)  */
+    [496] = SYS_getegid,    /* getegid (modern macOS) */
+    [497] = SYS_setuid,     /* setuid (modern macOS)  */
+    [498] = SYS_setgid,     /* setgid (modern macOS)  */
+    [500] = SYS_read,       /* read_nocancel (modern macOS) */
+    [501] = SYS_write,      /* write_nocancel (modern macOS) */
     /* All other entries are 0 (unimplemented). We treat 0 as "unimplemented"
      * because Linux syscall 0 is SYS_read, which we never want to dispatch
      * to from a macOS syscall. Use -1 in the table to be explicit. */
@@ -148,6 +171,8 @@ static const uint8_t bsd_arg_flags[BSD_SYSCALL_MAX] = {
     [197] = ARG_MMAP_FLAGS,                   /* mmap */
     [398] = ARG_OPEN_FLAGS,                   /* open_nocancel */
     [405] = ARG_FCNTL_CMD,                    /* fcntl_nocancel */
+    [477] = ARG_MMAP_FLAGS,                   /* mmap (modern macOS) */
+    [490] = ARG_OPEN_FLAGS,                   /* open_nocancel (modern macOS) */
     /* wait4 (7) options WCONTINUED bit differs but is rarely used. */
 };
 
