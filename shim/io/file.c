@@ -75,7 +75,13 @@ int fcntl(int fd, int cmd, ...) {
         switch (cmd) {
             case 16: return 0; case 17: return 0;
             case 48: return 0; case 50: errno = ENOTSUP; return -1;
-            case 51: return 0; case 55: return 0;
+            /* F_FULLFSYNC (51) and F_BARRIERFSYNC (55) on macOS force the
+             * disk to flush its write cache. Linux has no direct equivalent,
+             * but fsync() is the closest — it flushes kernel buffers and
+             * asks the device to flush its cache. Without this, sqlite3
+             * thinks its commits are durable when they may not be. */
+            case 51: return fsync(fd);
+            case 55: return fdatasync(fd);
             case 61: return 0; case 63: return 0; case 42: return 0;
             default: return 0;
         }

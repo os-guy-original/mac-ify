@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <unistd.h>     /* fsync, fdatasync */
 
 /* ── Debug helper ─────────────────────────────────────────────── */
 

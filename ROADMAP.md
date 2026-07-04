@@ -22,17 +22,15 @@ Run real macOS x86_64 binaries on Linux. No emulation, no framework translation 
 
 ### Working binaries
 
-jq, ripgrep, fd, bat, xsv, sd, hyperfine, tree, curl, wget, htop (--version), procs, sqlite3 (--version AND full SQL execution including CREATE/INSERT/SELECT/UPDATE/DELETE/JOIN/aggregate/subquery/transaction/index/pragma)
+jq, ripgrep, fd, bat, xsv, sd, hyperfine, tree, curl, wget, htop (--version), procs, sqlite3 (--version AND full SQL execution including CREATE/INSERT/SELECT/UPDATE/DELETE/JOIN/aggregate/subquery/transaction/index/pragma + persistent DB files survive across invocations)
 
 ## In progress
 
 - **htop interactive**: ncurses initializes, anti-hooking check (strstr on CF function bytes) causes early exit
 - **curl HTTPS**: --version works, TLS handshake needs investigation (IPv6 sockaddr + OpenSSL init)
-- **sqlite3 file persistence**: in-memory SQL works; persistent DB files aren't always saved across invocations
 
 ## Next
 
 - Bypass or satisfy htop's anti-hooking check
 - Test curl/wget HTTPS against a local TLS server
-- Investigate sqlite3 file persistence (INSERTs may not flush to disk)
 - Test more real-world usage patterns (pipelines, file I/O, network)
