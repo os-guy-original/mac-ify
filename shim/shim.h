@@ -88,3 +88,11 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx);
 #define MACIFY_MAX_KEYS 256
 
 #endif
+
+/* ── Errno translation helper ──
+ * Use at the end of any function that returns -1 on error.
+ * Translates Linux errno to macOS errno if the caller is macOS code. */
+#define TRANSLATE_ERRNO(r) do { \
+    if ((r) == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) \
+        errno = macify_linux_to_macos_errno(errno); \
+} while (0)

@@ -278,8 +278,6 @@ void macify_freeaddrinfo(void *ai) {
  * setsockopt and silently ignore SO_NOSIGPIPE, translating it to a no-op.
  * Also translate other macOS-specific socket options. */
 
-#define MACOS_AF_INET6  30
-#define LINUX_AF_INET6  10
 
 /* Translate macOS SOL_SOCKET optname to Linux optname.
  * macOS uses 0x1000-base for most options; Linux uses small integers.
@@ -552,7 +550,7 @@ ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
                  sockfd, len, flags, dest_addr, r, saved);
         macify_net_dbg(b);
     }
-    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+    TRANSLATE_ERRNO(r);
         errno = macify_linux_to_macos_errno(saved);
     return r;
 }
@@ -572,7 +570,7 @@ ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) {
                  sockfd, len, flags, r, saved);
         macify_net_dbg(b);
     }
-    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+    TRANSLATE_ERRNO(r);
         errno = macify_linux_to_macos_errno(saved);
     return r;
 }
@@ -593,7 +591,7 @@ ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) {
                  sockfd, len, flags, r, saved);
         macify_net_dbg(b);
     }
-    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+    TRANSLATE_ERRNO(r);
         errno = macify_linux_to_macos_errno(saved);
     return r;
 }
@@ -635,7 +633,7 @@ ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) {
                  sockfd, flags, r, saved);
         macify_net_dbg(b);
     }
-    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+    TRANSLATE_ERRNO(r);
         errno = macify_linux_to_macos_errno(saved);
     return r;
 }
@@ -653,7 +651,7 @@ ssize_t macify_recvmsg(int sockfd, void *msg, int flags) {
                  sockfd, flags, r, saved);
         macify_net_dbg(b);
     }
-    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+    TRANSLATE_ERRNO(r);
         errno = macify_linux_to_macos_errno(saved);
     return r;
 }

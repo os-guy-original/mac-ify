@@ -160,7 +160,6 @@ size_t pthread_get_stacksize_np(pthread_t thread) {
  * We create a mapping: macOS key (0-255) → glibc pthread_key_t.
  * Each macOS key_create allocates a real glibc key. All subsequent
  * getspecific/setspecific calls go through glibc's per-thread storage. */
-#define MACIFY_MAX_KEYS 256
 static pthread_key_t glibc_tls_keys[MACIFY_MAX_KEYS];
 static int glibc_key_used[MACIFY_MAX_KEYS];
 static int macify_next_key = 0;
@@ -241,7 +240,6 @@ void *pthread_getspecific(pthread_key_t key) {
  *
  * No global mutex is used, so recursive pthread_once calls with different
  * once_control variables don't deadlock. */
-#define MACOS_PTHREAD_ONCE_INIT 0x30B1BCBA
 
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
     static int ssl_debug = -1;
@@ -305,9 +303,6 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
  * real function via dlsym(RTLD_NEXT, ...).
  */
 
-#define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u
-#define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
-#define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
 
 /* Cache glibc's real function pointers (resolved lazily on first use). */
 static int   (*real_mutex_lock)(pthread_mutex_t *);
