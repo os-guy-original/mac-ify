@@ -127,6 +127,20 @@ extern int16_t macify_mapupper[256];
 #define MACOS_PTHREAD_ONCE_INIT  0x30B1BCBA
 #define MACIFY_MAX_KEYS 256
 
+/* ── Fake CoreFoundation object tag values ──────────────────────
+ * Used by cf.c, objc_compat.c, and any other file that creates or
+ * inspects fake CF objects (CFString, CFArray, CFDictionary, etc.). */
+#define SC_TAG_STRING     0x5C01  /* fake CFString */
+#define SC_TAG_ARRAY      0x5C02  /* fake CFArray */
+#define SC_TAG_DICT       0x5C03  /* fake CFDictionary */
+#define SC_TAG_STORE      0x5C04  /* fake SCDynamicStoreRef */
+
+struct sc_obj {
+    uint32_t tag;       /* one of SC_TAG_* */
+    uint32_t count;     /* element count for arrays/dicts, byte count for strings */
+    void *data;         /* payload (string, or array of pointers) */
+};
+
 #endif /* MACIFY_SHIM_H */
 
 /* Errno translation: use at end of functions returning -1 on error */

@@ -598,10 +598,7 @@ int connectx(int socket, const void *endpoints, unsigned int endpointslen,
     return macify_connect(socket, ep->sae_dstaddr, ep->sae_dstlen);
 }
 
-/* CFTimeZoneResetSystem — no-op (we don't track timezone changes) */
-void CFTimeZoneResetSystem(void) {
-    /* no-op */
-}
+/* CFTimeZoneResetSystem is now defined in misc/cf.c */
 
 
 
@@ -1093,11 +1090,8 @@ void *xpc_date_create_from_current(void) { return NULL; }
 
 /* CF stubs needed by Go */
 void *CFDateCreate(void *alloc, double time) { (void)alloc; (void)time; return NULL; }
-void *CFStringCreateWithBytes(void *alloc, const void *bytes, long numBytes,
-                              int encoding, int isExternal) {
-    (void)alloc; (void)encoding; (void)isExternal;
-    return (void *)bytes;  /* return raw pointer like CFDataCreate */
-}
+/* CFStringCreateWithBytes is now defined in misc/objc_compat.c with a
+ * proper sc_obj wrapper so CFStringGetBytes etc. work. */
 void *CFStringCreateExternalRepresentation(void *alloc, const void *str,
                                            int encoding, int lossByte) {
     (void)alloc; (void)str; (void)encoding; (void)lossByte;

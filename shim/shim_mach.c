@@ -481,3 +481,11 @@ int proc_pid_rusage(int pid, int flavor, void *buffer) {
     (void)pid; (void)flavor; (void)buffer;
     return 0;
 }
+
+/* ── proc_listallpids ───────────────────────────────────────────
+ * macOS libproc signature: int proc_listallpids(void *buffer, int buffersize);
+ * Returns the number of PIDs that would have been written (in bytes),
+ * like proc_listpids. dust (Rust) calls this to enumerate processes. */
+int proc_listallpids(void *buffer, int buffersize) {
+    return proc_listpids(/*PROC_ALL_PIDS=*/1, 0, buffer, buffersize);
+}

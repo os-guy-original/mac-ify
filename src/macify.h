@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <dlfcn.h>
+#include <link.h>
 
 /* ============================================================
  * Mach-O constants
@@ -38,6 +39,9 @@
 #define LC_SEGMENT_64       0x19u
 #define LC_UNIXTHREAD       0x05u
 #define LC_LOAD_DYLIB       0x0Cu
+#define LC_LOAD_WEAK_DYLIB  (0x18u | 0x80000000u)  /* LC_REQ_DYLD bit set */
+#define LC_REEXPORT_DYLIB   (0x1Fu | 0x80000000u)
+#define LC_LAZY_LOAD_DYLIB  0x20u
 #define LC_DYLD_INFO_ONLY   0x80000022u
 #define LC_MAIN             0x80000028u
 #define LC_SYMTAB           0x02u

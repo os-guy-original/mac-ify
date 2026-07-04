@@ -26,17 +26,12 @@
  *   CFRelease(dict); CFRelease(store);
  */
 
-/* Tag values for our fake CF objects. */
+/* Tag values for our fake CF objects. Also defined in shim.h for use
+ * by other shim files (objc_compat.c, etc.). */
 #define SC_TAG_STRING     0x5C01  /* fake CFString */
 #define SC_TAG_ARRAY      0x5C02  /* fake CFArray */
 #define SC_TAG_DICT       0x5C03  /* fake CFDictionary */
 #define SC_TAG_STORE      0x5C04  /* fake SCDynamicStoreRef */
-
-struct sc_obj {
-    uint32_t tag;       /* one of SC_TAG_* */
-    uint32_t count;     /* element count for arrays/dicts */
-    void *data;         /* payload (string, or array of pointers) */
-};
 
 /* Parse /etc/resolv.conf and return up to 8 nameserver IPs as a NULL-terminated
  * array of strings. Caller must not free (returns static buffer). */
@@ -229,24 +224,43 @@ void CFRelease(void *cf) {
  * We return safe defaults so the caller doesn't crash. */
 
 /* CFStringGetBytes: copy bytes from a CFString to a raw buffer.
- * Return 0 (failure) — the caller will fall back to CFStringGetCStringPtr. */
+ * Works with our sc_obj-tagged strings (created by CFStringCreateWithBytesNoCopy,
+ * CFStringCreateWithCString, etc.). Returns the number of bytes actually copied
+ * into `bytes`. 0 = conversion failed or empty string. */
 unsigned long CFStringGetBytes(void *theString, long rangeStart, long rangeLength,
                                unsigned long encoding,
                                unsigned char lossyByte, unsigned char isExternal,
                                unsigned char *bytes, unsigned long maxBytes,
                                long *usedBytes) {
-    (void)theString; (void)rangeStart; (void)rangeLength;
     (void)encoding; (void)lossyByte; (void)isExternal;
-    (void)bytes; (void)maxBytes;
-    if (usedBytes) *usedBytes = 0;
-    return 0;  /* 0 = conversion failed */
+    if (!theString) { if (usedBytes) *usedBytes = 0; return 0; }
+    const struct sc_obj *s = (const struct sc_obj *)theString;
+    if (s->tag != SC_TAG_STRING) { if (usedBytes) *usedBytes = 0; return 0; }
+    const char *src = (const char *)s->data;
+    if (!src) { if (usedBytes) *usedBytes = 0; return 0; }
+    long total = (long)s->count;
+    /* Clip range to actual string length */
+    if (rangeStart < 0) rangeStart = 0;
+    if (rangeLength < 0) rangeLength = 0;
+    if (rangeStart > total) rangeStart = total;
+    if (rangeStart + rangeLength > total) rangeLength = total - rangeStart;
+    if (rangeLength == 0) { if (usedBytes) *usedBytes = 0; return 0; }
+    /* Copy as many bytes as fit in `bytes` */
+    unsigned long to_copy = (unsigned long)rangeLength;
+    if (maxBytes < to_copy) to_copy = maxBytes;
+    if (bytes && to_copy > 0) memcpy(bytes, src + rangeStart, to_copy);
+    if (usedBytes) *usedBytes = (long)to_copy;
+    return to_copy;
 }
 
 /* CFStringGetCStringPtr: return a direct C string pointer.
- * Return NULL — forces the caller to use CFStringGetBytes instead. */
+ * For our sc_obj-tagged strings, we can return the underlying buffer directly. */
 const char *CFStringGetCStringPtr(void *theString, unsigned long encoding) {
-    (void)theString; (void)encoding;
-    return NULL;
+    (void)encoding;
+    if (!theString) return NULL;
+    const struct sc_obj *s = (const struct sc_obj *)theString;
+    if (s->tag != SC_TAG_STRING) return NULL;
+    return (const char *)s->data;
 }
 
 /* CFTimeZoneCopySystem: return NULL — the caller handles gracefully. */
@@ -259,18 +273,70 @@ const char *CFTimeZoneGetName(void *tz) {
     return NULL;
 }
 
-
-/* ── CoreFoundation stubs for htop ──────────────────────────────
- * htop uses CF functions for reading system configuration plist files.
- * We provide minimal stubs that return empty/null values. */
-
-unsigned long CFGetTypeID(void *cf) {
-    (void)cf;
-    return 0;
+/* CFTimeZoneResetSystem — no-op (we don't cache anything). */
+void CFTimeZoneResetSystem(void) {
 }
 
+/* CFStringCreateWithBytesNoCopy — create a CFString from a raw byte buffer
+ * WITHOUT copying the bytes (the caller owns the buffer; the allocator
+ * releaseFn is responsible for freeing it). Used by Rust std's macOS
+ * platform code for string interop.
+ *
+ * We wrap the bytes in an sc_obj with tag=SC_TAG_STRING so that
+ * CFStringGetBytes, CFStringGetCStringPtr, CFStringGetLength can work
+ * on it. Note: we DO NOT take ownership of `bytes`; the caller must
+ * keep it alive for the lifetime of the returned CFStringRef. */
+void *macify_CFStringCreateWithBytesNoCopy(void *alloc, const void *bytes,
+                                            long numBytes, unsigned long encoding,
+                                            unsigned char shouldFreeBytes) __asm__("CFStringCreateWithBytesNoCopy");
+void *macify_CFStringCreateWithBytesNoCopy(void *alloc, const void *bytes,
+                                            long numBytes, unsigned long encoding,
+                                            unsigned char shouldFreeBytes) {
+    (void)alloc; (void)encoding; (void)shouldFreeBytes;
+    if (!bytes && numBytes > 0) return NULL;
+    struct sc_obj *s = (struct sc_obj *)calloc(1, sizeof(*s));
+    s->tag = SC_TAG_STRING;
+    s->count = (uint32_t)numBytes;
+    s->data = (void *)bytes;  /* no copy — caller-owned */
+    return s;
+}
+
+
+/* ── CF type IDs ───────────────────────────────────────────────
+ * CoreFoundation's CFGetTypeID(obj) returns a unique integer per CF type.
+ * Real macOS uses an internal registry; we simulate with small constants.
+ * Objects created by our shim carry an sc_obj tag (SC_TAG_STRING, etc.),
+ * so CFGetTypeID dispatches on that. Objects NOT created by our shim
+ * (e.g. raw pointers from CFDataCreate which returns the bytes pointer)
+ * fall through to a default "unknown" type ID. */
+#define CF_TYPEID_STRING   0x53747267  /* 'Strg' */
+#define CF_TYPEID_ARRAY    0x41727261  /* 'Arra' */
+#define CF_TYPEID_DICT     0x44696374  /* 'Dict' */
+#define CF_TYPEID_DATA     0x44617461  /* 'Data' */
+#define CF_TYPEID_NUMBER   0x4e756d62  /* 'Numb' */
+#define CF_TYPEID_URL      0x55524c5f  /* 'URL_' */
+#define CF_TYPEID_UNKNOWN  0
+
+unsigned long CFGetTypeID(void *cf) {
+    if (!cf) return CF_TYPEID_UNKNOWN;
+    const struct sc_obj *o = (const struct sc_obj *)cf;
+    switch (o->tag) {
+        case SC_TAG_STRING: return CF_TYPEID_STRING;
+        case SC_TAG_ARRAY:  return CF_TYPEID_ARRAY;
+        case SC_TAG_DICT:   return CF_TYPEID_DICT;
+        case SC_TAG_STORE:  return CF_TYPEID_UNKNOWN;
+        default:            return CF_TYPEID_UNKNOWN;
+    }
+}
+
+unsigned long CFStringGetTypeID(void) { return CF_TYPEID_STRING; }
+unsigned long CFArrayGetTypeID(void)  { return CF_TYPEID_ARRAY; }
+unsigned long CFDataGetTypeID(void)   { return CF_TYPEID_DATA; }
+unsigned long CFNumberGetTypeID(void) { return CF_TYPEID_NUMBER; }
+unsigned long CFURLGetTypeID(void)    { return CF_TYPEID_URL; }
+
 unsigned long CFDictionaryGetTypeID(void) {
-    return 0;
+    return CF_TYPEID_DICT;
 }
 
 int CFNumberGetValue(void *number, unsigned int theType, void *valuePtr) {

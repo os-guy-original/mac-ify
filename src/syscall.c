@@ -510,10 +510,12 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
      * (not __PAGEZERO). When rip=0 (NULL function pointer call), reading
      * rip-8 would fault and crash the crash handler. */
     int rip_in_pagezero = (rip < 0x100000000UL);  /* __PAGEZERO is 0..0x100000000 */
+    int rip_in_our_segments = 0;
     if (!rip_in_pagezero) {
         for (int i = 0; i < g_nsegments; i++) {
             if (rip >= g_segments[i].vmaddr &&
                 rip < g_segments[i].vmaddr + g_segments[i].vmsize) {
+                rip_in_our_segments = 1;
                 uint64_t offset = rip - g_segments[i].vmaddr;
                 fprintf(stderr, "  rip is in segment %s at offset %#lx (static=%#lx)\n",
                         g_segments[i].name, (unsigned long)offset,
@@ -532,6 +534,34 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         }
     } else {
         fprintf(stderr, "  rip is NULL — a NULL function pointer was called\n");
+    }
+
+    /* If rip is NOT in any of our mapped segments, it's in a host library
+     * (libmacify_shim.so, libc.so.6, libm.so.6, etc.). Use dladdr to find
+     * which library/symbol the crash occurred in. */
+    if (!rip_in_pagezero && !rip_in_our_segments) {
+        Dl_info di;
+        if (dladdr((void *)(uintptr_t)rip, &di)) {
+            /* Compute offset within the library file */
+            unsigned long offset_in_lib = 0;
+            if (di.dli_fbase) {
+                offset_in_lib = (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_fbase);
+            }
+            fprintf(stderr, "  rip is in host library %s (base=%p, offset=0x%lx)\n",
+                    di.dli_fname ? di.dli_fname : "(unknown)",
+                    di.dli_fbase, offset_in_lib);
+            if (di.dli_sname) {
+                fprintf(stderr, "    symbol: %s + 0x%lx\n",
+                        di.dli_sname,
+                        (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_saddr));
+            } else {
+                fprintf(stderr, "    symbol: (unknown — stripped)\n");
+                /* Print all loaded libraries with dl_iterate_phdr so we can
+                 * match the offset to the right library manually. */
+                extern int print_loaded_libs(void);
+                print_loaded_libs();
+            }
+        }
     }
     fprintf(stderr, "  si_code=%d (%s)\n", info->si_code,
             info->si_code == 1 ? "MAPERR (unmapped)" :
@@ -830,3 +860,19 @@ int patch_syscalls_in_segment(loaded_segment *seg) {
 
 
 
+
+/* Print all loaded libraries (for crash debugging). */
+static int dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size; (void)data;
+    const char *name = info->dlpi_name;
+    if (!name || !*name) name = "(main executable)";
+    fprintf(stderr, "    base=0x%lx name=%s\n",
+            (unsigned long)info->dlpi_addr, name);
+    return 0;
+}
+
+int print_loaded_libs(void) {
+    fprintf(stderr, "  Loaded libraries:\n");
+    dl_iterate_phdr(dl_iterate_cb, NULL);
+    return 0;
+}

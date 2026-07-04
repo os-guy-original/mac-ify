@@ -265,9 +265,15 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: LC_MAIN entryoff=%#lx\n",
                         (unsigned long)ep->entryoff);
             }
-        } else if (cmd == LC_LOAD_DYLIB) {
+        } else if (cmd == LC_LOAD_DYLIB || cmd == LC_LOAD_WEAK_DYLIB ||
+                   cmd == LC_REEXPORT_DYLIB || cmd == LC_LAZY_LOAD_DYLIB) {
             dylib_command *dc = (dylib_command *)(void *)lc;
             const char *name = (const char *)(lc + dc->name_offset);
+            const char *cmd_name =
+                (cmd == LC_LOAD_DYLIB)       ? "LC_LOAD_DYLIB" :
+                (cmd == LC_LOAD_WEAK_DYLIB)  ? "LC_LOAD_WEAK_DYLIB" :
+                (cmd == LC_REEXPORT_DYLIB)   ? "LC_REEXPORT_DYLIB" :
+                                               "LC_LAZY_LOAD_DYLIB";
             if (g_ndylibs >= MAX_DYLIBS) {
                 fprintf(stderr, "macify: too many dylibs (max %d)\n", MAX_DYLIBS);
                 return 1;
@@ -331,8 +337,8 @@ int main(int argc, char **argv, char **envp) {
             g_dylibs[g_ndylibs].libm_handle = libm_handle;  /* may be NULL */
             g_ndylibs++;
             if (g_verbose) {
-                fprintf(stderr, "macify: LC_LOAD_DYLIB \"%s\" -> libmacify_shim.so + libc.so.6 (ordinal %d)\n",
-                        name, g_ndylibs);
+                fprintf(stderr, "macify: %s \"%s\" -> libmacify_shim.so + libc.so.6 (ordinal %d)\n",
+                        cmd_name, name, g_ndylibs);
             }
         } else if (cmd == LC_DYLD_INFO_ONLY) {
             dyld_info_command *di = (dyld_info_command *)(void *)lc;

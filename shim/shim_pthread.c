@@ -77,6 +77,44 @@ int pthread_threadid_np(pthread_t thread, uint64_t *thread_id) {
     if (thread_id) *thread_id = (uint64_t)syscall(186);  /* SYS_gettid */
     return 0;
 }
+
+/* pthread_setname_np — macOS signature is `int pthread_setname_np(const char *name)`
+ * (sets the name of the CALLING thread). Linux's signature is
+ * `int pthread_setname_np(pthread_t thread, const char *name)` (sets name of ANY thread).
+ * The ABI mismatch causes glibc to interpret the macOS `name` pointer as a
+ * pthread_t and read garbage as the name, crashing in strlen.
+ *
+ * We export a 1-arg version that wraps glibc's 2-arg version, passing
+ * pthread_self() as the thread. We must use __asm__ aliasing because
+ * glibc's pthread.h declares pthread_setname_np with 2 args — including
+ * that header would cause a conflicting declaration. */
+int macify_pthread_setname_np(const char *name) __asm__("pthread_setname_np");
+int macify_pthread_setname_np(const char *name) {
+    /* glibc's pthread_setname_np is versioned; use dlvsym to find it. */
+    static int (*real_setname)(pthread_t, const char *) = NULL;
+    if (!real_setname) {
+        real_setname = dlvsym(RTLD_NEXT, "pthread_setname_np", "GLIBC_2.2.5");
+        if (!real_setname) real_setname = dlsym(RTLD_NEXT, "pthread_setname_np");
+    }
+    if (real_setname) return real_setname(pthread_self(), name);
+    return 0;
+}
+
+/* pthread_getname_np — macOS signature is `int pthread_getname_np(pthread_t thread, char *name, size_t len)`.
+ * This matches Linux's signature, so we can pass through. But glibc's
+ * pthread_getname_np returns 0 on success, while macOS returns 0 too.
+ * However, glibc's version requires thread to be valid. Just pass through. */
+int macify_pthread_getname_np(pthread_t thread, char *name, size_t len) __asm__("pthread_getname_np");
+int macify_pthread_getname_np(pthread_t thread, char *name, size_t len) {
+    static int (*real_getname)(pthread_t, char *, size_t) = NULL;
+    if (!real_getname) {
+        real_getname = dlvsym(RTLD_NEXT, "pthread_getname_np", "GLIBC_2.2.5");
+        if (!real_getname) real_getname = dlsym(RTLD_NEXT, "pthread_getname_np");
+    }
+    if (real_getname) return real_getname(thread, name, len);
+    if (name && len > 0) name[0] = '\0';
+    return 0;
+}
 /* pthread_cond_timedwait_relative_np — macOS-specific variant that takes
  * a RELATIVE timeout (nanoseconds from now) instead of an absolute time.
  * Linux's pthread_cond_timedwait uses absolute time, so we convert. */

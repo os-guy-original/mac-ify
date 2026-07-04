@@ -2,7 +2,9 @@
 #include "../shim.h"
 
 /* ── IOKit stubs for htop ───────────────────────────────────────
- * htop uses IOKit for power source info (battery). We stub these. */
+ * htop uses IOKit for power source info (battery). We stub these.
+ * dust (Rust disk-usage tool) also uses IOKit to enumerate disk
+ * statistics via IORegistryEntryGetName + IORegistryEntryCreateCFProperty. */
 
 /* kIOMasterPortDefault — deprecated alias for kIOMainPortDefault.
  * Many binaries still reference this. Both should be 0 (the default
@@ -42,6 +44,53 @@ int IORegistryEntryCreateCFProperties(void *entry, void *props, void *alloc, uns
 void *IORegistryEntryCreateCFProperty(void *entry, void *key, void *alloc, unsigned int options) {
     (void)entry; (void)key; (void)alloc; (void)options;
     return NULL;
+}
+
+/* IORegistryEntryGetName — get the name of an IORegistry entry.
+ * macOS signature: kern_return_t IORegistryEntryGetName(io_registry_entry_t entry, io_name_t name);
+ * io_name_t is a 128-byte char buffer. We return kIOReturnNotFound (no entry)
+ * and fill the buffer with an empty string so callers don't read garbage. */
+int IORegistryEntryGetName(void *entry, char *name) {
+    (void)entry;
+    if (name) {
+        name[0] = '\0';
+    }
+    return 0;  /* kIOReturnSuccess but empty name */
+}
+
+/* IORegistryEntryGetPath — get the path of an IORegistry entry.
+ * Returns kIOReturnNotFound and fills the buffer with empty string. */
+int IORegistryEntryGetPath(void *entry, const char *plane, char *path) {
+    (void)entry; (void)plane;
+    if (path) path[0] = '\0';
+    return 0;
+}
+
+/* IOObjectGetClass — get the class name of an IO object. */
+int IOObjectGetClass(void *obj, char *className) {
+    (void)obj;
+    if (className) className[0] = '\0';
+    return 0;
+}
+
+/* IOObjectConformsTo — check if an IO object conforms to a class. Returns 0 (false). */
+int IOObjectConformsTo(void *obj, const char *className) {
+    (void)obj; (void)className;
+    return 0;
+}
+
+/* IORegistryEntryGetParentEntry — get the parent entry. Returns 0 (no parent). */
+int IORegistryEntryGetParentEntry(void *entry, const char *plane, void *parent) {
+    (void)entry; (void)plane;
+    if (parent) *(void **)parent = NULL;
+    return 0;
+}
+
+/* IORegistryEntryGetChildEntry — get a child entry. Returns 0 (no child). */
+int IORegistryEntryGetChildEntry(void *entry, const char *plane, void *child) {
+    (void)entry; (void)plane;
+    if (child) *(void **)child = NULL;
+    return 0;
 }
 
 /* IOKit power source stubs */

@@ -189,5 +189,35 @@ if [ -f tests/real/fd_macos ]; then
     rm -rf /tmp/macify_fd_test
 fi
 
+# dust: disk usage scanning
+if [ -f tests/real/dust_macos ]; then
+    mkdir -p /tmp/macify_dust_test/subdir
+    dd if=/dev/zero of=/tmp/macify_dust_test/big.bin bs=1024 count=100 2>/dev/null
+    dd if=/dev/zero of=/tmp/macify_dust_test/subdir/small.bin bs=1024 count=10 2>/dev/null
+    # dust with default depth shows both files (in different levels)
+    result=$(timeout 10 ./build/macify -q tests/real/dust_macos /tmp/macify_dust_test/ 2>/dev/null | grep -c "big.bin\|small.bin")
+    if [ "$result" = "2" ]; then
+        echo -e "  ${GREEN}PASS${RESET}  dust disk usage (→ 2 files scanned)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${RESET}  dust disk usage (got: $result files)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -rf /tmp/macify_dust_test
+fi
+
+# starship: shell prompt
+if [ -f tests/real/starship_macos ]; then
+    # starship session generates a random session key (16 alphanumeric chars)
+    result=$(timeout 10 ./build/macify -q tests/real/starship_macos session 2>/dev/null)
+    if [ ${#result} -ge 16 ] && echo "$result" | grep -qE '^[A-Za-z0-9]+$'; then
+        echo -e "  ${GREEN}PASS${RESET}  starship session (→ random key: ${result:0:8}...)"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}FAIL${RESET}  starship session (got: $result)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
 echo ""
 echo -e "${BOLD}Results: ${GREEN}$PASS passed${RESET}, ${RED}$FAIL failed${RESET}, ${YELLOW}$SKIP skipped${RESET}"
