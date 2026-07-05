@@ -171,26 +171,18 @@ static void setup_gs_base(uint64_t entry_rip) {
          * shadow. This is slower but reliable. */
         uint64_t gs_base = tls_g_addr - 0x30;
 
-        /* Check kernel version: only use wrgsbase on 5.15+ */
+        /* Check if CPU supports FSGSBASE.
+         * On kernel 5.10, arch_prctl(ARCH_SET_GS) doesn't properly preserve
+         * GS base across signal delivery. Using wrgsbase is actually more
+         * reliable even on old kernels, because the CPU register is saved
+         * in the signal frame (ucontext) by the kernel's signal delivery
+         * code. The shadow GS base (from arch_prctl) may get out of sync. */
         static int use_wrgsbase = -1;
         if (use_wrgsbase == -1) {
-            struct utsname uts;
-            if (uname(&uts) == 0) {
-                int major = 0, minor = 0;
-                sscanf(uts.release, "%d.%d", &major, &minor);
-                /* FSGSBASE signal handling was fixed in 5.15 */
-                if (major > 5 || (major == 5 && minor >= 15)) {
-                    /* Also check CPU supports FSGSBASE */
-                    unsigned int eax, ebx, ecx, edx;
-                    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                                     : "0"(7), "2"(0));
-                    use_wrgsbase = (ebx & (1 << 16)) ? 1 : 0;
-                } else {
-                    use_wrgsbase = 0;  /* Old kernel, don't use wrgsbase */
-                }
-            } else {
-                use_wrgsbase = 0;
-            }
+            unsigned int eax, ebx, ecx, edx;
+            __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                             : "0"(7), "2"(0));
+            use_wrgsbase = (ebx & (1 << 16)) ? 1 : 0;  /* EBX bit 16 = FSGSBASE */
         }
 
         if (use_wrgsbase) {
@@ -230,20 +222,22 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
     setup_gs_base(entry);
 
-    /* For Go binaries: block SIGURG (async preemption signal) before
-     * calling entry point. SIGURG is Go's preemption signal — if it
-     * arrives before m.gsignal is allocated, the signal handler crashes.
-     *
-     * We only block SIGURG (not all signals) because Go's schedinit
-     * saves/restores the signal mask, and blocking everything would
-     * prevent Go's timer-based preemption (SIGVTALRM) from working. */
+    /* For Go binaries: block ALL signals except SIGSEGV/SIGBUS/SIGFPE/SIGILL
+     * before calling entry point. Go's runtime saves the current mask during
+     * schedinit, then restores it. It then uses sigprocmask(SIG_UNBLOCK)
+     * to selectively unblock signals AFTER installing handlers and allocating
+     * m.gsignal. By blocking everything now, no signal can arrive before
+     * Go is ready. */
     if (g_tls_g_addr) {
-        sigset_t go_mask;
-        sigemptyset(&go_mask);
-        sigaddset(&go_mask, 23);  /* SIGURG (Linux) = macOS SIGURG (16) */
-        sigprocmask(SIG_BLOCK, &go_mask, NULL);
+        sigset_t all_mask;
+        sigfillset(&all_mask);
+        sigdelset(&all_mask, SIGSEGV);
+        sigdelset(&all_mask, SIGBUS);
+        sigdelset(&all_mask, SIGFPE);
+        sigdelset(&all_mask, SIGILL);
+        sigprocmask(SIG_BLOCK, &all_mask, NULL);
         if (g_verbose) {
-            fprintf(stderr, "macify: Go binary — blocking SIGURG until runtime initializes\n");
+            fprintf(stderr, "macify: Go binary — blocking all signals until runtime initializes\n");
         }
     }
 
