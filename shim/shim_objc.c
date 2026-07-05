@@ -38,3 +38,20 @@ void *sel_registerName(const char *name) {
 void *sel_getUid(const char *name) {
     return (void *)name;
 }
+
+/* objc_setProperty / objc_getProperty — Objective-C property accessors.
+ * These are called by synthesized @property getters/setters. */
+void *objc_getProperty(void *self, void *sel, long offset, int isAtomic) {
+    (void)sel; (void)isAtomic;
+    return *(void **)((char *)self + offset);
+}
+
+void objc_setProperty(void *self, void *sel, long offset, void *value, int isAtomic, int shouldCopy) {
+    (void)sel; (void)isAtomic; (void)shouldCopy;
+    *(void **)((char *)self + offset) = value;
+}
+
+void objc_copyStruct(void *dest, const void *src, long size, int isAtomic, int hasStrong) {
+    (void)isAtomic; (void)hasStrong;
+    memmove(dest, src, size);
+}

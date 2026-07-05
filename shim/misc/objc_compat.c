@@ -333,6 +333,10 @@ void *CFBooleanCreate(void *alloc, int value) {
 void *kCFBooleanTrue = cf_bool_true_sentinel;
 void *kCFBooleanFalse = cf_bool_false_sentinel;
 
+/* kCFNull — global CFNull reference. */
+static char cf_null_sentinel[16] = {0};
+void *kCFNull = cf_null_sentinel;
+
 /* ── LaunchServices stub ────────────────────────────────────────
  * LSCopyApplicationURLsForBundleIdentifier — return NULL (no apps found). */
 void *LSCopyApplicationURLsForBundleIdentifier(void *bundleID, void *error) {

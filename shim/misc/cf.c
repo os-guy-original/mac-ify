@@ -204,6 +204,14 @@ const void *macify_CFDictionaryGetValue(const void *dict, const void *key) {
     return d->data;
 }
 
+/* CFDictionaryGetValueIfPresent — like GetValue but returns whether key was found. */
+int macify_CFDictionaryGetValueIfPresent(const void *dict, const void *key, const void **value) __asm__("CFDictionaryGetValueIfPresent");
+int macify_CFDictionaryGetValueIfPresent(const void *dict, const void *key, const void **value) {
+    const void *val = macify_CFDictionaryGetValue(dict, key);
+    if (value) *value = val;
+    return val != NULL;
+}
+
 
 /* _CF* — minimal CoreFoundation stubs. */
 
