@@ -593,8 +593,10 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             if (g_m > 0x10000 && g_m < 0x7fffffffffffUL) {
                 uint64_t m_g0 = *(volatile uint64_t *)g_m;
                 uint64_t m_curg = *(volatile uint64_t *)(g_m + 8);
-                fprintf(stderr, "  m.g0 = 0x%lx, m.curg = 0x%lx\n",
-                        (unsigned long)m_g0, (unsigned long)m_curg);
+                uint64_t m_gsignal = *(volatile uint64_t *)(g_m + 0xb8);
+                fprintf(stderr, "  m.g0 = 0x%lx, m.curg = 0x%lx, m.gsignal = 0x%lx\n",
+                        (unsigned long)m_g0, (unsigned long)m_curg,
+                        (unsigned long)m_gsignal);
             }
         }
     }
@@ -745,10 +747,19 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             linux_sa.handler = *(void **)macos_sa;
             unsigned int macos_flags = *(unsigned int *)(macos_sa + 12);
             linux_sa.flags = macos_flags | SA_ONSTACK;
-            memcpy(&linux_sa.mask, macos_sa + 8, 4);
+            /* Translate the 4-byte macOS sigset mask to 128-byte Linux sigset,
+             * translating signal numbers (macOS SIGURG=16 → Linux SIGURG=23, etc.) */
+            uint32_t macos_mask = *(uint32_t *)(macos_sa + 8);
+            sigset_t linux_mask;
+            sigemptyset(&linux_mask);
+            for (int ms = 1; ms <= 31; ms++) {
+                if (macos_mask & (1u << (ms - 1))) {
+                    int ls = translate_kill_signal(ms);
+                    if (ls > 0) sigaddset(&linux_mask, ls);
+                }
+            }
+            memcpy(&linux_sa.mask, &linux_mask, sizeof(linux_mask));
             a2 = (long)&linux_sa;
-            /* Translate macOS signal number to Linux signal number.
-             * macOS and Linux have different signal numbers starting from 7. */
             int macos_signum = (int)a1;
             int linux_signum = translate_kill_signal(macos_signum);
             if (g_verbose) {

@@ -184,6 +184,9 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     _exit(128 + sig);
 }
 
+/* Forward declaration — defined later in this file. */
+static int macos_sig_to_linux(int macos_sig);
+
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
     /* Translate macOS signal number to Linux signal number — but ONLY
      * if the caller is macOS code. macify's own code uses Linux signal
@@ -236,8 +239,16 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         linux_act.sa_handler = macos_act->handler;
         linux_act.sa_flags = macos_act->flags;
         sigemptyset(&linux_act.sa_mask);
+        /* Translate the 4-byte macOS sigset mask to 128-byte Linux sigset,
+         * translating signal numbers (macOS SIGURG=16 → Linux SIGURG=23, etc.) */
         if (macos_act->mask) {
-            memcpy(&linux_act.sa_mask, &macos_act->mask, sizeof(uint32_t));
+            uint32_t macos_mask = macos_act->mask;
+            for (int ms = 1; ms <= 31; ms++) {
+                if (macos_mask & (1u << (ms - 1))) {
+                    int ls = macos_sig_to_linux(ms);
+                    if (ls > 0) sigaddset(&linux_act.sa_mask, ls);
+                }
+            }
         }
         /* For SIGSEGV/SIGBUS: install OUR crash handler with SA_ONSTACK
          * so it runs on the alternate signal stack (set up in the constructor).
@@ -372,31 +383,90 @@ int sigismember(const sigset_t *set, int signum) {
  * sigsets. The caller check ensures we only translate for macOS callers;
  * glibc's internal calls pass through unmodified. */
 
-/* Expand a 4-byte macOS sigset to a 128-byte Linux sigset */
+/* macOS → Linux signal number translation.
+ * Signals 1-6 are the same. From 7 onward they diverge.
+ * Returns 0 if the macOS signal has no Linux equivalent. */
+static int macos_sig_to_linux(int macos_sig) {
+    static const int xlate[32] = {
+        [0]  = 0,  [1] = 1,  [2] = 2,  [3] = 3,  [4] = 4,  [5] = 5,  [6] = 6,
+        [7]  = 0,   /* SIGEMT — no Linux equiv */
+        [8]  = 8,   /* SIGFPE */
+        [9]  = 9,   /* SIGKILL */
+        [10] = 7,   /* macOS SIGBUS → Linux SIGBUS (7) */
+        [11] = 11,  /* SIGSEGV */
+        [12] = 31,  /* macOS SIGSYS → Linux SIGSYS (31) */
+        [13] = 13,  /* SIGPIPE */
+        [14] = 14,  /* SIGALRM */
+        [15] = 15,  /* SIGTERM */
+        [16] = 23,  /* macOS SIGURG → Linux SIGURG (23) */
+        [17] = 19,  /* macOS SIGSTOP → Linux SIGSTOP (19) */
+        [18] = 20,  /* macOS SIGTSTP → Linux SIGTSTP (20) */
+        [19] = 18,  /* macOS SIGCONT → Linux SIGCONT (18) */
+        [20] = 17,  /* macOS SIGCHLD → Linux SIGCHLD (17) */
+        [21] = 21,  /* SIGTTIN */
+        [22] = 22,  /* SIGTTOU */
+        [23] = 29,  /* macOS SIGIO → Linux SIGIO (29) */
+        [24] = 24,  /* SIGXCPU */
+        [25] = 25,  /* SIGXFSZ */
+        [26] = 26,  /* SIGVTALRM */
+        [27] = 27,  /* SIGPROF */
+        [28] = 28,  /* SIGWINCH */
+        [29] = 0,   /* macOS SIGINFO — no Linux equiv */
+        [30] = 10,  /* macOS SIGUSR1 → Linux SIGUSR1 (10) */
+        [31] = 12,  /* macOS SIGUSR2 → Linux SIGUSR2 (12) */
+    };
+    if (macos_sig < 0 || macos_sig >= 32) return macos_sig;
+    return xlate[macos_sig];
+}
+
+/* Linux → macOS signal number translation (reverse). */
+static int linux_sig_to_macos(int linux_sig) {
+    static int xlate[32];
+    static int initialized = 0;
+    if (!initialized) {
+        memset(xlate, 0, sizeof(xlate));
+        for (int m = 0; m < 32; m++) {
+            int l = macos_sig_to_linux(m);
+            if (l > 0 && l < 32) xlate[l] = m;
+        }
+        initialized = 1;
+    }
+    if (linux_sig < 0 || linux_sig >= 32) return linux_sig;
+    return xlate[linux_sig] ? xlate[linux_sig] : linux_sig;
+}
+
+/* Expand a 4-byte macOS sigset to a 128-byte Linux sigset.
+ * CRITICAL: translates signal numbers (macOS SIGURG=16 → Linux SIGURG=23, etc.)
+ * NOT just bit positions! */
 static void macos_to_linux_sigset(const void *macos_set, sigset_t *linux_set) {
     uint32_t macos_mask = *(const uint32_t *)macos_set;
-    /* Use glibc's sigemptyset (not our override) to properly zero 128 bytes */
     static int (*real_sigemptyset)(sigset_t *) = NULL;
     if (!real_sigemptyset) real_sigemptyset = dlsym(RTLD_NEXT, "sigemptyset");
     real_sigemptyset(linux_set);
-    for (int i = 1; i <= 31; i++) {
-        if (macos_mask & (1u << (i - 1))) {
-            /* Use glibc's sigaddset */
-            static int (*real_sigaddset)(sigset_t *, int) = NULL;
-            if (!real_sigaddset) real_sigaddset = dlsym(RTLD_NEXT, "sigaddset");
-            real_sigaddset(linux_set, i);
+    for (int macos_sig = 1; macos_sig <= 31; macos_sig++) {
+        if (macos_mask & (1u << (macos_sig - 1))) {
+            int linux_sig = macos_sig_to_linux(macos_sig);
+            if (linux_sig > 0) {
+                static int (*real_sigaddset)(sigset_t *, int) = NULL;
+                if (!real_sigaddset) real_sigaddset = dlsym(RTLD_NEXT, "sigaddset");
+                real_sigaddset(linux_set, linux_sig);
+            }
         }
     }
 }
 
-/* Compress a 128-byte Linux sigset to a 4-byte macOS sigset */
+/* Compress a 128-byte Linux sigset to a 4-byte macOS sigset.
+ * Translates signal numbers back (Linux SIGURG=23 → macOS SIGURG=16, etc.) */
 static void linux_to_macos_sigset(const sigset_t *linux_set, void *macos_set) {
     uint32_t macos_mask = 0;
     static int (*real_sigismember)(const sigset_t *, int) = NULL;
     if (!real_sigismember) real_sigismember = dlsym(RTLD_NEXT, "sigismember");
-    for (int i = 1; i <= 31; i++) {
-        if (real_sigismember(linux_set, i)) {
-            macos_mask |= (1u << (i - 1));
+    for (int linux_sig = 1; linux_sig <= 31; linux_sig++) {
+        if (real_sigismember(linux_set, linux_sig)) {
+            int macos_sig = linux_sig_to_macos(linux_sig);
+            if (macos_sig > 0 && macos_sig <= 31) {
+                macos_mask |= (1u << (macos_sig - 1));
+            }
         }
     }
     *(uint32_t *)macos_set = macos_mask;

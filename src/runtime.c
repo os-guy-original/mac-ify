@@ -152,11 +152,22 @@ static void setup_gs_base(uint64_t entry_rip) {
     }
 
     if (tls_g_addr) {
-        /* Set GS base so that gs:0x30 points to tls_g */
+        /* Set GS base so that gs:0x30 points to tls_g.
+         *
+         * CRITICAL: We must use BOTH wrgsbase AND arch_prctl(ARCH_SET_GS):
+         * - wrgsbase sets the CPU's GS base register immediately (fast, no syscall)
+         * - arch_prctl(ARCH_SET_GS) updates the kernel's "shadow" GS base
+         *
+         * The Linux kernel maintains a shadow copy of FS/GS bases in the task
+         * struct. When a signal is delivered, the kernel saves/restores the
+         * SHADOW values, NOT the CPU registers set by wrgsbase. So if we only
+         * use wrgsbase, the GS base gets RESET to the shadow value (0 or wrong)
+         * after the first signal delivery — causing Go's tls_g reads to return
+         * garbage, leading to "morestack on g0" and "lock count" panics.
+         *
+         * By calling arch_prctl AFTER wrgsbase, we sync the shadow with the
+         * CPU register, ensuring signal delivery preserves the correct GS base. */
         uint64_t gs_base = tls_g_addr - 0x30;
-        /* Use wrgsbase instruction directly (FSGSBASE feature) when available.
-         * This is more reliable than arch_prctl(ARCH_SET_GS) which may not
-         * take effect if glibc has already configured GS for its own TLS. */
         static int use_wrgsbase = -1;
         if (use_wrgsbase == -1) {
             unsigned int eax, ebx, ecx, edx;
@@ -166,8 +177,12 @@ static void setup_gs_base(uint64_t entry_rip) {
         }
         if (use_wrgsbase) {
             __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
-        } else {
-            syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        }
+        /* Always also call arch_prctl to update the kernel's shadow GS base.
+         * This is essential for signal delivery to preserve GS base. */
+        long prctl_ret = syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        if (g_verbose) {
+            fprintf(stderr, "macify: arch_prctl(ARCH_SET_GS) returned %ld\n", prctl_ret);
         }
         if (g_verbose) {
             fprintf(stderr, "macify: setup_gs_base: tls_g=0x%lx gs_base=0x%lx (wrgsbase=%d)\n",
@@ -189,6 +204,11 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * For Go binaries, GS base is set to (tls_g_addr - 0x30) so the GS
      * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
     setup_gs_base(entry);
+
+    /* For Go binaries: no signal blocking needed now that sigset_t
+     * translation properly translates signal numbers (macOS SIGURG=16
+     * → Linux SIGURG=23, etc.). Go's pthread_sigmask calls will
+     * correctly block/unblock the right Linux signals. */
 
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
