@@ -185,6 +185,43 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
 }
 
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
+    /* Translate macOS signal number to Linux signal number — but ONLY
+     * if the caller is macOS code. macify's own code uses Linux signal
+     * numbers and should not be translated. */
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static const int sig_xlate[32] = {
+            [0]  = 0, [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5, [6] = 6,
+            [7]  = 0,   /* SIGEMT — no Linux equiv */
+            [8]  = 8,   /* SIGFPE */
+            [9]  = 9,   /* SIGKILL */
+            [10] = 7,   /* macOS SIGBUS → Linux SIGBUS (7) */
+            [11] = 11,  /* SIGSEGV */
+            [12] = 31,  /* macOS SIGSYS → Linux SIGSYS (31) */
+            [13] = 13,  /* SIGPIPE */
+            [14] = 14,  /* SIGALRM */
+            [15] = 15,  /* SIGTERM */
+            [16] = 23,  /* macOS SIGURG → Linux SIGURG (23) */
+            [17] = 19,  /* macOS SIGSTOP → Linux SIGSTOP (19) */
+            [18] = 20,  /* macOS SIGTSTP → Linux SIGTSTP (20) */
+            [19] = 18,  /* macOS SIGCONT → Linux SIGCONT (18) */
+            [20] = 17,  /* macOS SIGCHLD → Linux SIGCHLD (17) */
+            [21] = 21,  /* SIGTTIN */
+            [22] = 22,  /* SIGTTOU */
+            [23] = 29,  /* macOS SIGIO → Linux SIGIO (29) */
+            [24] = 24,  /* SIGXCPU */
+            [25] = 25,  /* SIGXFSZ */
+            [26] = 26,  /* SIGVTALRM */
+            [27] = 27,  /* SIGPROF */
+            [28] = 28,  /* SIGWINCH */
+            [29] = 0,   /* macOS SIGINFO — no Linux equiv */
+            [30] = 10,  /* macOS SIGUSR1 → Linux SIGUSR1 (10) */
+            [31] = 12,  /* macOS SIGUSR2 → Linux SIGUSR2 (12) */
+        };
+        if (signum >= 0 && signum < 32 && sig_xlate[signum]) {
+            signum = sig_xlate[signum];
+        }
+    }
+
     if (!real_sigaction) {
         real_sigaction = dlsym(RTLD_NEXT, "sigaction");
     }
@@ -206,7 +243,10 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
          * so it runs on the alternate signal stack (set up in the constructor).
          * Without SA_ONSTACK, a stack overflow prevents the handler from
          * running because there's no stack space to push the signal frame. */
-        if (signum == SIGSEGV || signum == SIGBUS) {
+        /* For SIGSEGV/SIGBUS: install OUR crash handler with SA_ONSTACK.
+         * Note: at this point, signum is already translated to Linux numbers.
+         * Linux SIGSEGV=11, SIGBUS=7, SIGILL=4. */
+        if (signum == 11 /*SIGSEGV*/ || signum == 7 /*SIGBUS*/) {
             linux_act.sa_sigaction = macify_crash_handler;
             linux_act.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
             p_linux_act = &linux_act;
@@ -447,20 +487,45 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
     return result;
 }
 
-/* sigaltstack: the Rust runtime calls sigaltstack to set up its own alt
- * stack, which may be in a bad location (within the guard page area). We
- * no-op this call so our constructor's alt stack (set up via raw syscall)
- * remains active. Our alt stack is a 256KB static buffer in the shim,
- * which is always safe. */
-int macify_sigaltstack(const stack_t *ss, stack_t *oss) __asm__("sigaltstack");
-int macify_sigaltstack(const stack_t *ss, stack_t *oss) {
-    if (oss) {
-        /* Return our alt stack info as the "old" stack */
-        oss->ss_sp = NULL;
-        oss->ss_size = 0;
-        oss->ss_flags = 0;
+/* sigaltstack: macOS and Linux have different stack_t layouts!
+ * macOS: ss_sp(8), ss_size(8), ss_flags(4)+pad(4) = 24 bytes
+ * Linux: ss_sp(8), ss_flags(4)+pad(4), ss_size(8) = 24 bytes
+ * Field order differs — ss_size and ss_flags are swapped.
+ *
+ * We translate the struct layout and call the real sigaltstack.
+ * This is critical for Go binaries which need their own signal stack
+ * for gsignal goroutine. Without it, Go crashes in systemstack. */
+int macify_sigaltstack(const void *ss, void *oss) __asm__("sigaltstack");
+int macify_sigaltstack(const void *ss, void *oss) {
+    stack_t linux_ss, linux_oss;
+    stack_t *p_ss = NULL, *p_oss = NULL;
+
+    if (ss) {
+        /* Read macOS-format stack_t and convert to Linux format */
+        const uint8_t *macos_ss = (const uint8_t *)ss;
+        memset(&linux_ss, 0, sizeof(linux_ss));
+        linux_ss.ss_sp = *(void *const *)macos_ss;            /* offset 0 */
+        linux_ss.ss_size = *(const size_t *)(macos_ss + 8);   /* macOS: size at 8 */
+        linux_ss.ss_flags = *(const int *)(macos_ss + 16);    /* macOS: flags at 16 */
+        p_ss = &linux_ss;
     }
-    return 0;  /* pretend success, don't change the alt stack */
+    if (oss) {
+        p_oss = &linux_oss;
+    }
+
+    /* Call the real sigaltstack (glibc's, via dlsym) */
+    static int (*real_sigaltstack)(const stack_t *, stack_t *) = NULL;
+    if (!real_sigaltstack) real_sigaltstack = dlsym(RTLD_NEXT, "sigaltstack");
+    int result = real_sigaltstack(p_ss, p_oss);
+
+    if (oss && result == 0) {
+        /* Convert Linux-format stack_t back to macOS format */
+        uint8_t *macos_oss = (uint8_t *)oss;
+        *(void **)macos_oss = linux_oss.ss_sp;            /* offset 0 */
+        *(size_t *)(macos_oss + 8) = linux_oss.ss_size;   /* macOS: size at 8 */
+        *(int *)(macos_oss + 16) = linux_oss.ss_flags;    /* macOS: flags at 16 */
+    }
+    return result;
 }
 
 /* sigprocmask and pthread_sigmask: NOT overridden.
@@ -478,3 +543,23 @@ int macify_sigaltstack(const stack_t *ss, stack_t *oss) {
  * The sigaddset/sigemptyset/sigfillset overrides still use 4-byte sigsets,
  * so the macOS binary's code works correctly. Only the actual sigprocmask
  * call passes the 4-byte sigset to glibc's 128-byte implementation. */
+
+/* macify_get_shim_symbol — return our shim's override for a given symbol.
+ * Used by dl.c's dlsym override to ensure Go (and other binaries) get our
+ * translated sigaction/sigaltstack/signal instead of glibc's. */
+void *macify_get_shim_symbol(const char *symbol) {
+    if (strcmp(symbol, "sigaction") == 0) {
+        /* Return the address of our sigaction override.
+         * Use inline assembly to get the symbol address without
+         * conflicting with system header declarations. */
+        extern int sigaction(int, const struct sigaction *, struct sigaction *);
+        return (void *)sigaction;
+    }
+    if (strcmp(symbol, "sigaltstack") == 0) {
+        return (void *)macify_sigaltstack;
+    }
+    if (strcmp(symbol, "signal") == 0) {
+        return (void *)macify_signal;
+    }
+    return NULL;
+}

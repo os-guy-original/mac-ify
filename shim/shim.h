@@ -112,6 +112,11 @@ void __macify_set_text_range(uint64_t lo, uint64_t hi);
  * image's __TEXT segment. Used to gate errno translation. */
 int macify_caller_is_macos_text(void *ret_addr);
 
+/* Returns our shim's override for a given symbol, or NULL if we don't
+ * override it. Used by dl.c's dlsym to ensure Go gets our translated
+ * signal functions instead of glibc's. */
+void *macify_get_shim_symbol(const char *symbol);
+
 /* shim_misc.c — rune/locale tables */
 extern uint32_t macify_runetype[256];
 extern int16_t macify_maplower[256];

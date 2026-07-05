@@ -45,7 +45,7 @@ static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
     [46]  = SYS_rt_sigaction, /* sigaction (old macOS) */
     [47]  = SYS_getgid,     /* getgid         */
     [48]  = SYS_rt_sigprocmask, /* sigprocmask */
-    [53]  = SYS_sigaltstack,/* sigaltstack    */
+    [53]  = SYS_sigaltstack,/* sigaltstack — struct translated via ARG_SIGALTSTACK */
     [54]  = SYS_ioctl,      /* ioctl          (pass-through) */
     [57]  = SYS_symlink,    /* symlink        */
     [58]  = SYS_readlink,   /* readlink       */
@@ -153,6 +153,8 @@ static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
 #define ARG_KILL_SIGNAL   0x08   /* translate kill() signal number */
 #define ARG_MADVISE       0x10   /* translate madvise() advice value */
 #define ARG_SIGACTION     0x20   /* translate sigaction struct (macOS → Linux) */
+#define ARG_SIGPROCMASK   0x40   /* translate sigprocmask sigset_t (4B → 8B) + add sigsetsize arg */
+#define ARG_SIGALTSTACK   0x100  /* translate sigaltstack stack_t (field order differs) */
 #define ARG_FORCE_SLOW    0x80   /* always go through SIGILL (e.g., exit) */
 
 /* Constants confirmed identical between macOS and Linux (no translation):
@@ -171,12 +173,15 @@ static const uint8_t bsd_arg_flags[BSD_SYSCALL_MAX] = {
     [5]   = ARG_OPEN_FLAGS,                   /* open */
     [37]  = ARG_KILL_SIGNAL,                  /* kill */
     [46]  = ARG_SIGACTION | ARG_FORCE_SLOW,   /* sigaction — struct translation */
+    [48]  = ARG_SIGPROCMASK | ARG_FORCE_SLOW, /* sigprocmask — sigset_t translation */
+    [53]  = ARG_SIGALTSTACK | ARG_FORCE_SLOW, /* sigaltstack — stack_t field order differs */
     [75]  = ARG_MADVISE,                      /* madvise */
     [92]  = ARG_FCNTL_CMD,                    /* fcntl */
     [197] = ARG_MMAP_FLAGS,                   /* mmap */
     [398] = ARG_OPEN_FLAGS,                   /* open_nocancel */
     [405] = ARG_FCNTL_CMD,                    /* fcntl_nocancel */
     [462] = ARG_SIGACTION | ARG_FORCE_SLOW,   /* sigaction_nocancel — struct translation */
+    [463] = ARG_SIGPROCMASK | ARG_FORCE_SLOW, /* sigprocmask_nocancel — sigset_t translation */
     [477] = ARG_MMAP_FLAGS,                   /* mmap (modern macOS) */
     [490] = ARG_OPEN_FLAGS,                   /* open_nocancel (modern macOS) */
     /* wait4 (7) options WCONTINUED bit differs but is rarely used. */
@@ -598,6 +603,16 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     _exit(128 + sig);
 }
 
+/* Buffers for sigprocmask syscall translation (macOS 4-byte ↔ Linux 8-byte sigset_t).
+ * File-scope so they can be accessed both pre- and post-syscall. */
+static unsigned char linux_set_sigprocmask[8];
+static unsigned char linux_oset_sigprocmask[8];
+
+/* Buffers for sigaltstack syscall translation (macOS/Linux stack_t field order differs). */
+#include <signal.h>
+static stack_t linux_ss_sigaltstack;
+static stack_t linux_oss_sigaltstack;
+
 void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     (void)sig; (void)info;
     ucontext_t *uc = (ucontext_t *)uctx;
@@ -640,6 +655,10 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     /* Extract args. */
     long a1 = regs[REG_RDI];
     long a2 = regs[REG_RSI];
+    /* For sigprocmask: save original macOS oset pointer for post-syscall copy */
+    void *sigprocmask_save_macos_oset = NULL;
+    /* For sigaltstack: save original macOS oss pointer for post-syscall copy */
+    void *sigaltstack_save_macos_oss = NULL;
     long a3 = regs[REG_RDX];
     long a4 = regs[REG_R10];
     long a5 = regs[REG_R8];
@@ -701,8 +720,9 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         /* macOS sigaction(int signum, const struct sigaction *act,
          *                  struct sigaction *oldact)
          * a1 = signum, a2 = act (macOS struct ptr), a3 = oldact (macOS struct ptr)
+         * Translate signal number from macOS to Linux (they differ!).
          */
-        if (a1 == SIGILL || a1 == SIGSEGV || a1 == SIGBUS) {
+        if (a1 == 4 /*SIGILL*/ || a1 == 11 /*SIGSEGV*/ || a1 == 10 /*SIGBUS*/) {
             /* NEVER let the macOS binary replace our SIGILL/SIGSEGV/SIGBUS
              * handlers. SIGILL is critical for syscall translation.
              * SIGSEGV/SIGBUS are our crash handlers. */
@@ -727,14 +747,63 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             linux_sa.flags = macos_flags | SA_ONSTACK;
             memcpy(&linux_sa.mask, macos_sa + 8, 4);
             a2 = (long)&linux_sa;
+            /* Translate macOS signal number to Linux signal number.
+             * macOS and Linux have different signal numbers starting from 7. */
+            int macos_signum = (int)a1;
+            int linux_signum = translate_kill_signal(macos_signum);
             if (g_verbose) {
-                fprintf(stderr, "macify:   sigaction signum=%ld handler=%p flags=0x%x -> 0x%lx\n",
-                        a1, linux_sa.handler, macos_flags, linux_sa.flags);
+                fprintf(stderr, "macify:   sigaction signum macos=%d -> linux=%d handler=%p flags=0x%x -> 0x%lx\n",
+                        macos_signum, linux_signum, linux_sa.handler, macos_flags, linux_sa.flags);
             }
+            a1 = linux_signum;
         }
         if (a3) {
             static unsigned char linux_old_sa[152];
             a3 = (long)linux_old_sa;
+        }
+    }
+    if (flags & ARG_SIGPROCMASK) {
+        sigprocmask_save_macos_oset = (void *)a3;  /* save for post-syscall copy */
+        if (a2) {
+            memset(linux_set_sigprocmask, 0, 8);
+            memcpy(linux_set_sigprocmask, (void *)a2, 4);
+            a2 = (long)linux_set_sigprocmask;
+        }
+        if (a3) {
+            a3 = (long)linux_oset_sigprocmask;
+        }
+        a4 = 8;  /* sigsetsize = sizeof(kernel_sigset_t) = 8 */
+        if (g_verbose) {
+            fprintf(stderr, "macify:   sigprocmask how=%ld set=%p oset=%p sigsetsize=8\n",
+                    a1, (void *)a2, (void *)a3);
+        }
+    }
+    if (flags & ARG_SIGALTSTACK) {
+        /* macOS sigaltstack(const stack_t *ss, stack_t *oss)
+         * macOS stack_t: ss_sp(8), ss_size(8), ss_flags(4)+pad(4) = 24 bytes
+         * Linux stack_t: ss_sp(8), ss_flags(4)+pad(4), ss_size(8) = 24 bytes
+         * Field order differs — ss_size and ss_flags are swapped!
+         *
+         * a1 = ss (macOS stack_t ptr), a2 = oss (macOS stack_t ptr)
+         * Note: Linux sigaltstack uses a1=ss, a2=oss (same arg positions).
+         */
+        sigaltstack_save_macos_oss = (void *)a2;  /* save for post-syscall */
+        if (a1) {
+            uint8_t *macos_ss = (uint8_t *)a1;
+            memset(&linux_ss_sigaltstack, 0, sizeof(linux_ss_sigaltstack));
+            linux_ss_sigaltstack.ss_sp = *(void **)macos_ss;           /* offset 0 */
+            linux_ss_sigaltstack.ss_flags = *(int *)(macos_ss + 16);   /* macOS: flags at 16 */
+            linux_ss_sigaltstack.ss_size = *(size_t *)(macos_ss + 8);  /* macOS: size at 8 */
+            a1 = (long)&linux_ss_sigaltstack;
+            if (g_verbose) {
+                fprintf(stderr, "macify:   sigaltstack ss: sp=%p size=%lu flags=%d\n",
+                        linux_ss_sigaltstack.ss_sp,
+                        (unsigned long)linux_ss_sigaltstack.ss_size,
+                        linux_ss_sigaltstack.ss_flags);
+            }
+        }
+        if (a2) {
+            a2 = (long)&linux_oss_sigaltstack;
         }
     }
     /* wait4 options WCONTINUED bit differs (macOS 0x4 vs Linux 0x8) but is
@@ -767,6 +836,22 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
                             "converting to -1 (macOS convention)\n", result, err);
         }
         result = -1;
+    }
+
+    /* Post-syscall: for sigprocmask, copy 8-byte Linux sigset → 4-byte macOS sigset */
+    if (flags & ARG_SIGPROCMASK) {
+        if (sigprocmask_save_macos_oset && result == 0) {
+            memcpy(sigprocmask_save_macos_oset, linux_oset_sigprocmask, 4);
+        }
+    }
+    /* Post-syscall: for sigaltstack, convert Linux stack_t → macOS stack_t */
+    if (flags & ARG_SIGALTSTACK) {
+        if (sigaltstack_save_macos_oss && result == 0) {
+            uint8_t *macos_oss = (uint8_t *)sigaltstack_save_macos_oss;
+            *(void **)macos_oss = linux_oss_sigaltstack.ss_sp;           /* offset 0 */
+            *(size_t *)(macos_oss + 8) = linux_oss_sigaltstack.ss_size;  /* macOS: size at 8 */
+            *(int *)(macos_oss + 16) = linux_oss_sigaltstack.ss_flags;   /* macOS: flags at 16 */
+        }
     }
 
     regs[REG_RAX] = (greg_t)result;
