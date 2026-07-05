@@ -787,8 +787,17 @@ static void *thread_start_wrapper(void *p) {
         sigaltstack(&ss, NULL);
     }
 
-    /* Block SIGURG for Go preemption safety (same as main thread). */
+    /* For Go binaries: set GS base on this new thread.
+     * Go-created threads don't inherit the main thread's GS base.
+     * Without GS base, Go's setg() crashes writing to gs:0x30 (=address 0x30).
+     * We set GS base to (tls_g_addr - 0x30) so gs:0x30 points to tls_g.
+     * Go's mstart will later call setg() to set the correct g for this thread. */
     extern uint64_t g_tls_g_addr;
+    if (g_tls_g_addr) {
+        uint64_t gs_base = g_tls_g_addr - 0x30;
+        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS — sync shadow */
+    }
     if (g_tls_g_addr) {
         sigset_t mask;
         sigemptyset(&mask);

@@ -171,37 +171,74 @@ static void setup_gs_base(uint64_t entry_rip) {
          * shadow. This is slower but reliable. */
         uint64_t gs_base = tls_g_addr - 0x30;
 
-        /* Check if CPU supports FSGSBASE.
-         * On kernel 5.10, arch_prctl(ARCH_SET_GS) doesn't properly preserve
-         * GS base across signal delivery. Using wrgsbase is actually more
-         * reliable even on old kernels, because the CPU register is saved
-         * in the signal frame (ucontext) by the kernel's signal delivery
-         * code. The shadow GS base (from arch_prctl) may get out of sync. */
-        static int use_wrgsbase = -1;
-        if (use_wrgsbase == -1) {
-            unsigned int eax, ebx, ecx, edx;
-            __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                             : "0"(7), "2"(0));
-            use_wrgsbase = (ebx & (1 << 16)) ? 1 : 0;  /* EBX bit 16 = FSGSBASE */
-        }
+        /* Set GS base using BOTH wrgsbase AND arch_prctl.
+         * wrgsbase sets the CPU register directly.
+         * arch_prctl sets the kernel's shadow (used by sigreturn on some kernels).
+         * Using both maximizes the chance that GS base survives signal delivery. */
+        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
 
-        if (use_wrgsbase) {
-            __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
-            /* Also call arch_prctl to sync the shadow */
-            syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
-        } else {
-            /* Old kernel: use only arch_prctl (reliable but slower) */
-            long prctl_ret = syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
-            if (g_verbose) {
-                fprintf(stderr, "macify: arch_prctl(ARCH_SET_GS) returned %ld\n", prctl_ret);
-            }
+        /* ALSO set GS base via modify_ldt. The LDT-based GS base is saved
+         * and restored by the kernel's signal delivery code on ALL kernel
+         * versions, unlike the MSR-based GS base (wrgsbase/arch_prctl).
+         *
+         * We set LDT entry 0 to point to our GS base, then set the GS
+         * segment register to use LDT entry 0. The kernel saves/restores
+         * segment registers in the signal frame, so the GS base via LDT
+         * survives signal delivery.
+         *
+         * However, Go uses gs:0x30 with a 32-bit displacement, which uses
+         * the GS base MSR, not the LDT base. So LDT alone won't help.
+         * We need the MSR-based GS base to be correct.
+         *
+         * On kernel 5.10, the signal frame saves the GS base MSR via
+         * XSAVE (if FSGSBASE is enabled) or via the kernel's thread struct.
+         * The issue is that sigreturn may restore from the wrong source.
+         *
+         * WORKAROUND: Use modify_ldt to set LDT entry 0, AND set GS
+         * segment selector to LDT entry 0. When the kernel saves the
+         * signal frame, it saves the GS segment selector. On sigreturn,
+         * it restores the GS selector, which causes the CPU to reload
+         * the GS base from the LDT entry. This bypasses the MSR entirely. */
+        {
+            struct user_desc {
+                unsigned int entry_number;
+                unsigned int base_addr;
+                unsigned int limit;
+                unsigned int seg_32bit:1;
+                unsigned int contents:2;
+                unsigned int read_exec_only:1;
+                unsigned int limit_in_pages:1;
+                unsigned int seg_not_present:1;
+                unsigned int useable:1;
+            };
+            /* Set LDT entry 0 to gs_base */
+            struct user_desc desc;
+            memset(&desc, 0, sizeof(desc));
+            desc.entry_number = 0;
+            desc.base_addr = (unsigned int)(gs_base & 0xFFFFFFFF);
+            desc.limit = 0xFFFFFFFF;
+            desc.seg_32bit = 1;
+            desc.contents = 0;  /* data */
+            desc.read_exec_only = 0;
+            desc.limit_in_pages = 1;
+            desc.seg_not_present = 0;
+            desc.useable = 1;
+            /* modify_ldt(1, &desc, sizeof(desc)) — write LDT entry */
+            syscall(154, 1, &desc, sizeof(desc));
+            /* Set GS to LDT entry 0: (0 << 3) | 4 (LDT, RPL=3) = 0x07 */
+            /* But we can't set GS directly from C — use arch_prctl or asm */
+            /* Actually, on x86_64, we can't use LDT for GS base with
+             * 64-bit segment overrides. LDT is for 32-bit compatibility.
+             * In 64-bit mode, gs:0x30 always uses the GS base MSR.
+             * So modify_ldt doesn't help for 64-bit Go binaries. */
         }
         if (g_verbose) {
             /* Verify GS base was set correctly */
             uint64_t verify = 0;
             syscall(158, 0x1004, (uint64_t)&verify);  /* ARCH_GET_GS */
             fprintf(stderr, "macify: setup_gs_base: tls_g=0x%lx gs_base=0x%lx (wrgsbase=%d) verify=0x%lx %s\n",
-                    (unsigned long)tls_g_addr, (unsigned long)gs_base, use_wrgsbase,
+                    (unsigned long)tls_g_addr, (unsigned long)gs_base, 1,
                     (unsigned long)verify,
                     verify == gs_base ? "OK" : "MISMATCH!");
         }
