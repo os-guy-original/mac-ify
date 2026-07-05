@@ -453,75 +453,54 @@ void print_stats(void) {
  */
 
 /* Crash handler for SIGSEGV/SIGBUS/SIGFPE — prints the faulting address
- * and register state so we can debug crashes in loaded macOS binaries. */
+ * and register state so we can debug crashes in loaded macOS binaries.
+ * Uses ONLY signal-safe functions (write, snprintf — NOT fprintf). */
 void crash_handler(int sig, siginfo_t *info, void *uctx) {
-    /* Debug: write directly to fd 2 to verify handler is called.
-     * Use write() not fprintf() in case stdio is corrupted. */
-    const char msg[] = "\n*** crash_handler called ***\n";
-    write(2, msg, sizeof(msg) - 1);
+    /* Block all signals during crash handler to prevent recursive entry */
+    sigset_t block_all;
+    sigfillset(&block_all);
+    sigprocmask(SIG_BLOCK, &block_all, NULL);
+
+    char buf[512];
+    int n;
 
     ucontext_t *uc = (ucontext_t *)uctx;
     greg_t *regs = uc->uc_mcontext.gregs;
 
-    fprintf(stderr, "\nmacify: CRASH — signal %d (%s)\n", sig,
-            sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" :
-            sig == SIGFPE ? "SIGFPE" : "?");
-    fprintf(stderr, "  faulting address: %p\n", info->si_addr);
-    fprintf(stderr, "  rip=%#016lx  rsp=%#016lx  rbp=%#016lx\n",
-            (unsigned long)regs[REG_RIP], (unsigned long)regs[REG_RSP],
-            (unsigned long)regs[REG_RBP]);
-    fprintf(stderr, "  rax=%#016lx  rbx=%#016lx  rcx=%#016lx  rdx=%#016lx\n",
-            (unsigned long)regs[REG_RAX], (unsigned long)regs[REG_RBX],
-            (unsigned long)regs[REG_RCX], (unsigned long)regs[REG_RDX]);
-    fprintf(stderr, "  rdi=%#016lx  rsi=%#016lx  r8 =%#016lx  r9 =%#016lx\n",
-            (unsigned long)regs[REG_RDI], (unsigned long)regs[REG_RSI],
-            (unsigned long)regs[REG_R8],  (unsigned long)regs[REG_R9]);
-    fprintf(stderr, "  r10=%#016lx  r11=%#016lx  r12=%#016lx  r13=%#016lx\n",
-            (unsigned long)regs[REG_R10], (unsigned long)regs[REG_R11],
-            (unsigned long)regs[REG_R12], (unsigned long)regs[REG_R13]);
-    fprintf(stderr, "  r14=%#016lx  r15=%#016lx\n",
-            (unsigned long)regs[REG_R14], (unsigned long)regs[REG_R15]);
+    n = snprintf(buf, sizeof(buf),
+        "\nmacify: CRASH handler invoked\n\nsig=%d adr=%016lx\nrip=%016lx\nrsp=%016lx\nrbp=%016lx\n"
+        "rax=%016lx\nrbx=%016lx\nrcx=%016lx\nrdx=%016lx\n"
+        "rdi=%016lx\nrsi=%016lx\nr8 =%016lx\nr9 =%016lx\n"
+        "r10=%016lx\nr11=%016lx\nr12=%016lx\nr13=%016lx\nr14=%016lx\nr15=%016lx\n",
+        sig, (unsigned long)info->si_addr,
+        (unsigned long)regs[REG_RIP], (unsigned long)regs[REG_RSP],
+        (unsigned long)regs[REG_RBP],
+        (unsigned long)regs[REG_RAX], (unsigned long)regs[REG_RBX],
+        (unsigned long)regs[REG_RCX], (unsigned long)regs[REG_RDX],
+        (unsigned long)regs[REG_RDI], (unsigned long)regs[REG_RSI],
+        (unsigned long)regs[REG_R8],  (unsigned long)regs[REG_R9],
+        (unsigned long)regs[REG_R10], (unsigned long)regs[REG_R11],
+        (unsigned long)regs[REG_R12], (unsigned long)regs[REG_R13],
+        (unsigned long)regs[REG_R14], (unsigned long)regs[REG_R15]);
+    write(2, buf, n);
 
     /* Check if rip is in one of our mapped segments */
     uint64_t rip = (uint64_t)regs[REG_RIP];
 
-    /* Print stack dump FIRST — this is the most useful info for debugging
-     * and doesn't risk a secondary crash from reading instruction bytes
-     * at an invalid address. */
-    fprintf(stderr, "  stack dump (rsp + offset):\n");
+    /* Print stack dump — use write() for signal safety */
+    n = snprintf(buf, sizeof(buf), "stack:\n");
+    write(2, buf, n);
     uint64_t *sp = (uint64_t *)regs[REG_RSP];
     for (int s = 0; s < 48; s++) {
-        /* Check if the stack address itself is readable by seeing if it
-         * falls in any mapped segment or our allocated stack. We use
-         * a simple heuristic: if rsp is valid, the first 48 entries
-         * should be in the same page or nearby pages. */
         uint64_t addr = (uint64_t)(sp + s);
-        /* Skip if address is in __PAGEZERO (unmapped) */
-        if (addr < 0x1000) continue;
-        /* Try to read — if it faults, the signal handler will re-enter
-         * but we've already printed useful info. Use volatile to prevent
-         * the compiler from hoisting the read. */
-        uint64_t val;
-        /* Safe read: check address is in a plausible range */
         if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
-        val = sp[s];
-        /* Check if value is in any mapped segment (potential return addr) */
-        const char *seg = "unknown";
-        for (int si = 0; si < g_nsegments; si++) {
-            if (val >= g_segments[si].vmaddr &&
-                val < g_segments[si].vmaddr + g_segments[si].vmsize) {
-                seg = g_segments[si].name;
-                break;
-            }
-        }
-        fprintf(stderr, "    rsp+0x%-3x: %#018lx (%s)\n",
-                s * 8, (unsigned long)val, seg);
+        uint64_t val = sp[s];
+        n = snprintf(buf, sizeof(buf), "sp+%x:%016lx\n", s, (unsigned long)val);
+        write(2, buf, n);
     }
 
-    /* Print instruction bytes only if rip is in a valid, readable segment
-     * (not __PAGEZERO). When rip=0 (NULL function pointer call), reading
-     * rip-8 would fault and crash the crash handler. */
-    int rip_in_pagezero = (rip < 0x100000000UL);  /* __PAGEZERO is 0..0x100000000 */
+    /* Print rip location info using write() */
+    int rip_in_pagezero = (rip < 0x100000000UL);
     int rip_in_our_segments = 0;
     if (!rip_in_pagezero) {
         for (int i = 0; i < g_nsegments; i++) {
@@ -529,55 +508,41 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                 rip < g_segments[i].vmaddr + g_segments[i].vmsize) {
                 rip_in_our_segments = 1;
                 uint64_t offset = rip - g_segments[i].vmaddr;
-                fprintf(stderr, "  rip is in segment %s at offset %#lx (static=%#lx)\n",
-                        g_segments[i].name, (unsigned long)offset,
-                        (unsigned long)(g_segments[i].vmaddr - g_slide + offset));
-                fprintf(stderr, "  bytes at rip-8:");
-                for (int b = -8; b < 0; b++) {
-                    fprintf(stderr, " %02x", ((uint8_t *)rip)[b]);
-                }
-                fprintf(stderr, "\n  bytes at rip:  ");
-                for (int b = 0; b < 16; b++) {
-                    fprintf(stderr, " %02x", ((uint8_t *)rip)[b]);
-                }
-                fprintf(stderr, "\n");
+                n = snprintf(buf, sizeof(buf),
+                    "  rip in %s offset=0x%lx static=0x%lx\n",
+                    g_segments[i].name, (unsigned long)offset,
+                    (unsigned long)(g_segments[i].vmaddr - g_slide + offset));
+                write(2, buf, n);
                 break;
             }
         }
-    } else {
-        fprintf(stderr, "  rip is NULL — a NULL function pointer was called\n");
     }
 
-    /* If rip is NOT in any of our mapped segments, it's in a host library
-     * (libmacify_shim.so, libc.so.6, libm.so.6, etc.). Use dladdr to find
-     * which library/symbol the crash occurred in. */
     if (!rip_in_pagezero && !rip_in_our_segments) {
         Dl_info di;
         if (dladdr((void *)(uintptr_t)rip, &di)) {
-            /* Compute offset within the library file */
             unsigned long offset_in_lib = 0;
             if (di.dli_fbase) {
                 offset_in_lib = (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_fbase);
             }
-            fprintf(stderr, "  rip is in host library %s (base=%p, offset=0x%lx)\n",
-                    di.dli_fname ? di.dli_fname : "(unknown)",
-                    di.dli_fbase, offset_in_lib);
+            n = snprintf(buf, sizeof(buf), "  rip in %s offset=0x%lx\n",
+                        di.dli_fname ? di.dli_fname : "(unknown)", offset_in_lib);
+            write(2, buf, n);
             if (di.dli_sname) {
-                fprintf(stderr, "    symbol: %s + 0x%lx\n",
-                        di.dli_sname,
-                        (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_saddr));
-            } else {
-                fprintf(stderr, "    symbol: (unknown — stripped)\n");
-                /* Print all loaded libraries with dl_iterate_phdr so we can
-                 * match the offset to the right library manually. */
-                extern int print_loaded_libs(void);
-                print_loaded_libs();
+                n = snprintf(buf, sizeof(buf), "    symbol: %s + 0x%lx\n",
+                            di.dli_sname,
+                            (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_saddr));
+                write(2, buf, n);
             }
         }
     }
-    fprintf(stderr, "  si_code=%d (%s)\n", info->si_code,
-            info->si_code == 1 ? "MAPERR (unmapped)" :
-            info->si_code == 2 ? "ACCERR (protection)" : "other");
+
+    /* si_code */
+    n = snprintf(buf, sizeof(buf), "  si_code=%d (%s)\n", info->si_code,
+                 info->si_code == 1 ? "MAPERR" :
+                 info->si_code == 2 ? "ACCERR" : "other");
+    write(2, buf, n);
+    write(2, "\n", 1);
 
     /* For Go binaries: print tls_g value (current goroutine pointer). */
     if (g_tls_g_addr) {
@@ -585,18 +550,21 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL) {
             tls_g_val = *(volatile uint64_t *)g_tls_g_addr;
         }
-        fprintf(stderr, "  Go tls_g at 0x%lx = 0x%lx (current g)\n",
-                (unsigned long)g_tls_g_addr, (unsigned long)tls_g_val);
+        n = snprintf(buf, sizeof(buf), "  Go tls_g at 0x%lx = 0x%lx\n",
+                        (unsigned long)g_tls_g_addr, (unsigned long)tls_g_val);
+        write(2, buf, n);
         if (tls_g_val > 0x10000 && tls_g_val < 0x7fffffffffffUL) {
             uint64_t g_m = *(volatile uint64_t *)(tls_g_val + 0x30);
-            fprintf(stderr, "  g.m = 0x%lx\n", (unsigned long)g_m);
+            n = snprintf(buf, sizeof(buf), "  g.m = 0x%lx\n", (unsigned long)g_m);
+            write(2, buf, n);
             if (g_m > 0x10000 && g_m < 0x7fffffffffffUL) {
                 uint64_t m_g0 = *(volatile uint64_t *)g_m;
                 uint64_t m_curg = *(volatile uint64_t *)(g_m + 8);
                 uint64_t m_gsignal = *(volatile uint64_t *)(g_m + 0xb8);
-                fprintf(stderr, "  m.g0 = 0x%lx, m.curg = 0x%lx, m.gsignal = 0x%lx\n",
-                        (unsigned long)m_g0, (unsigned long)m_curg,
-                        (unsigned long)m_gsignal);
+                n = snprintf(buf, sizeof(buf), "  m.g0 = 0x%lx, m.curg = 0x%lx, m.gsignal = 0x%lx\n",
+                            (unsigned long)m_g0, (unsigned long)m_curg,
+                            (unsigned long)m_gsignal);
+                write(2, buf, n);
             }
         }
     }

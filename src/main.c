@@ -111,7 +111,7 @@ int main(int argc, char **argv, char **envp) {
      * Go panics with "non-Go code set up signal handler without
      * SA_ONSTACK flag". */
     /* Allocate a signal stack (required for SA_ONSTACK to work). */
-    static char sigstack[64 * 1024] __attribute__((aligned(4096)));
+    static char sigstack[256 * 1024] __attribute__((aligned(4096)));
     stack_t ss;
     ss.ss_sp = sigstack;
     ss.ss_size = sizeof(sigstack);

@@ -757,7 +757,48 @@ int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
 
 /* pthread_create — the macOS binary passes a macOS-format attr. We need
  * to extract the glibc attr from it and pass that to glibc's
- * pthread_create. If the attr is NULL, pass NULL (use default). */
+ * pthread_create. If the attr is NULL, pass NULL (use default).
+ *
+ * We also wrap start_routine to set up a signal stack (sigaltstack) for
+ * each new thread. Without this, signals (SIGSEGV, SIGURG, etc.) can't
+ * be delivered to Go-created threads, causing the process to be killed. */
+
+/* Thread start wrapper: sets up sigaltstack then calls the real routine. */
+struct thread_start_args {
+    void *(*start_routine)(void *);
+    void *arg;
+};
+
+static void *thread_start_wrapper(void *p) {
+    struct thread_start_args *args = (struct thread_start_args *)p;
+    void *(*routine)(void *) = args->start_routine;
+    void *arg = args->arg;
+    free(p);
+
+    /* Set up a signal stack for this thread (for SA_ONSTACK signal delivery).
+     * Without this, SIGSEGV/SIGBUS on this thread kills the process. */
+    char *thread_sigstack = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (thread_sigstack != MAP_FAILED) {
+        stack_t ss;
+        ss.ss_sp = thread_sigstack;
+        ss.ss_size = 256 * 1024;
+        ss.ss_flags = 0;
+        sigaltstack(&ss, NULL);
+    }
+
+    /* Block SIGURG for Go preemption safety (same as main thread). */
+    extern uint64_t g_tls_g_addr;
+    if (g_tls_g_addr) {
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, 23);  /* SIGURG */
+        sigprocmask(SIG_BLOCK, &mask, NULL);
+    }
+
+    return routine(arg);
+}
+
 static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
                                    void *(*)(void *), void *);
 
@@ -778,12 +819,19 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
         if (ma->sig == MACOS_PTHREAD_ATTR_SIG) {
             glibc_attr = (pthread_attr_t *)ma->opaque;
         } else {
-            /* Attr wasn't initialized by our pthread_attr_init — just pass
-             * it through and hope for the best. */
             glibc_attr = (pthread_attr_t *)(uintptr_t)attr;
         }
     }
-    return real_pthread_create(thread, glibc_attr, start_routine, arg);
+    /* Wrap start_routine to set up sigaltstack for the new thread. */
+    struct thread_start_args *wrapper_args = malloc(sizeof(*wrapper_args));
+    if (!wrapper_args) return EAGAIN;
+    wrapper_args->start_routine = start_routine;
+    wrapper_args->arg = arg;
+    int ret = real_pthread_create(thread, glibc_attr, thread_start_wrapper, wrapper_args);
+    if (ret != 0) {
+        free(wrapper_args);
+    }
+    return ret;
 }
 
 /* ============================================================================
