@@ -112,11 +112,13 @@ static void (*rust_bus_handler)(int) = NULL;
 /* Our crash handler that prints info and exits. Must be async-signal-safe
  * (only use write(), not fprintf). */
 void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
-    /* Restore GS base (may be clobbered by signal delivery on kernel 5.10) */
+    /* On kernel 5.10, signal delivery clobbers GS base.
+     * Try both arch_prctl AND wrgsbase to restore it. */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
         uint64_t gs_base = g_tls_g_addr - 0x30;
-        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+        /* arch_prctl sets the kernel shadow (used by sigreturn) */
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
     }
 
     const char msg[] = "\nmacify: CRASH handler invoked\n";
@@ -752,14 +754,12 @@ static int go_is_ready(void) {
 
 void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
     /* CRITICAL: Restore GS base before calling Go's handler.
-     * On kernel 5.10, signal delivery may clobber the GS base (set by
-     * wrgsbase or arch_prctl). Without restoring it, Go's gs:0x30 reads
-     * return 0, causing NULL pointer crashes. */
+     * On kernel 5.10, signal delivery may clobber the GS base.
+     * Use arch_prctl (safe, no SIGILL risk) to restore it. */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
         uint64_t gs_base = g_tls_g_addr - 0x30;
-        /* Use wrgsbase if available, otherwise arch_prctl */
-        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
     }
 
     if (go_is_ready()) {
