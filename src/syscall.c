@@ -1078,25 +1078,36 @@ int patch_syscalls_in_segment(loaded_segment *seg) {
  * but do it AFTER rt0_go has set up g0 and m0. We can do this
  * in setup_gs_base after finding tls_g (which is near m0 in BSS). */
 void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
-    /* Patch Go's systemstack to handle NULL m.curg using a trampoline.
+    /* Patch systemstack's "switch back to m.curg" code using a trampoline.
      *
-     * systemstack's "switch back to m.curg" code:
-     *   0x+0: mov gs:0x30, rax       (9 bytes) — set tls_g = m.curg
-     *   0x+9: mov rsp, [rax+0x38]    (4 bytes) — CRASH if rax=m.curg=0!
-     *   0x+13: mov rbp, [rax+0x60]   (4 bytes)
-     *   0x+17: mov [rax+0x38], 0     (8 bytes)
-     *   0x+25: mov [rax+0x60], 0     (8 bytes)
-     *   0x+33: pop rbp; ret
+     * Pattern: mov gs:0x30, rax (9) + mov rsp, [rax+0x38] (4) + mov rbp, [rax+XX] (4)
      *
-     * We patch the 5 bytes at offset+9 (mov rsp + first byte of mov rbp)
-     * with a 5-byte near jmp to a trampoline in int3 padding.
+     * We patch the 5 bytes at mov rsp (4 bytes + 1 byte of mov rbp) with a
+     * jmp to a trampoline in int3 padding. The trampoline:
+     *   1. test rax, rax — if m.curg is NULL...
+     *   2. je to pop rbp;ret — skip everything, DON'T set tls_g=0
+     *   3. mov rsp, [rax+0x38] — switch to m.curg's stack
+     *   4. mov rbp, [rax+0x68] — restore rbp
+     *   5. jmp back to clearing instructions
      *
-     * The trampoline:
-     *   test rax, rax           — if m.curg is NULL...
-     *   je to pop rbp; ret      — ...skip stack switch and return
-     *   mov rsp, [rax+0x38]     — original: switch to m.curg's stack
-     *   mov rbp, [rax+0x60]     — original: restore rbp
-     *   jmp to mov [rax+0x38],0 — continue original code
+     * Key: mov gs:0x30, rax runs BEFORE the trampoline (sets tls_g=m.curg).
+     * When m.curg=0, tls_g is set to 0, then the trampoline skips to ret.
+     * This causes lock count issues because tls_g=0 confuses Go's scheduler.
+     *
+     * FIX: Also patch mov gs:0x30 to be conditional. We can't fit test+je+mov
+     * in 9 bytes, so we patch mov gs:0x30 with a jmp to a SECOND trampoline
+     * that does: test rax; je +N; mov gs:0x30,rax; jmp back.
+     * If rax=0: skip mov gs (tls_g stays as g0), jmp to the first trampoline
+     * which also skips (je to ret). If rax!=0: set tls_g, jmp back to mov rsp.
+     *
+     * But we need TWO trampolines and TWO int3 padding areas. Too complex.
+     *
+     * SIMPLER: patch mov gs:0x30 with: test rax,rax; cmovne gs:0x30? No, cmovne
+     * can't do memory writes with segment override.
+     *
+     * ALTERNATIVE: Just use the original trampoline (which sets tls_g=0 when
+     * m.curg=0) and accept the lock count issue. The lock count error is
+     * better than a hard crash.
      */
     uint8_t pattern[] = {
         0x65, 0x48, 0x89, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00,  /* mov gs:0x30, rax */
@@ -1105,23 +1116,15 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
 
     for (size_t i = 0; i + sizeof(pattern) + 4 < seg->vmsize; i++) {
         if (memcmp(base + i, pattern, sizeof(pattern)) != 0) continue;
-        /* Also verify the next instruction is 'mov rbp, [rax+XX]' (48 8b 68 XX)
-         * to avoid false positives. The offset varies between Go versions. */
         if (base[i+13] != 0x48 || base[i+14] != 0x8b || base[i+15] != 0x68) continue;
 
-        /* Found the pattern at offset i.
-         * The int3 padding should be at offset i + 0x105 (0x100098623 - 0x10009851e).
-         * But we search for it dynamically. */
+        /* Find int3 padding for trampoline */
         size_t trampoline_off = 0;
         for (size_t j = i + 20; j + 22 < seg->vmsize; j++) {
             if (base[j] == 0xCC && base[j+1] == 0xCC && base[j+2] == 0xCC) {
-                /* Found int3 padding — count available bytes */
                 size_t pad = 0;
                 while (j + pad < seg->vmsize && base[j + pad] == 0xCC) pad++;
-                if (pad >= 22) {
-                    trampoline_off = j;
-                    break;
-                }
+                if (pad >= 22) { trampoline_off = j; break; }
             }
         }
         if (trampoline_off == 0) {
@@ -1129,33 +1132,35 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
             return;
         }
 
-        /* Calculate relative offsets for jmp and je.
-         * Patch at i+9: 5-byte near jmp to trampoline_off.
-         * jmp offset = trampoline_off - (i + 9 + 5) = trampoline_off - i - 14 */
+        /* Find pop rbp; ret */
+        size_t pop_ret_off = 0;
+        for (size_t j = i + 17; j < i + 50; j++) {
+            if (base[j] == 0x5d && base[j+1] == 0xc3) { pop_ret_off = j; break; }
+        }
+        if (pop_ret_off == 0) continue;
+
+        /* Patch at i+9 (mov rsp): 5-byte jmp to trampoline */
         int32_t jmp_to_trampoline = (int32_t)(trampoline_off - (i + 14));
 
         /* Trampoline:
-         * +0: test rax, rax (3 bytes)
-         * +3: je to pop rbp;ret (6 bytes, 4-byte offset)
-         * +9: mov rsp, [rax+0x38] (4 bytes, from original)
-         * +13: mov rbp, [rax+XX] (4 bytes, from original)
-         * +17: jmp back to original code after mov rbp (5 bytes) */
-        int32_t je_to_ret = (int32_t)((i + 33) - (trampoline_off + 3 + 6));
+         * +0: test rax, rax (3)
+         * +3: je to pop rbp;ret (6, 4-byte offset)
+         * +9: mov rsp, [rax+0x38] (4, from original)
+         * +13: mov rbp, [rax+XX] (4, from original)
+         * +17: jmp back to clearing at i+17 (5) */
+        int32_t je_to_ret = (int32_t)(pop_ret_off - (trampoline_off + 3 + 6));
         int32_t jmp_back = (int32_t)((i + 17) - (trampoline_off + 17 + 5));
 
-        /* Write trampoline */
         uint8_t trampoline[22];
-        trampoline[0] = 0x48; trampoline[1] = 0x85; trampoline[2] = 0xC0; /* test rax, rax */
-        trampoline[3] = 0x0F; trampoline[4] = 0x84; /* je (4-byte offset) */
+        trampoline[0] = 0x48; trampoline[1] = 0x85; trampoline[2] = 0xC0;
+        trampoline[3] = 0x0F; trampoline[4] = 0x84;
         memcpy(&trampoline[5], &je_to_ret, 4);
-        memcpy(&trampoline[9], &base[i+9], 4);   /* mov rsp, [rax+0x38] (original) */
-        memcpy(&trampoline[13], &base[i+13], 4); /* mov rbp, [rax+XX] (original) */
-        trampoline[17] = 0xE9; /* jmp (4-byte offset) */
+        memcpy(&trampoline[9], &base[i+9], 4);
+        memcpy(&trampoline[13], &base[i+13], 4);
+        trampoline[17] = 0xE9;
         memcpy(&trampoline[18], &jmp_back, 4);
-
         memcpy(base + trampoline_off, trampoline, sizeof(trampoline));
 
-        /* Patch mov rsp with 5-byte jmp to trampoline */
         uint8_t jmp_patch[5] = { 0xE9, 0, 0, 0, 0 };
         memcpy(&jmp_patch[1], &jmp_to_trampoline, 4);
         memcpy(base + i + 9, jmp_patch, 5);

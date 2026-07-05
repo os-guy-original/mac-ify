@@ -222,12 +222,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
     setup_gs_base(entry);
 
-    /* For Go binaries: block ALL signals except SIGSEGV/SIGBUS/SIGFPE/SIGILL
-     * before calling entry point. Go's runtime saves the current mask during
-     * schedinit, then restores it. It then uses sigprocmask(SIG_UNBLOCK)
-     * to selectively unblock signals AFTER installing handlers and allocating
-     * m.gsignal. By blocking everything now, no signal can arrive before
-     * Go is ready. */
+    /* For Go binaries: block ALL signals except SIGSEGV/SIGBUS/SIGFPE/SIGILL. */
     if (g_tls_g_addr) {
         sigset_t all_mask;
         sigfillset(&all_mask);
@@ -237,7 +232,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         sigdelset(&all_mask, SIGILL);
         sigprocmask(SIG_BLOCK, &all_mask, NULL);
         if (g_verbose) {
-            fprintf(stderr, "macify: Go binary — blocking all signals until runtime initializes\n");
+            fprintf(stderr, "macify: Go binary — blocking all signals\n");
         }
     }
 
