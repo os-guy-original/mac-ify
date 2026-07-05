@@ -456,19 +456,20 @@ void print_stats(void) {
  * and register state so we can debug crashes in loaded macOS binaries.
  * Uses ONLY signal-safe functions (write, snprintf — NOT fprintf). */
 void crash_handler(int sig, siginfo_t *info, void *uctx) {
-    /* Block all signals during crash handler to prevent recursive entry */
-    sigset_t block_all;
-    sigfillset(&block_all);
-    sigprocmask(SIG_BLOCK, &block_all, NULL);
-
-    static char buf[256];
+    static char buf[1024];
     int n;
 
     ucontext_t *uc = (ucontext_t *)uctx;
     greg_t *regs = uc->uc_mcontext.gregs;
 
-    n = snprintf(buf, sizeof(buf),
-        "\nmacify: CRASH handler invoked\n\nsig=%d adr=%016lx\nrip=%016lx\nrsp=%016lx\nrbp=%016lx\n"
+    uint64_t rip = (uint64_t)regs[REG_RIP];
+
+    /* Build entire crash report in one buffer to minimize write calls
+     * and avoid crashes between writes. Include Go state if available. */
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+        "\nmacify: CRASH handler invoked\n"
+        "sig=%d adr=%016lx\nrip=%016lx\nrsp=%016lx\nrbp=%016lx\n"
         "rax=%016lx\nrbx=%016lx\nrcx=%016lx\nrdx=%016lx\n"
         "rdi=%016lx\nrsi=%016lx\nr8 =%016lx\nr9 =%016lx\n"
         "r10=%016lx\nr11=%016lx\nr12=%016lx\nr13=%016lx\nr14=%016lx\nr15=%016lx\n",
@@ -482,102 +483,28 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         (unsigned long)regs[REG_R10], (unsigned long)regs[REG_R11],
         (unsigned long)regs[REG_R12], (unsigned long)regs[REG_R13],
         (unsigned long)regs[REG_R14], (unsigned long)regs[REG_R15]);
-    write(2, buf, n);
 
-    /* Check if rip is in one of our mapped segments */
-    uint64_t rip = (uint64_t)regs[REG_RIP];
-
-    /* Print stack dump — use write() for signal safety.
-     * Skip stack dump on Go binaries (rsp may be invalid/corrupted). */
-    if (!g_tls_g_addr) {
-        n = snprintf(buf, sizeof(buf), "stack:\n");
-        write(2, buf, n);
-        uint64_t *sp = (uint64_t *)regs[REG_RSP];
-        for (int s = 0; s < 16; s++) {
-            uint64_t addr = (uint64_t)(sp + s);
-            if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
-            if ((addr & 0xFFF) > 0xFF0) continue;
-            uint64_t val = sp[s];
-            n = snprintf(buf, sizeof(buf), "sp+%x:%016lx\n", s, (unsigned long)val);
-            write(2, buf, n);
-        }
-    }
-
-    /* Print rip location info using write() */
-    int rip_in_pagezero = (rip < 0x100000000UL);
-    int rip_in_our_segments = 0;
-    if (!rip_in_pagezero) {
-        for (int i = 0; i < g_nsegments; i++) {
-            if (rip >= g_segments[i].vmaddr &&
-                rip < g_segments[i].vmaddr + g_segments[i].vmsize) {
-                rip_in_our_segments = 1;
-                uint64_t offset = rip - g_segments[i].vmaddr;
-                n = snprintf(buf, sizeof(buf),
-                    "  rip in %s offset=0x%lx static=0x%lx\n",
-                    g_segments[i].name, (unsigned long)offset,
-                    (unsigned long)(g_segments[i].vmaddr - g_slide + offset));
-                write(2, buf, n);
-                break;
-            }
-        }
-    }
-
-    if (!rip_in_pagezero && !rip_in_our_segments) {
-        Dl_info di;
-        if (dladdr((void *)(uintptr_t)rip, &di)) {
-            unsigned long offset_in_lib = 0;
-            if (di.dli_fbase) {
-                offset_in_lib = (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_fbase);
-            }
-            n = snprintf(buf, sizeof(buf), "  rip in %s offset=0x%lx\n",
-                        di.dli_fname ? di.dli_fname : "(unknown)", offset_in_lib);
-            write(2, buf, n);
-            if (di.dli_sname) {
-                n = snprintf(buf, sizeof(buf), "    symbol: %s + 0x%lx\n",
-                            di.dli_sname,
-                            (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_saddr));
-                write(2, buf, n);
-            }
-        }
-    }
-
-    /* si_code */
-    n = snprintf(buf, sizeof(buf), "  si_code=%d (%s)\n", info->si_code,
-                 info->si_code == 1 ? "MAPERR" :
-                 info->si_code == 2 ? "ACCERR" : "other");
-    write(2, buf, n);
-    write(2, "\n", 1);
-
-    /* For Go binaries: print Go runtime state.
-     * Go 1.26 m struct layout (key fields):
-     *   m+0x00: m.g0 (system goroutine)
-     *   m+0x48: m.gsignal (signal handler goroutine)
-     *   m+0xb8: m.curg (currently running goroutine, NULL at startup)
-     * g struct: g+0x30 = g.m */
+    /* Go runtime state */
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "g_tls_g_addr=%lu\n", (unsigned long)g_tls_g_addr);
     if (g_tls_g_addr) {
-        uint64_t tls_g_val = 0;
-        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL) {
-            tls_g_val = *(volatile uint64_t *)g_tls_g_addr;
-        }
-        n = snprintf(buf, sizeof(buf), "  Go tls_g=0x%lx (current g)\n",
-                     (unsigned long)tls_g_val);
-        write(2, buf, n);
-        if (tls_g_val > 0x10000 && tls_g_val < 0x7fffffffffffUL) {
-            uint64_t g_m = *(volatile uint64_t *)(tls_g_val + 0x30);
-            n = snprintf(buf, sizeof(buf), "  g.m=0x%lx\n", (unsigned long)g_m);
-            write(2, buf, n);
-            if (g_m > 0x10000 && g_m < 0x7fffffffffffUL) {
-                uint64_t m_g0 = *(volatile uint64_t *)g_m;
-                uint64_t m_gsignal = *(volatile uint64_t *)(g_m + 0x48);
-                uint64_t m_curg = *(volatile uint64_t *)(g_m + 0xb8);
-                n = snprintf(buf, sizeof(buf), "  m.g0=0x%lx m.gsignal=0x%lx m.curg=0x%lx\n",
-                            (unsigned long)m_g0, (unsigned long)m_gsignal,
-                            (unsigned long)m_curg);
-                write(2, buf, n);
+        uint64_t g = 0;
+        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL)
+            g = *(volatile uint64_t *)g_tls_g_addr;
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "Go tls_g=0x%lx\n", (unsigned long)g);
+        if (g > 0x10000 && g < 0x7fffffffffffUL) {
+            uint64_t m = *(volatile uint64_t *)(g + 0x30);
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "g.m=0x%lx\n", (unsigned long)m);
+            if (m > 0x10000 && m < 0x7fffffffffffUL) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "m.g0=0x%lx m.gsignal=0x%lx m.curg=0x%lx\n",
+                    (unsigned long)*(volatile uint64_t *)m,
+                    (unsigned long)*(volatile uint64_t *)(m + 0x48),
+                    (unsigned long)*(volatile uint64_t *)(m + 0xb8));
             }
         }
     }
 
+    write(2, buf, pos);
     print_stats();
     _exit(128 + sig);
 }

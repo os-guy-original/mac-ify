@@ -167,18 +167,69 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     PRINT_REG("r14", (uint64_t)regs[REG_R14]);
     PRINT_REG("r15", (uint64_t)regs[REG_R15]);
 
-    /* Print first 8 stack entries */
-    write(2, "stack:\n", 7);
-    uint64_t *sp = (uint64_t *)regs[REG_RSP];
-    for (int s = 0; s < 8; s++) {
-        uint64_t val = sp[s];
-        buf[0] = 's'; buf[1] = 'p'; buf[2] = '+'; buf[3] = '0' + s; buf[4] = ':';
-        for (int i = 0; i < 16; i++) {
-            int nibble = (val >> (60 - i*4)) & 0xf;
-            buf[5+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+    /* Print stack entries (skip for Go binaries — rsp may be corrupted) */
+    extern uint64_t g_tls_g_addr;
+    if (!g_tls_g_addr) {
+        write(2, "stack:\n", 7);
+        uint64_t *sp = (uint64_t *)regs[REG_RSP];
+        for (int s = 0; s < 8; s++) {
+            uint64_t val = sp[s];
+            buf[0] = 's'; buf[1] = 'p'; buf[2] = '+'; buf[3] = '0' + s; buf[4] = ':';
+            for (int i = 0; i < 16; i++) {
+                int nibble = (val >> (60 - i*4)) & 0xf;
+                buf[5+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+            }
+            buf[21] = '\n';
+            write(2, buf, 22);
         }
-        buf[21] = '\n';
-        write(2, buf, 22);
+    } else {
+        /* Go binary: print runtime state instead of stack dump.
+         * Go 1.26 m struct: m+0x00=g0, m+0x48=gsignal, m+0xb8=curg */
+        uint64_t g = 0;
+        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL)
+            g = *(volatile uint64_t *)g_tls_g_addr;
+        /* Print g value */
+        write(2, "Go g=", 5);
+        for (int i = 0; i < 16; i++) {
+            int nibble = (g >> (60 - i*4)) & 0xf;
+            buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+        }
+        buf[16] = '\n';
+        write(2, buf, 17);
+
+        if (g > 0x10000 && g < 0x7fffffffffffUL) {
+            uint64_t m = *(volatile uint64_t *)(g + 0x30);
+            uint64_t gsignal = 0, curg = 0, g0 = 0;
+            if (m > 0x10000 && m < 0x7fffffffffffUL) {
+                g0 = *(volatile uint64_t *)m;
+                gsignal = *(volatile uint64_t *)(m + 0x48);
+                curg = *(volatile uint64_t *)(m + 0xb8);
+            }
+            /* Print m.g0, m.gsignal, m.curg */
+            write(2, "m.g0=", 5);
+            for (int i = 0; i < 16; i++) {
+                int nibble = (g0 >> (60 - i*4)) & 0xf;
+                buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+            }
+            buf[16] = ' '; buf[17] = '\n';
+            write(2, buf, 18);
+
+            write(2, "m.gsignal=", 10);
+            for (int i = 0; i < 16; i++) {
+                int nibble = (gsignal >> (60 - i*4)) & 0xf;
+                buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+            }
+            buf[16] = '\n';
+            write(2, buf, 17);
+
+            write(2, "m.curg=", 7);
+            for (int i = 0; i < 16; i++) {
+                int nibble = (curg >> (60 - i*4)) & 0xf;
+                buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+            }
+            buf[16] = '\n';
+            write(2, buf, 17);
+        }
     }
 
     _exit(128 + sig);
