@@ -172,13 +172,11 @@ static void setup_gs_base(uint64_t entry_rip) {
         uint64_t gs_base = tls_g_addr - 0x30;
 
         /* Set GS base using BOTH wrgsbase AND arch_prctl.
-         * CRITICAL: Both must be called with the same value to keep
-         * the CPU register (MSR_GS_BASE) and kernel shadow (thread.gsbase)
-         * in sync. If they diverge, a context switch during signal delivery
-         * restores the stale shadow, clobbering GS base to 0.
-         * This is the root cause of the "Go g=0" crashes on kernel 5.10. */
+         * wrgsbase sets the CPU MSR immediately (fast).
+         * arch_prctl syncs the kernel shadow (needed for context switch).
+         * Both must be called with the same value. */
         __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS — sync shadow */
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
 
         if (g_verbose) {
             /* Verify GS base was set correctly */

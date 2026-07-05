@@ -745,17 +745,13 @@ static int go_is_ready(void) {
 }
 
 void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
-    /* CRITICAL: Restore GS base before calling Go's handler.
-     * On kernel 5.10, signal delivery can cause a context switch that
-     * restores the stale shadow GS base. We must use BOTH wrgsbase
-     * (sets CPU register) AND arch_prctl (syncs kernel shadow) to
-     * ensure they're in sync. Without arch_prctl, the shadow is stale
-     * and the next context switch clobbers GS base to 0. */
+    /* Restore GS base before calling Go's handler.
+     * Use both wrgsbase + arch_prctl to keep CPU MSR and shadow in sync. */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
         uint64_t gs_base = g_tls_g_addr - 0x30;
         __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS — sync shadow */
+        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
     }
 
     if (go_is_ready()) {
