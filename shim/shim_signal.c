@@ -587,12 +587,20 @@ int macify_sigaltstack(const void *ss, void *oss) {
     stack_t *p_ss = NULL, *p_oss = NULL;
 
     if (ss) {
-        /* Read macOS-format stack_t and convert to Linux format */
         const uint8_t *macos_ss = (const uint8_t *)ss;
         memset(&linux_ss, 0, sizeof(linux_ss));
-        linux_ss.ss_sp = *(void *const *)macos_ss;            /* offset 0 */
-        linux_ss.ss_size = *(const size_t *)(macos_ss + 8);   /* macOS: size at 8 */
-        linux_ss.ss_flags = *(const int *)(macos_ss + 16);    /* macOS: flags at 16 */
+        linux_ss.ss_sp = *(void *const *)macos_ss;
+        linux_ss.ss_size = *(const size_t *)(macos_ss + 8);
+        linux_ss.ss_flags = *(const int *)(macos_ss + 16);
+
+        /* If Go tries to DISABLE the signal stack (SS_DISABLE),
+         * replace with our own to keep crash handling working. */
+        if (linux_ss.ss_flags & 0x1 /* SS_DISABLE */) {
+            static char fallback_ss[256 * 1024] __attribute__((aligned(4096)));
+            linux_ss.ss_sp = fallback_ss;
+            linux_ss.ss_size = sizeof(fallback_ss);
+            linux_ss.ss_flags = 0;
+        }
         p_ss = &linux_ss;
     }
     if (oss) {

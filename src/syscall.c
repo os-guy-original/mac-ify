@@ -461,7 +461,7 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     sigfillset(&block_all);
     sigprocmask(SIG_BLOCK, &block_all, NULL);
 
-    char buf[512];
+    static char buf[256];
     int n;
 
     ucontext_t *uc = (ucontext_t *)uctx;
@@ -491,9 +491,11 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     n = snprintf(buf, sizeof(buf), "stack:\n");
     write(2, buf, n);
     uint64_t *sp = (uint64_t *)regs[REG_RSP];
-    for (int s = 0; s < 48; s++) {
+    for (int s = 0; s < 16; s++) {
         uint64_t addr = (uint64_t)(sp + s);
         if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
+        /* Skip if address is on a page boundary (might fault) */
+        if ((addr & 0xFFF) > 0xFF0) continue;
         uint64_t val = sp[s];
         n = snprintf(buf, sizeof(buf), "sp+%x:%016lx\n", s, (unsigned long)val);
         write(2, buf, n);
@@ -805,28 +807,25 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         }
     }
     if (flags & ARG_SIGALTSTACK) {
-        /* macOS sigaltstack(const stack_t *ss, stack_t *oss)
-         * macOS stack_t: ss_sp(8), ss_size(8), ss_flags(4)+pad(4) = 24 bytes
-         * Linux stack_t: ss_sp(8), ss_flags(4)+pad(4), ss_size(8) = 24 bytes
-         * Field order differs — ss_size and ss_flags are swapped!
-         *
-         * a1 = ss (macOS stack_t ptr), a2 = oss (macOS stack_t ptr)
-         * Note: Linux sigaltstack uses a1=ss, a2=oss (same arg positions).
-         */
-        sigaltstack_save_macos_oss = (void *)a2;  /* save for post-syscall */
+        sigaltstack_save_macos_oss = (void *)a2;
         if (a1) {
             uint8_t *macos_ss = (uint8_t *)a1;
             memset(&linux_ss_sigaltstack, 0, sizeof(linux_ss_sigaltstack));
-            linux_ss_sigaltstack.ss_sp = *(void **)macos_ss;           /* offset 0 */
-            linux_ss_sigaltstack.ss_flags = *(int *)(macos_ss + 16);   /* macOS: flags at 16 */
-            linux_ss_sigaltstack.ss_size = *(size_t *)(macos_ss + 8);  /* macOS: size at 8 */
-            a1 = (long)&linux_ss_sigaltstack;
-            if (g_verbose) {
-                fprintf(stderr, "macify:   sigaltstack ss: sp=%p size=%lu flags=%d\n",
-                        linux_ss_sigaltstack.ss_sp,
-                        (unsigned long)linux_ss_sigaltstack.ss_size,
-                        linux_ss_sigaltstack.ss_flags);
+            linux_ss_sigaltstack.ss_sp = *(void **)macos_ss;
+            linux_ss_sigaltstack.ss_flags = *(int *)(macos_ss + 16);
+            linux_ss_sigaltstack.ss_size = *(size_t *)(macos_ss + 8);
+
+            /* If Go tries to DISABLE the signal stack (SS_DISABLE),
+             * replace it with our own stack instead. Go disables the
+             * signal stack when it's done with signal setup, but we
+             * need it to stay active for crash handling. */
+            if (linux_ss_sigaltstack.ss_flags & 0x1 /* SS_DISABLE */) {
+                static char fallback_sigstack[256 * 1024] __attribute__((aligned(4096)));
+                linux_ss_sigaltstack.ss_sp = fallback_sigstack;
+                linux_ss_sigaltstack.ss_size = sizeof(fallback_sigstack);
+                linux_ss_sigaltstack.ss_flags = 0;
             }
+            a1 = (long)&linux_ss_sigaltstack;
         }
         if (a2) {
             a2 = (long)&linux_oss_sigaltstack;
