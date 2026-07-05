@@ -1,4 +1,5 @@
 #include "macify.h"
+#include <sys/utsname.h>
 
 
 /* Stack setup — build the macOS-style entry stack:
@@ -154,39 +155,63 @@ static void setup_gs_base(uint64_t entry_rip) {
     if (tls_g_addr) {
         /* Set GS base so that gs:0x30 points to tls_g.
          *
-         * CRITICAL: We must use BOTH wrgsbase AND arch_prctl(ARCH_SET_GS):
-         * - wrgsbase sets the CPU's GS base register immediately (fast, no syscall)
-         * - arch_prctl(ARCH_SET_GS) updates the kernel's "shadow" GS base
+         * CRITICAL: On kernels < 5.15, using wrgsbase is unsafe because the
+         * kernel's signal delivery code doesn't properly save/restore the
+         * FSGSBASE-set GS base. When a signal arrives, the kernel restores
+         * the SHADOW GS base (set by arch_prctl), not the wrgsbase value.
+         * This causes Go's tls_g reads to return garbage after signal delivery,
+         * leading to "morestack on g0" and "lock count" panics.
          *
-         * The Linux kernel maintains a shadow copy of FS/GS bases in the task
-         * struct. When a signal is delivered, the kernel saves/restores the
-         * SHADOW values, NOT the CPU registers set by wrgsbase. So if we only
-         * use wrgsbase, the GS base gets RESET to the shadow value (0 or wrong)
-         * after the first signal delivery — causing Go's tls_g reads to return
-         * garbage, leading to "morestack on g0" and "lock count" panics.
+         * On kernel 5.15+, the kernel properly handles FSGSBASE in signal
+         * delivery, so wrgsbase is safe. We detect the kernel version and
+         * only use wrgsbase on 5.15+.
          *
-         * By calling arch_prctl AFTER wrgsbase, we sync the shadow with the
-         * CPU register, ensuring signal delivery preserves the correct GS base. */
+         * On older kernels, we use ONLY arch_prctl(ARCH_SET_GS), which goes
+         * through the kernel and properly sets both the CPU register and the
+         * shadow. This is slower but reliable. */
         uint64_t gs_base = tls_g_addr - 0x30;
+
+        /* Check kernel version: only use wrgsbase on 5.15+ */
         static int use_wrgsbase = -1;
         if (use_wrgsbase == -1) {
-            unsigned int eax, ebx, ecx, edx;
-            __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                             : "0"(7), "2"(0));
-            use_wrgsbase = (ebx & (1 << 16)) ? 1 : 0;  /* EBX bit 16 = FSGSBASE */
+            struct utsname uts;
+            if (uname(&uts) == 0) {
+                int major = 0, minor = 0;
+                sscanf(uts.release, "%d.%d", &major, &minor);
+                /* FSGSBASE signal handling was fixed in 5.15 */
+                if (major > 5 || (major == 5 && minor >= 15)) {
+                    /* Also check CPU supports FSGSBASE */
+                    unsigned int eax, ebx, ecx, edx;
+                    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                                     : "0"(7), "2"(0));
+                    use_wrgsbase = (ebx & (1 << 16)) ? 1 : 0;
+                } else {
+                    use_wrgsbase = 0;  /* Old kernel, don't use wrgsbase */
+                }
+            } else {
+                use_wrgsbase = 0;
+            }
         }
+
         if (use_wrgsbase) {
             __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+            /* Also call arch_prctl to sync the shadow */
+            syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        } else {
+            /* Old kernel: use only arch_prctl (reliable but slower) */
+            long prctl_ret = syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+            if (g_verbose) {
+                fprintf(stderr, "macify: arch_prctl(ARCH_SET_GS) returned %ld\n", prctl_ret);
+            }
         }
-        /* Always also call arch_prctl to update the kernel's shadow GS base.
-         * This is essential for signal delivery to preserve GS base. */
-        long prctl_ret = syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
         if (g_verbose) {
-            fprintf(stderr, "macify: arch_prctl(ARCH_SET_GS) returned %ld\n", prctl_ret);
-        }
-        if (g_verbose) {
-            fprintf(stderr, "macify: setup_gs_base: tls_g=0x%lx gs_base=0x%lx (wrgsbase=%d)\n",
-                    (unsigned long)tls_g_addr, (unsigned long)gs_base, use_wrgsbase);
+            /* Verify GS base was set correctly */
+            uint64_t verify = 0;
+            syscall(158, 0x1004, (uint64_t)&verify);  /* ARCH_GET_GS */
+            fprintf(stderr, "macify: setup_gs_base: tls_g=0x%lx gs_base=0x%lx (wrgsbase=%d) verify=0x%lx %s\n",
+                    (unsigned long)tls_g_addr, (unsigned long)gs_base, use_wrgsbase,
+                    (unsigned long)verify,
+                    verify == gs_base ? "OK" : "MISMATCH!");
         }
         g_tls_g_addr = tls_g_addr;
     } else {

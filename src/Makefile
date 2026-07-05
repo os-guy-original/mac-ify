@@ -2,7 +2,7 @@
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11
-LDFLAGS ?= -ldl
+LDFLAGS ?= -ldl -rdynamic
 
 BIN_DIR  = ../build
 BIN      = $(BIN_DIR)/macify

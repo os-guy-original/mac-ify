@@ -750,9 +750,38 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             } linux_sa;
             uint8_t *macos_sa = (uint8_t *)a2;
             memset(&linux_sa, 0, sizeof(linux_sa));
-            linux_sa.handler = *(void **)macos_sa;
             unsigned int macos_flags = *(unsigned int *)(macos_sa + 12);
-            linux_sa.flags = macos_flags | SA_ONSTACK;
+            void *go_handler = *(void **)macos_sa;
+
+            /* For Go binaries: install the signal deferral wrapper instead
+             * of Go's handler directly. This prevents signals from being
+             * delivered before m.gsignal is allocated. */
+            if (g_tls_g_addr) {
+                /* Look up the wrapper and handler array from the shim */
+                static void *(*p_wrapper)(void);
+                static void **p_handlers;
+                static int looked_up = 0;
+                if (!looked_up) {
+                    p_wrapper = dlsym(RTLD_DEFAULT, "macify_go_signal_wrapper");
+                    p_handlers = dlsym(RTLD_DEFAULT, "macify_saved_go_handlers");
+                    looked_up = 1;
+                }
+                if (p_wrapper && p_handlers) {
+                    int linux_sig_for_handler = translate_kill_signal((int)a1);
+                    if (linux_sig_for_handler > 0 && linux_sig_for_handler < 32) {
+                        p_handlers[linux_sig_for_handler] = go_handler;
+                    }
+                    linux_sa.handler = p_wrapper;
+                    linux_sa.flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+                } else {
+                    /* Fallback: install Go's handler directly */
+                    linux_sa.handler = go_handler;
+                    linux_sa.flags = macos_flags | SA_ONSTACK;
+                }
+            } else {
+                linux_sa.handler = go_handler;
+                linux_sa.flags = macos_flags | SA_ONSTACK;
+            }
             /* Translate the 4-byte macOS sigset mask to 128-byte Linux sigset,
              * translating signal numbers (macOS SIGURG=16 → Linux SIGURG=23, etc.) */
             uint32_t macos_mask = *(uint32_t *)(macos_sa + 8);

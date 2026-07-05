@@ -275,11 +275,22 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         } else {
             /* For all other signals: ensure SA_ONSTACK is set.
              * Go's runtime requires ALL signal handlers to use SA_ONSTACK.
-             * Without it, Go panics with "non-Go code set up signal handler
-             * without SA_ONSTACK flag". macOS binaries set up signal handlers
-             * without SA_ONSTACK (macOS handles signal stacks differently),
-             * so we add it here. */
-            linux_act.sa_flags |= SA_ONSTACK;
+             * For Go binaries, we install a wrapper that defers signal
+             * delivery until gsignal is ready. */
+            extern uint64_t g_tls_g_addr;
+            if (g_tls_g_addr) {
+                /* Go binary: install signal deferral wrapper */
+                extern void macify_go_signal_wrapper(int, siginfo_t *, void *);
+                extern void *macify_saved_go_handlers[];
+                if (signum >= 0 && signum < 32) {
+                    macify_saved_go_handlers[signum] = (void *)macos_act->handler;
+                }
+                linux_act.sa_sigaction = macify_go_signal_wrapper;
+                linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+            } else {
+                /* Non-Go: just add SA_ONSTACK and pass through */
+                linux_act.sa_flags |= SA_ONSTACK;
+            }
             p_linux_act = &linux_act;
         }
     }
@@ -637,4 +648,59 @@ void *macify_get_shim_symbol(const char *symbol) {
         return (void *)macify_signal;
     }
     return NULL;
+}
+
+/* ── Go signal deferral wrapper ────────────────────────────────
+ * Go's signal handler (sigtrampgo) crashes if a signal arrives before
+ * m.gsignal is allocated. We wrap Go's handler and defer signal delivery
+ * until Go is ready.
+ *
+ * "Go ready" is detected by checking if g_tls_g_addr is non-NULL AND
+ * the value at *g_tls_g_addr is non-NULL (meaning Go has written &g0
+ * to tls_g during rt0_go). After that point, Go's runtime has set up
+ * gsignal and can handle signals safely. */
+
+/* Saved Go signal handlers (indexed by Linux signal number). */
+void *macify_saved_go_handlers[32] = {0};
+static volatile int macify_go_signal_ready = 0;
+
+/* Called by the wrapper to check if Go is ready for signals. */
+static int go_is_ready(void) {
+    if (macify_go_signal_ready) return 1;
+    /* Check if Go has written to tls_g (meaning rt0_go has run)
+     * AND m.gsignal is allocated (meaning signal handler can run safely). */
+    extern uint64_t g_tls_g_addr;
+    if (g_tls_g_addr) {
+        uint64_t g = *(volatile uint64_t *)g_tls_g_addr;
+        if (g != 0) {
+            /* Check m.gsignal: g.m is at g+0x30, m.gsignal is at m+0xb8 */
+            uint64_t m = *(volatile uint64_t *)(g + 0x30);
+            if (m != 0) {
+                uint64_t gsignal = *(volatile uint64_t *)(m + 0xb8);
+                if (gsignal != 0) {
+                    macify_go_signal_ready = 1;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
+    if (go_is_ready()) {
+        /* Go is ready — call the saved Go handler */
+        if (sig >= 0 && sig < 32 && macify_saved_go_handlers[sig]) {
+            void (*go_handler)(int, siginfo_t *, void *) =
+                (void (*)(int, siginfo_t *, void *))macify_saved_go_handlers[sig];
+            go_handler(sig, info, uctx);
+            return;
+        }
+    }
+    /* Go is NOT ready — defer the signal by re-blocking it.
+     * The signal will be re-delivered when Go unblocks it via sigprocmask. */
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    sigprocmask(SIG_BLOCK, &mask, NULL);
 }
