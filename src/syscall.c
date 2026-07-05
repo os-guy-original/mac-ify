@@ -838,7 +838,11 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
      *
      * We convert -errno → -1 and set errno via our shim's __errno() function.
      * The shim's __errno() returns __errno_location(), so errno is properly set. */
-    if (__builtin_expect(result < 0 && result > -4096, 0)) {
+    /* Track whether the syscall errored (before converting -errno → -1).
+     * Go's asmSyscall6 checks CF: CF=1 means error, CF=0 means success. */
+    bool syscall_error = (result < 0 && result > -4096);
+
+    if (__builtin_expect(syscall_error, 0)) {
         /* result is -errno. Set errno and convert to -1 (macOS convention). */
         int err = (int)(-result);
         errno = err;  /* Sets glibc's errno via __errno_location() */
@@ -866,6 +870,18 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     }
 
     regs[REG_RAX] = (greg_t)result;
+
+    /* Set carry flag to match macOS syscall convention.
+     * macOS: CF=1 on error (errno set), CF=0 on success.
+     * Linux: returns -errno on error, non-negative on success.
+     * Go's asmSyscall6 checks CF via 'jae' (jump if CF=0 = success).
+     * We must set EFLAGS.CF accordingly or Go misinterprets results. */
+    if (syscall_error) {
+        regs[REG_EFL] |= 0x0001;  /* set CF */
+    } else {
+        regs[REG_EFL] &= ~0x0001UL;  /* clear CF */
+    }
+
     regs[REG_RIP] += 2;  /* skip past the 2-byte UD2 (0F 0B) */
 }
 
@@ -895,22 +911,33 @@ int patch_syscalls_in_range(loaded_segment *seg, uint8_t *base,
          *   - Part of a CMP imm32 (e.g., 81 f9 0f 05 00 00)
          *   - Part of conditional jump (e.g., 0f 84 0f 05 00 00)
          *
-         * Strategy: only patch 0F 05 if we can find a mov eax, 0x2000XXXX
-         * within 32 bytes BEFORE it. If no such mov is found, skip. */
+         * Strategy: only patch 0F 05 if we can find a macOS syscall pattern
+         * within 32 bytes BEFORE it. Two patterns:
+         *   1. mov eax, 0x2000XXXX (B8 XX XX 00 20) — static syscall number
+         *   2. add rax, 0x2000000 (48 05 00 00 00 02) — Go's dynamic pattern:
+         *      Go loads syscall number from stack/memory, adds 0x2000000 */
         {
-            bool found_mov = false;
+            bool found_pattern = false;
             size_t scan_start = (i >= BACKWARD_SCAN_BYTES) ? (i - BACKWARD_SCAN_BYTES) : 0;
             for (size_t j = (i >= 5) ? (i - 5) : 0; j >= scan_start && j < i; j--) {
+                /* Pattern 1: mov eax, 0x2000XXXX */
                 if (base[j] == 0xB8 && j+4 < i &&
                     base[j+3] == 0x00 && base[j+4] == 0x20) {
-                    /* Check it's not preceded by REX prefix */
                     if (j > 0 && base[j-1] >= 0x40 && base[j-1] <= 0x4F) continue;
-                    found_mov = true;
+                    found_pattern = true;
+                    break;
+                }
+                /* Pattern 2: add rax, 0x2000000 (Go's dynamic syscall pattern)
+                 * 48 05 00 00 00 02 = REX.W ADD RAX, imm32(0x02000000) */
+                if (j >= 5 && base[j] == 0x48 && base[j+1] == 0x05 &&
+                    base[j+2] == 0x00 && base[j+3] == 0x00 &&
+                    base[j+4] == 0x00 && base[j+5] == 0x02) {
+                    found_pattern = true;
                     break;
                 }
                 if (j == 0) break;
             }
-            if (!found_mov) continue;  /* No mov eax, 0x2000XXXX — not a real syscall */
+            if (!found_pattern) continue;  /* Not a macOS syscall */
         }
 
         /* Found a syscall at offset i. Look backward for mov eax, 0x2000XXXX. */
