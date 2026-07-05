@@ -112,15 +112,7 @@ static void (*rust_bus_handler)(int) = NULL;
 /* Our crash handler that prints info and exits. Must be async-signal-safe
  * (only use write(), not fprintf). */
 void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
-    /* On kernel 5.10, signal delivery clobbers GS base.
-     * Try both arch_prctl AND wrgsbase to restore it. */
-    extern uint64_t g_tls_g_addr;
-    if (g_tls_g_addr) {
-        uint64_t gs_base = g_tls_g_addr - 0x30;
-        /* arch_prctl sets the kernel shadow (used by sigreturn) */
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
-    }
-
+    /* Minimal crash handler — just write signal info and exit. */
     const char msg[] = "\nmacify: CRASH handler invoked\n";
     write(2, msg, sizeof(msg) - 1);
 
@@ -754,12 +746,11 @@ static int go_is_ready(void) {
 
 void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
     /* CRITICAL: Restore GS base before calling Go's handler.
-     * On kernel 5.10, signal delivery may clobber the GS base.
-     * Use arch_prctl (safe, no SIGILL risk) to restore it. */
+     * Must use wrgsbase to set the CPU register directly. */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
         uint64_t gs_base = g_tls_g_addr - 0x30;
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
     }
 
     if (go_is_ready()) {
