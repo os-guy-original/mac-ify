@@ -1100,12 +1100,14 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
      */
     uint8_t pattern[] = {
         0x65, 0x48, 0x89, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00,  /* mov gs:0x30, rax */
-        0x48, 0x8b, 0x60, 0x38,                                   /* mov rsp, [rax+0x38] */
-        0x48, 0x8b, 0x68, 0x60                                    /* mov rbp, [rax+0x60] */
+        0x48, 0x8b, 0x60, 0x38                                   /* mov rsp, [rax+0x38] */
     };
 
-    for (size_t i = 0; i + sizeof(pattern) < seg->vmsize; i++) {
+    for (size_t i = 0; i + sizeof(pattern) + 4 < seg->vmsize; i++) {
         if (memcmp(base + i, pattern, sizeof(pattern)) != 0) continue;
+        /* Also verify the next instruction is 'mov rbp, [rax+XX]' (48 8b 68 XX)
+         * to avoid false positives. The offset varies between Go versions. */
+        if (base[i+13] != 0x48 || base[i+14] != 0x8b || base[i+15] != 0x68) continue;
 
         /* Found the pattern at offset i.
          * The int3 padding should be at offset i + 0x105 (0x100098623 - 0x10009851e).
@@ -1134,10 +1136,10 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
 
         /* Trampoline:
          * +0: test rax, rax (3 bytes)
-         * +3: je to pop rbp;ret at i+33 (6 bytes, 4-byte offset)
-         * +9: mov rsp, [rax+0x38] (4 bytes)
-         * +13: mov rbp, [rax+0x60] (4 bytes)
-         * +17: jmp back to i+17 (5 bytes) */
+         * +3: je to pop rbp;ret (6 bytes, 4-byte offset)
+         * +9: mov rsp, [rax+0x38] (4 bytes, from original)
+         * +13: mov rbp, [rax+XX] (4 bytes, from original)
+         * +17: jmp back to original code after mov rbp (5 bytes) */
         int32_t je_to_ret = (int32_t)((i + 33) - (trampoline_off + 3 + 6));
         int32_t jmp_back = (int32_t)((i + 17) - (trampoline_off + 17 + 5));
 
@@ -1146,8 +1148,8 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
         trampoline[0] = 0x48; trampoline[1] = 0x85; trampoline[2] = 0xC0; /* test rax, rax */
         trampoline[3] = 0x0F; trampoline[4] = 0x84; /* je (4-byte offset) */
         memcpy(&trampoline[5], &je_to_ret, 4);
-        memcpy(&trampoline[9], &pattern[9], 4);   /* mov rsp, [rax+0x38] */
-        memcpy(&trampoline[13], &pattern[13], 4); /* mov rbp, [rax+0x60] */
+        memcpy(&trampoline[9], &base[i+9], 4);   /* mov rsp, [rax+0x38] (original) */
+        memcpy(&trampoline[13], &base[i+13], 4); /* mov rbp, [rax+XX] (original) */
         trampoline[17] = 0xE9; /* jmp (4-byte offset) */
         memcpy(&trampoline[18], &jmp_back, 4);
 
