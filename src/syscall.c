@@ -1078,78 +1078,93 @@ int patch_syscalls_in_segment(loaded_segment *seg) {
  * but do it AFTER rt0_go has set up g0 and m0. We can do this
  * in setup_gs_base after finding tls_g (which is near m0 in BSS). */
 void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
-    /* Patch systemstack's "switch back to m.curg" code.
-     * The pattern is 13 bytes:
-     *   mov gs:0x30, rax       (9 bytes: 65 48 89 04 25 30 00 00 00)
-     *   mov rsp, [rax+0x38]    (4 bytes: 48 8b 60 38)
+    /* Patch Go's systemstack to handle NULL m.curg using a trampoline.
      *
-     * We patch to 13 bytes:
-     *   test rax, rax          (3 bytes: 48 85 c0)
-     *   je +9                  (2 bytes: 74 09) — skip to original mov rbp
-     *   mov gs:0x30, rax       (9 bytes: 65 48 89 04 25 30 00 00 00)
-     *   <not patched: mov rsp, [rax+0x38] stays at offset 14>
+     * systemstack's "switch back to m.curg" code:
+     *   0x+0: mov gs:0x30, rax       (9 bytes) — set tls_g = m.curg
+     *   0x+9: mov rsp, [rax+0x38]    (4 bytes) — CRASH if rax=m.curg=0!
+     *   0x+13: mov rbp, [rax+0x60]   (4 bytes)
+     *   0x+17: mov [rax+0x38], 0     (8 bytes)
+     *   0x+25: mov [rax+0x60], 0     (8 bytes)
+     *   0x+33: pop rbp; ret
      *
-     * Wait, that's 14 bytes but we only patch 13. Let me recalculate.
+     * We patch the 5 bytes at offset+9 (mov rsp + first byte of mov rbp)
+     * with a 5-byte near jmp to a trampoline in int3 padding.
      *
-     * Actually: the 13 bytes are the mov gs (9) + mov rsp (4).
-     * We need to add a NULL check WITHOUT removing the mov gs or mov rsp.
-     * We can't fit test+je+mov gs+mov rsp in 13 bytes (needs 3+2+9+4=18).
-     *
-     * Alternative: patch ONLY the 4-byte 'mov rsp, [rax+0x38]' to:
-     *   48 85 c0     test rax, rax (3 bytes)
-     *   75 01        jne +1 (2 bytes) — skip the next 1 byte
-     * But that's 5 bytes in 4.
-     *
-     * Simplest: replace the 4-byte mov rsp with a 4-byte conditional ret:
-     *   48 85 c0     test rax, rax (3 bytes)
-     *   C3           ret (1 byte) — return if... wait, ret always returns.
-     *
-     * Use: 0F 84 0E 00 — je +14 (6 bytes, but we only have 4).
-     *
-     * OK, let's try a different strategy: patch the mov rsp (4 bytes) to
-     * a 4-byte NOP (0F 1F 40 00 = nop dword [rax+0x00]) when rax=0.
-     * But we can't make it conditional in 4 bytes.
-     *
-     * FINAL APPROACH: Patch 14 bytes (mov gs + mov rsp + first byte of mov rbp):
-     *   48 85 c0        test rax, rax (3)
-     *   74 09           je +9 (2) — skip mov gs and land on mov rsp
-     *   65 48 89 04 25 30 00 00 00  mov gs:0x30, rax (9)
-     * Total: 14 bytes. But original is 9+4=13. We need 1 more byte.
-     * The next instruction (mov rbp) starts at offset 13. We'd overwrite
-     * its first byte (0x48).
-     *
-     * ACTUALLY: let's just patch 13 bytes:
-     *   48 85 c0        test rax, rax (3)
-     *   74 08           je +8 (2) — skip mov gs (9 bytes -> 3+2+9=14, but
-     *                        je goes from byte 5 to byte 13 = 8)
-     *   65 48 89 04 25 30 00 00 00  mov gs:0x30, rax (9)
-     * Wait, 3+2+9 = 14 but we only have 13 bytes.
-     *
-     * Remove one nop from mov gs? No, it's a fixed encoding.
-     *
-     * Use 2-byte test: 85 c0 (test eax, eax) — but this zeros upper rax!
-     * Can't use it for 64-bit pointers.
-     *
-     * Use SHORT je: 74 08 = je +8. From byte 5 to byte 13.
-     * 3(test) + 2(je) + 8(mov gs without last byte?) — no.
-     *
-     * OK I'll just patch 14 bytes and handle the mov rbp separately:
-     * Pattern (14 bytes): 65 48 89 04 25 30 00 00 00 48 8b 60 38 48
-     * Patch: 48 85 c0 74 08 65 48 89 04 25 30 00 00 90
-     * = test rax,rax; je +8; mov gs:0x30,rax; nop
-     * If rax=0: je skips to byte 13 (nop), then byte 14 = start of mov rbp
-     *   which is now 0x90 (nop), so mov rbp is broken.
-     * That's still wrong.
-     *
-     * I GIVE UP on binary patching. The 4-byte constraint is too tight.
-     * Instead, set m.curg = m.g0 at the STATIC m0 address in runtime.c,
-     * AFTER rt0_go writes m0.g0. We can do this by scanning for the
-     * rt0_go pattern that writes m0.g0, and adding a write to m0.curg
-     * right after it. But that's also fragile.
-     *
-     * Simplest: just leave the crash and document it. The morestack
-     * race is the bigger problem anyway. */
-    (void)seg; (void)base;
+     * The trampoline:
+     *   test rax, rax           — if m.curg is NULL...
+     *   je to pop rbp; ret      — ...skip stack switch and return
+     *   mov rsp, [rax+0x38]     — original: switch to m.curg's stack
+     *   mov rbp, [rax+0x60]     — original: restore rbp
+     *   jmp to mov [rax+0x38],0 — continue original code
+     */
+    uint8_t pattern[] = {
+        0x65, 0x48, 0x89, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00,  /* mov gs:0x30, rax */
+        0x48, 0x8b, 0x60, 0x38,                                   /* mov rsp, [rax+0x38] */
+        0x48, 0x8b, 0x68, 0x60                                    /* mov rbp, [rax+0x60] */
+    };
+
+    for (size_t i = 0; i + sizeof(pattern) < seg->vmsize; i++) {
+        if (memcmp(base + i, pattern, sizeof(pattern)) != 0) continue;
+
+        /* Found the pattern at offset i.
+         * The int3 padding should be at offset i + 0x105 (0x100098623 - 0x10009851e).
+         * But we search for it dynamically. */
+        size_t trampoline_off = 0;
+        for (size_t j = i + 20; j + 22 < seg->vmsize; j++) {
+            if (base[j] == 0xCC && base[j+1] == 0xCC && base[j+2] == 0xCC) {
+                /* Found int3 padding — count available bytes */
+                size_t pad = 0;
+                while (j + pad < seg->vmsize && base[j + pad] == 0xCC) pad++;
+                if (pad >= 22) {
+                    trampoline_off = j;
+                    break;
+                }
+            }
+        }
+        if (trampoline_off == 0) {
+            if (g_verbose) fprintf(stderr, "macify: no int3 padding for systemstack trampoline\n");
+            return;
+        }
+
+        /* Calculate relative offsets for jmp and je.
+         * Patch at i+9: 5-byte near jmp to trampoline_off.
+         * jmp offset = trampoline_off - (i + 9 + 5) = trampoline_off - i - 14 */
+        int32_t jmp_to_trampoline = (int32_t)(trampoline_off - (i + 14));
+
+        /* Trampoline:
+         * +0: test rax, rax (3 bytes)
+         * +3: je to pop rbp;ret at i+33 (6 bytes, 4-byte offset)
+         * +9: mov rsp, [rax+0x38] (4 bytes)
+         * +13: mov rbp, [rax+0x60] (4 bytes)
+         * +17: jmp back to i+17 (5 bytes) */
+        int32_t je_to_ret = (int32_t)((i + 33) - (trampoline_off + 3 + 6));
+        int32_t jmp_back = (int32_t)((i + 17) - (trampoline_off + 17 + 5));
+
+        /* Write trampoline */
+        uint8_t trampoline[22];
+        trampoline[0] = 0x48; trampoline[1] = 0x85; trampoline[2] = 0xC0; /* test rax, rax */
+        trampoline[3] = 0x0F; trampoline[4] = 0x84; /* je (4-byte offset) */
+        memcpy(&trampoline[5], &je_to_ret, 4);
+        memcpy(&trampoline[9], &pattern[9], 4);   /* mov rsp, [rax+0x38] */
+        memcpy(&trampoline[13], &pattern[13], 4); /* mov rbp, [rax+0x60] */
+        trampoline[17] = 0xE9; /* jmp (4-byte offset) */
+        memcpy(&trampoline[18], &jmp_back, 4);
+
+        memcpy(base + trampoline_off, trampoline, sizeof(trampoline));
+
+        /* Patch mov rsp with 5-byte jmp to trampoline */
+        uint8_t jmp_patch[5] = { 0xE9, 0, 0, 0, 0 };
+        memcpy(&jmp_patch[1], &jmp_to_trampoline, 4);
+        memcpy(base + i + 9, jmp_patch, 5);
+
+        if (g_verbose) {
+            fprintf(stderr, "macify: patched systemstack at 0x%lx -> trampoline at 0x%lx\n",
+                    (unsigned long)(seg->vmaddr + i + 9),
+                    (unsigned long)(seg->vmaddr + trampoline_off));
+        }
+        return;
+    }
 }
 
 /* Print all loaded libraries (for crash debugging). */
