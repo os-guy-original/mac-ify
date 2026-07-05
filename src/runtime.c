@@ -205,10 +205,28 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
     setup_gs_base(entry);
 
-    /* For Go binaries: no signal blocking needed now that sigset_t
-     * translation properly translates signal numbers (macOS SIGURG=16
-     * → Linux SIGURG=23, etc.). Go's pthread_sigmask calls will
-     * correctly block/unblock the right Linux signals. */
+    /* For Go binaries: block SIGURG (async preemption) and SIGVTALRM
+     * (timer) before calling entry point. These are the signals Go uses
+     * for goroutine preemption and timers. If they arrive before Go's
+     * runtime has allocated m.gsignal, the signal handler crashes.
+     *
+     * We DON'T block all signals because Go's schedinit saves the
+     * current mask and restores it later — if we block everything,
+     * Go would stay fully blocked and the scheduler can't work.
+     *
+     * Go will unblock these signals via sigprocmask when it's ready
+     * (after installing handlers and allocating gsignal). */
+    if (g_tls_g_addr) {
+        sigset_t go_mask;
+        sigemptyset(&go_mask);
+        sigaddset(&go_mask, 23);  /* SIGURG (Linux) = macOS SIGURG (16) */
+        sigaddset(&go_mask, 26);  /* SIGVTALRM */
+        sigaddset(&go_mask, 27);  /* SIGPROF */
+        sigprocmask(SIG_BLOCK, &go_mask, NULL);
+        if (g_verbose) {
+            fprintf(stderr, "macify: Go binary — blocking SIGURG/SIGVTALRM/SIGPROF until runtime initializes\n");
+        }
+    }
 
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because

@@ -502,6 +502,11 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
     if (set) {
         macos_to_linux_sigset(set, &linux_set);
         p_linux_set = &linux_set;
+        if (getenv("MACIFY_SHIM_DEBUG")) {
+            uint32_t mm = *(const uint32_t *)set;
+            fprintf(stderr, "macify: pthread_sigmask(how=%d, macos_mask=0x%x -> linux)\n",
+                    how, mm);
+        }
     }
     if (oldset) {
         p_linux_oldset = &linux_oldset;

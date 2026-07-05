@@ -623,6 +623,13 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     uint64_t macos_nr = (uint64_t)regs[REG_RAX];
     uint32_t bsd_nr   = macos_nr & 0xFFFFFF;
 
+    /* Debug: count SIGILL handler invocations */
+    g_slow_path_calls++;
+    if (g_verbose && g_slow_path_calls <= 5) {
+        fprintf(stderr, "macify: SIGILL #%lu: bsd_nr=%u (rax=0x%llx)\n",
+                g_slow_path_calls, bsd_nr, (unsigned long long)macos_nr);
+    }
+
     /* Fast bounds check. Most syscalls are < 600. */
     if (__builtin_expect(bsd_nr >= BSD_SYSCALL_MAX, 0)) {
         fprintf(stderr,
@@ -641,7 +648,6 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     }
 
     uint8_t flags = bsd_arg_flags[bsd_nr];
-    g_slow_path_calls++;
 
     /* For exit (BSD 1): print stats, then exit_group. */
     if (__builtin_expect(bsd_nr == 1, 0)) {
@@ -774,10 +780,22 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         }
     }
     if (flags & ARG_SIGPROCMASK) {
-        sigprocmask_save_macos_oset = (void *)a3;  /* save for post-syscall copy */
+        sigprocmask_save_macos_oset = (void *)a3;
         if (a2) {
-            memset(linux_set_sigprocmask, 0, 8);
-            memcpy(linux_set_sigprocmask, (void *)a2, 4);
+            /* Translate 4-byte macOS sigset to 8-byte Linux sigset,
+             * translating signal numbers (macOS SIGURG=16 → Linux SIGURG=23).
+             * Just copying the bitmask would block the WRONG signals! */
+            uint32_t macos_mask = *(uint32_t *)a2;
+            uint64_t linux_mask = 0;
+            for (int ms = 1; ms <= 31; ms++) {
+                if (macos_mask & (1u << (ms - 1))) {
+                    int ls = translate_kill_signal(ms);
+                    if (ls > 0 && ls < 64) {
+                        linux_mask |= (1ULL << (ls - 1));
+                    }
+                }
+            }
+            *(uint64_t *)linux_set_sigprocmask = linux_mask;
             a2 = (long)linux_set_sigprocmask;
         }
         if (a3) {
@@ -853,10 +871,24 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         result = -1;
     }
 
-    /* Post-syscall: for sigprocmask, copy 8-byte Linux sigset → 4-byte macOS sigset */
+    /* Post-syscall: for sigprocmask, translate 8-byte Linux sigset → 4-byte macOS sigset.
+     * Must translate signal numbers back (Linux SIGURG=23 → macOS SIGURG=16). */
     if (flags & ARG_SIGPROCMASK) {
         if (sigprocmask_save_macos_oset && result == 0) {
-            memcpy(sigprocmask_save_macos_oset, linux_oset_sigprocmask, 4);
+            uint64_t linux_mask = *(uint64_t *)linux_oset_sigprocmask;
+            uint32_t macos_mask = 0;
+            for (int ls = 1; ls <= 31; ls++) {
+                if (linux_mask & (1ULL << (ls - 1))) {
+                    /* Find macOS signal that maps to this Linux signal */
+                    for (int ms = 1; ms <= 31; ms++) {
+                        if (translate_kill_signal(ms) == ls) {
+                            macos_mask |= (1u << (ms - 1));
+                            break;
+                        }
+                    }
+                }
+            }
+            *(uint32_t *)sigprocmask_save_macos_oset = macos_mask;
         }
     }
     /* Post-syscall: for sigaltstack, convert Linux stack_t → macOS stack_t */
@@ -981,6 +1013,10 @@ int patch_syscalls_in_range(loaded_segment *seg, uint8_t *base,
         } else {
             /* No mov found: dynamically computed syscall #. SLOW PATH. */
             base[i+1] = 0x0B;
+            if (g_verbose) {
+                fprintf(stderr, "macify: patched dynamic syscall at offset 0x%lx (addr=%p, bytes now: %02x %02x)\n",
+                        (unsigned long)i, (void *)(base + i), base[i], base[i+1]);
+            }
             (*slow_count)++;
         }
     }
