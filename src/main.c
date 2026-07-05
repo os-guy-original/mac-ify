@@ -104,11 +104,24 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    /* Install SIGILL handler BEFORE mapping code. */
+    /* Install SIGILL handler BEFORE mapping code.
+     * SA_ONSTACK is required because Go's runtime checks that all
+     * signal handlers use SA_ONSTACK (it needs signals delivered on
+     * the signal stack, not on goroutine stacks). Without SA_ONSTACK,
+     * Go panics with "non-Go code set up signal handler without
+     * SA_ONSTACK flag". */
+    /* Allocate a signal stack (required for SA_ONSTACK to work). */
+    static char sigstack[64 * 1024] __attribute__((aligned(4096)));
+    stack_t ss;
+    ss.ss_sp = sigstack;
+    ss.ss_size = sizeof(sigstack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = sigill_handler;
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGILL, &sa, NULL) < 0) {
         perror("sigaction SIGILL");
@@ -117,11 +130,12 @@ int main(int argc, char **argv, char **envp) {
 
     /* Install crash handler for SIGSEGV/SIGBUS/SIGFPE.
      * Use raw syscall to bypass glibc's sigaction, which might be
-     * intercepted by our shim's override (loaded later via dlopen). */
+     * intercepted by our shim's override (loaded later via dlopen).
+     * SA_ONSTACK is required for Go compatibility. */
     struct sigaction crash_sa;
     memset(&crash_sa, 0, sizeof(crash_sa));
     crash_sa.sa_sigaction = crash_handler;
-    crash_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    crash_sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
     sigemptyset(&crash_sa.sa_mask);
     sigaction(SIGSEGV, &crash_sa, NULL);
     sigaction(SIGBUS,  &crash_sa, NULL);
@@ -586,12 +600,13 @@ int main(int argc, char **argv, char **envp) {
     /* If LC_MAIN is present, call main() as a C function and exit with its
      * return value. Otherwise, jump to the LC_UNIXTHREAD entry point. */
     if (have_main) {
-        /* Reinstall crash handler before main */
+        /* Reinstall crash handler before main.
+         * SA_ONSTACK is required for Go binary compatibility. */
         {
             struct sigaction sa2;
             memset(&sa2, 0, sizeof(sa2));
             sa2.sa_sigaction = crash_handler;
-            sa2.sa_flags = SA_SIGINFO | SA_NODEFER;
+            sa2.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
             sigemptyset(&sa2.sa_mask);
             sigaction(SIGSEGV, &sa2, NULL);
             sigaction(SIGBUS, &sa2, NULL);

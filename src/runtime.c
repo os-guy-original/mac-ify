@@ -154,7 +154,26 @@ static void setup_gs_base(uint64_t entry_rip) {
     if (tls_g_addr) {
         /* Set GS base so that gs:0x30 points to tls_g */
         uint64_t gs_base = tls_g_addr - 0x30;
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        /* Use wrgsbase instruction directly (FSGSBASE feature) when available.
+         * This is more reliable than arch_prctl(ARCH_SET_GS) which may not
+         * take effect if glibc has already configured GS for its own TLS. */
+        static int use_wrgsbase = -1;
+        if (use_wrgsbase == -1) {
+            unsigned int eax, ebx, ecx, edx;
+            __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                             : "0"(7), "2"(0));
+            use_wrgsbase = (ebx & (1 << 16)) ? 1 : 0;  /* EBX bit 16 = FSGSBASE */
+        }
+        if (use_wrgsbase) {
+            __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+        } else {
+            syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        }
+        if (g_verbose) {
+            fprintf(stderr, "macify: setup_gs_base: tls_g=0x%lx gs_base=0x%lx (wrgsbase=%d)\n",
+                    (unsigned long)tls_g_addr, (unsigned long)gs_base, use_wrgsbase);
+        }
+        g_tls_g_addr = tls_g_addr;
     } else {
         /* Not a Go binary (no GS test pattern found).
          * Set GS base to a zeroed page as a safe default. */

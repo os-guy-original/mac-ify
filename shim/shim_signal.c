@@ -209,8 +209,28 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         if (signum == SIGSEGV || signum == SIGBUS) {
             linux_act.sa_sigaction = macify_crash_handler;
             linux_act.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+            p_linux_act = &linux_act;
+        } else if (signum == SIGILL) {
+            /* NEVER let the macOS binary replace our SIGILL handler.
+             * Our SIGILL handler is critical for syscall translation
+             * (the slow path uses UD2 instructions to trigger SIGILL).
+             * If the macOS binary installs its own SIGILL handler,
+             * syscall translation breaks and the binary crashes.
+             * We silently ignore the sigaction call and keep our handler. */
+            if (getenv("MACIFY_SHIM_DEBUG")) {
+                fprintf(stderr, "macify: sigaction(SIGILL) - keeping our handler (syscall translation)\n");
+            }
+            p_linux_act = NULL;  /* don't install */
+        } else {
+            /* For all other signals: ensure SA_ONSTACK is set.
+             * Go's runtime requires ALL signal handlers to use SA_ONSTACK.
+             * Without it, Go panics with "non-Go code set up signal handler
+             * without SA_ONSTACK flag". macOS binaries set up signal handlers
+             * without SA_ONSTACK (macOS handles signal stacks differently),
+             * so we add it here. */
+            linux_act.sa_flags |= SA_ONSTACK;
+            p_linux_act = &linux_act;
         }
-        p_linux_act = &linux_act;
     }
     if (oldact) {
         p_linux_oldact = &linux_oldact;
@@ -243,14 +263,27 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = macify_crash_handler;
-        sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
         sigemptyset(&sa.sa_mask);
         real_sigaction(signum, &sa, NULL);
         return SIG_DFL;
     }
-    static sighandler_t (*real_signal)(int, sighandler_t) = NULL;
-    if (!real_signal) real_signal = dlsym(RTLD_NEXT, "signal");
-    return real_signal(signum, handler);
+    if (signum == SIGILL) {
+        /* Never let the macOS binary replace our SIGILL handler. */
+        return SIG_DFL;
+    }
+    /* For other signals: convert signal() to sigaction() with SA_ONSTACK.
+     * Go requires all signal handlers to use SA_ONSTACK. */
+    if (!real_sigaction) {
+        real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handler;
+    sa.sa_flags = SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    real_sigaction(signum, &sa, NULL);
+    return SIG_DFL;
 }
 
 /* sigaddset/sigemptyset/sigfillset: macOS sigset_t = 4 bytes, Linux = 128.

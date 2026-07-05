@@ -42,6 +42,7 @@ static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
     [41]  = SYS_pipe,       /* pipe (old macOS) */
     [42]  = SYS_pipe,       /* pipe (modern macOS) */
     [43]  = SYS_getegid,    /* getegid        */
+    [46]  = SYS_rt_sigaction, /* sigaction (old macOS) */
     [47]  = SYS_getgid,     /* getgid         */
     [48]  = SYS_rt_sigprocmask, /* sigprocmask */
     [53]  = SYS_sigaltstack,/* sigaltstack    */
@@ -113,6 +114,8 @@ static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
     [406] = SYS_select,     /* select_nocancel        */
     [460] = SYS_pread64,    /* pread  (modern macOS)  */
     [461] = SYS_pwrite64,   /* pwrite (modern macOS)  */
+    [462] = SYS_rt_sigaction, /* sigaction_nocancel (modern macOS) */
+    [463] = SYS_rt_sigprocmask, /* sigprocmask_nocancel (modern macOS) */
     [465] = SYS_pread64,    /* pread_nocancel         */
     [466] = SYS_pwrite64,   /* pwrite_nocancel        */
     /* Go binaries use modern macOS syscall numbers (400+) */
@@ -149,6 +152,7 @@ static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
 #define ARG_FCNTL_CMD     0x04   /* translate fcntl() cmd values */
 #define ARG_KILL_SIGNAL   0x08   /* translate kill() signal number */
 #define ARG_MADVISE       0x10   /* translate madvise() advice value */
+#define ARG_SIGACTION     0x20   /* translate sigaction struct (macOS → Linux) */
 #define ARG_FORCE_SLOW    0x80   /* always go through SIGILL (e.g., exit) */
 
 /* Constants confirmed identical between macOS and Linux (no translation):
@@ -166,11 +170,13 @@ static const uint8_t bsd_arg_flags[BSD_SYSCALL_MAX] = {
     [1]   = ARG_FORCE_SLOW,                   /* exit — print stats */
     [5]   = ARG_OPEN_FLAGS,                   /* open */
     [37]  = ARG_KILL_SIGNAL,                  /* kill */
+    [46]  = ARG_SIGACTION | ARG_FORCE_SLOW,   /* sigaction — struct translation */
     [75]  = ARG_MADVISE,                      /* madvise */
     [92]  = ARG_FCNTL_CMD,                    /* fcntl */
     [197] = ARG_MMAP_FLAGS,                   /* mmap */
     [398] = ARG_OPEN_FLAGS,                   /* open_nocancel */
     [405] = ARG_FCNTL_CMD,                    /* fcntl_nocancel */
+    [462] = ARG_SIGACTION | ARG_FORCE_SLOW,   /* sigaction_nocancel — struct translation */
     [477] = ARG_MMAP_FLAGS,                   /* mmap (modern macOS) */
     [490] = ARG_OPEN_FLAGS,                   /* open_nocancel (modern macOS) */
     /* wait4 (7) options WCONTINUED bit differs but is rarely used. */
@@ -210,6 +216,7 @@ static const char *bsd_syscall_name(uint32_t bsd_nr) {
         case 41:  return "pipe";
         case 42:  return "pipe";
         case 43:  return "getegid";
+        case 46:  return "sigaction";
         case 47:  return "getgid";
         case 48:  return "sigprocmask";
         case 53:  return "sigaltstack";
@@ -567,6 +574,26 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             info->si_code == 1 ? "MAPERR (unmapped)" :
             info->si_code == 2 ? "ACCERR (protection)" : "other");
 
+    /* For Go binaries: print tls_g value (current goroutine pointer). */
+    if (g_tls_g_addr) {
+        uint64_t tls_g_val = 0;
+        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL) {
+            tls_g_val = *(volatile uint64_t *)g_tls_g_addr;
+        }
+        fprintf(stderr, "  Go tls_g at 0x%lx = 0x%lx (current g)\n",
+                (unsigned long)g_tls_g_addr, (unsigned long)tls_g_val);
+        if (tls_g_val > 0x10000 && tls_g_val < 0x7fffffffffffUL) {
+            uint64_t g_m = *(volatile uint64_t *)(tls_g_val + 0x30);
+            fprintf(stderr, "  g.m = 0x%lx\n", (unsigned long)g_m);
+            if (g_m > 0x10000 && g_m < 0x7fffffffffffUL) {
+                uint64_t m_g0 = *(volatile uint64_t *)g_m;
+                uint64_t m_curg = *(volatile uint64_t *)(g_m + 8);
+                fprintf(stderr, "  m.g0 = 0x%lx, m.curg = 0x%lx\n",
+                        (unsigned long)m_g0, (unsigned long)m_curg);
+            }
+        }
+    }
+
     print_stats();
     _exit(128 + sig);
 }
@@ -668,6 +695,46 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         if (g_verbose) {
             fprintf(stderr, "macify:   madvise advice macos=%d -> linux=%ld\n",
                     old_a3, a3);
+        }
+    }
+    if (flags & ARG_SIGACTION) {
+        /* macOS sigaction(int signum, const struct sigaction *act,
+         *                  struct sigaction *oldact)
+         * a1 = signum, a2 = act (macOS struct ptr), a3 = oldact (macOS struct ptr)
+         */
+        if (a1 == SIGILL || a1 == SIGSEGV || a1 == SIGBUS) {
+            /* NEVER let the macOS binary replace our SIGILL/SIGSEGV/SIGBUS
+             * handlers. SIGILL is critical for syscall translation.
+             * SIGSEGV/SIGBUS are our crash handlers. */
+            if (g_verbose) {
+                fprintf(stderr, "macify:   sigaction(%ld) - skipped, keeping our handler\n", a1);
+            }
+            regs[REG_RAX] = 0;  /* return success */
+            regs[REG_RIP] += 2;  /* skip UD2 */
+            return;
+        }
+        if (a2) {
+            static struct {
+                void *handler;
+                unsigned long flags;
+                void *restorer;
+                unsigned char mask[128];
+            } linux_sa;
+            uint8_t *macos_sa = (uint8_t *)a2;
+            memset(&linux_sa, 0, sizeof(linux_sa));
+            linux_sa.handler = *(void **)macos_sa;
+            unsigned int macos_flags = *(unsigned int *)(macos_sa + 12);
+            linux_sa.flags = macos_flags | SA_ONSTACK;
+            memcpy(&linux_sa.mask, macos_sa + 8, 4);
+            a2 = (long)&linux_sa;
+            if (g_verbose) {
+                fprintf(stderr, "macify:   sigaction signum=%ld handler=%p flags=0x%x -> 0x%lx\n",
+                        a1, linux_sa.handler, macos_flags, linux_sa.flags);
+            }
+        }
+        if (a3) {
+            static unsigned char linux_old_sa[152];
+            a3 = (long)linux_old_sa;
         }
     }
     /* wait4 options WCONTINUED bit differs (macOS 0x4 vs Linux 0x8) but is

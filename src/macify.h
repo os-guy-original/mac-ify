@@ -220,6 +220,10 @@ extern int64_t  g_slide;
 extern bool     g_verbose;
 extern bool     g_no_fast_path;
 
+/* tls_g address (for Go binaries). Go stores the current goroutine
+ * pointer here. Set by setup_gs_base() in runtime.c. 0 for non-Go. */
+extern uint64_t g_tls_g_addr;
+
 extern uint64_t g_fast_path_sites;
 extern uint64_t g_slow_path_sites;
 extern uint64_t g_slow_path_calls;

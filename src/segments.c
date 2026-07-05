@@ -18,6 +18,9 @@ loaded_segment g_segments[MAX_SEGMENTS];
 int g_nsegments = 0;
 uint64_t g_entry_rip = 0;
 
+/* tls_g address for Go binaries (0 for non-Go). */
+uint64_t g_tls_g_addr = 0;
+
 /* Loaded section tracking. Sections are sub-regions of segments with
  * names like "__text", "__got", "__la_symbol_ptr". Used to restrict syscall
  * patching to __text and to locate __got/__la_symbol_ptr for binding. */
