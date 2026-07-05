@@ -487,18 +487,20 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     /* Check if rip is in one of our mapped segments */
     uint64_t rip = (uint64_t)regs[REG_RIP];
 
-    /* Print stack dump — use write() for signal safety */
-    n = snprintf(buf, sizeof(buf), "stack:\n");
-    write(2, buf, n);
-    uint64_t *sp = (uint64_t *)regs[REG_RSP];
-    for (int s = 0; s < 16; s++) {
-        uint64_t addr = (uint64_t)(sp + s);
-        if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
-        /* Skip if address is on a page boundary (might fault) */
-        if ((addr & 0xFFF) > 0xFF0) continue;
-        uint64_t val = sp[s];
-        n = snprintf(buf, sizeof(buf), "sp+%x:%016lx\n", s, (unsigned long)val);
+    /* Print stack dump — use write() for signal safety.
+     * Skip stack dump on Go binaries (rsp may be invalid/corrupted). */
+    if (!g_tls_g_addr) {
+        n = snprintf(buf, sizeof(buf), "stack:\n");
         write(2, buf, n);
+        uint64_t *sp = (uint64_t *)regs[REG_RSP];
+        for (int s = 0; s < 16; s++) {
+            uint64_t addr = (uint64_t)(sp + s);
+            if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
+            if ((addr & 0xFFF) > 0xFF0) continue;
+            uint64_t val = sp[s];
+            n = snprintf(buf, sizeof(buf), "sp+%x:%016lx\n", s, (unsigned long)val);
+            write(2, buf, n);
+        }
     }
 
     /* Print rip location info using write() */
@@ -546,26 +548,31 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     write(2, buf, n);
     write(2, "\n", 1);
 
-    /* For Go binaries: print tls_g value (current goroutine pointer). */
+    /* For Go binaries: print Go runtime state.
+     * Go 1.26 m struct layout (key fields):
+     *   m+0x00: m.g0 (system goroutine)
+     *   m+0x48: m.gsignal (signal handler goroutine)
+     *   m+0xb8: m.curg (currently running goroutine, NULL at startup)
+     * g struct: g+0x30 = g.m */
     if (g_tls_g_addr) {
         uint64_t tls_g_val = 0;
         if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL) {
             tls_g_val = *(volatile uint64_t *)g_tls_g_addr;
         }
-        n = snprintf(buf, sizeof(buf), "  Go tls_g at 0x%lx = 0x%lx\n",
-                        (unsigned long)g_tls_g_addr, (unsigned long)tls_g_val);
+        n = snprintf(buf, sizeof(buf), "  Go tls_g=0x%lx (current g)\n",
+                     (unsigned long)tls_g_val);
         write(2, buf, n);
         if (tls_g_val > 0x10000 && tls_g_val < 0x7fffffffffffUL) {
             uint64_t g_m = *(volatile uint64_t *)(tls_g_val + 0x30);
-            n = snprintf(buf, sizeof(buf), "  g.m = 0x%lx\n", (unsigned long)g_m);
+            n = snprintf(buf, sizeof(buf), "  g.m=0x%lx\n", (unsigned long)g_m);
             write(2, buf, n);
             if (g_m > 0x10000 && g_m < 0x7fffffffffffUL) {
                 uint64_t m_g0 = *(volatile uint64_t *)g_m;
-                uint64_t m_curg = *(volatile uint64_t *)(g_m + 8);
-                uint64_t m_gsignal = *(volatile uint64_t *)(g_m + 0xb8);
-                n = snprintf(buf, sizeof(buf), "  m.g0 = 0x%lx, m.curg = 0x%lx, m.gsignal = 0x%lx\n",
-                            (unsigned long)m_g0, (unsigned long)m_curg,
-                            (unsigned long)m_gsignal);
+                uint64_t m_gsignal = *(volatile uint64_t *)(g_m + 0x48);
+                uint64_t m_curg = *(volatile uint64_t *)(g_m + 0xb8);
+                n = snprintf(buf, sizeof(buf), "  m.g0=0x%lx m.gsignal=0x%lx m.curg=0x%lx\n",
+                            (unsigned long)m_g0, (unsigned long)m_gsignal,
+                            (unsigned long)m_curg);
                 write(2, buf, n);
             }
         }
