@@ -8,7 +8,9 @@ BIN_DIR  = ../build
 LIB      = $(BIN_DIR)/libmacify_shim.so
 
 SRC = shim_core.c shim_mach.c shim_objc.c shim_tlv.c shim_pthread.c \
-      shim_signal.c shim_spawn.c \
+      shim_spawn.c \
+      signal/init.c signal/crash_handler.c signal/sigaction.c \
+      signal/sigset.c signal/sigmask.c signal/shim_symbol.c signal/go_signal.c \
       io/flags.c io/file.c io/net.c io/process.c io/dirent.c io/dl.c \
       misc/rune.c misc/cf.c misc/cf_compat.c misc/iokit.c misc/sysctl.c misc/string.c misc/misc.c misc/unwind.c misc/objc_compat.c
 
