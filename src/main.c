@@ -604,11 +604,15 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
+    /* Initialize the macOS filesystem prefix (~/.macify/).
+     * This creates ~/Library/Caches/, ~/Library/Preferences/, etc.
+     * so macOS binaries find their expected paths without messing
+     * with the real Linux system. */
+    macify_init_prefix();
+
     void *stack_base = NULL;
     size_t stack_size = 0;
-    /* Use environ (not envp) so any setenv() calls above are included.
-     * envp is the original array from macify's main and doesn't include
-     * env vars added via setenv. environ is updated by setenv. */
+    /* Use environ (not envp) so any setenv() calls above are included */
     extern char **environ;
     uint64_t stack_top = setup_stack(app_argc, app_argv, environ, &stack_base, &stack_size);
 

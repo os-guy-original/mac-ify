@@ -126,7 +126,8 @@ int open(const char *pathname, int flags, ...) {
     mode_t mode = 0;
     /* Only translate flags for macOS callers */
     int linux_flags;
-    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (is_macos) {
         linux_flags = (int)translate_open_flags((unsigned int)flags);
     } else {
         linux_flags = flags; /* Linux caller — flags are already Linux */
@@ -137,33 +138,48 @@ int open(const char *pathname, int flags, ...) {
         mode = va_arg(ap, int);
         va_end(ap);
     }
-    int fd = real_open(pathname, linux_flags, mode);
+
+    /* Prefix path translation for macOS callers */
+    const char *effective_path = pathname;
+    char translated_path[4096];
+    if (is_macos && pathname) {
+        /* Check if path should be hidden */
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) {
+            errno = ENOENT;
+            return -1;
+        }
+        /* Translate macOS paths to prefix paths */
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, translated_path, sizeof(translated_path)) == 0) {
+            effective_path = translated_path;
+        }
+    }
+
+    int fd = real_open(effective_path, linux_flags, mode);
     if (fd >= 0) errno = 0;
-    
     if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256];
-        int n = snprintf(b, sizeof(b), "macify: open(\"%s\", 0x%x->0x%x) = %d\n",
-                pathname ? pathname : "(null)", flags, linux_flags, fd);
+        char b[512];
+        int n = snprintf(b, sizeof(b), "macify: open(\"%s\"%s, 0x%x->0x%x) = %d\n",
+                pathname ? pathname : "(null)",
+                effective_path != pathname ? " [translated]" : "",
+                flags, linux_flags, fd);
         (void)write(2, b, n);
     }
     return fd;
 }
 
 /* openat — like open but relative to a directory fd.
- * macOS grep uses openat() instead of open() for file access.
- *
- * CRITICAL: macOS AT_FDCWD = -2, Linux AT_FDCWD = -100.
- * Without translating this, openat(-2, ...) returns EBADF on Linux.
- *
- * Also translates macOS open flags to Linux (0x20000=O_RDONLY etc). */
+ * macOS AT_FDCWD = -2, Linux AT_FDCWD = -100.
+ * Also translates macOS open flags and applies prefix path translation. */
 int openat(int dirfd, const char *pathname, int flags, ...) {
     LAZY_INIT_IO();
     mode_t mode = 0;
     int linux_flags;
     int linux_dirfd = dirfd;
-    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (is_macos) {
         linux_flags = (int)translate_open_flags((unsigned int)flags);
-        /* Translate macOS AT_FDCWD (-2) to Linux AT_FDCWD (-100) */
         if (dirfd == -2) linux_dirfd = -100;  /* AT_FDCWD */
     } else {
         linux_flags = flags;
@@ -174,17 +190,23 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
         mode = va_arg(ap, int);
         va_end(ap);
     }
+
+    /* Prefix path translation */
+    const char *effective_path = pathname;
+    char translated_path[4096];
+    if (is_macos && pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, translated_path, sizeof(translated_path)) == 0) {
+            effective_path = translated_path;
+        }
+    }
+
     static int (*real_openat)(int, const char *, int, ...) = NULL;
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
-    int fd = real_openat(linux_dirfd, pathname, linux_flags, mode);
+    int fd = real_openat(linux_dirfd, effective_path, linux_flags, mode);
     if (fd >= 0) errno = 0;
-    
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256];
-        int n = snprintf(b, sizeof(b), "macify: openat(%d->%d, \"%s\", 0x%x->0x%x) = %d\n",
-                dirfd, linux_dirfd, pathname ? pathname : "(null)", flags, linux_flags, fd);
-        (void)write(2, b, n);
-    }
     return fd;
 }
 

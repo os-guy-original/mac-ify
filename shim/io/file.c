@@ -107,36 +107,36 @@ int macify_strerror_r(int errnum, char *buf, size_t buflen) {
 /* ── stat / lstat / fstat ────────────────────────────────────── */
 
 struct macos_stat {
-    int64_t       st_dev;          /* dev_t = 8 bytes on macOS x86_64 */
-    uint16_t      st_mode;         /* mode_t = 2 bytes, offset 8 */
-    uint16_t      st_nlink;        /* nlink_t = 2 bytes, offset 10 */
-    uint32_t      _pad1;           /* padding, offset 12 (align ino to 16) */
-    uint64_t      st_ino;          /* ino_t = 8 bytes, offset 16 */
-    uint32_t      st_uid;          /* uid_t = 4 bytes, offset 24 */
-    uint32_t      st_gid;          /* gid_t = 4 bytes, offset 28 */
-    int64_t       st_rdev;         /* dev_t = 8 bytes, offset 32 */
-    struct timespec st_atim;       /* 16 bytes, offset 40 */
-    struct timespec st_mtim;       /* 16 bytes, offset 56 */
-    struct timespec st_ctim;       /* 16 bytes, offset 72 */
-    struct timespec st_birthtim;   /* 16 bytes, offset 88 */
-    int64_t       st_size;         /* off_t = 8 bytes, offset 104 */
-    int64_t       st_blocks;       /* blkcnt_t = 8 bytes, offset 112 */
-    int32_t       st_blksize;      /* blksize_t = 4 bytes, offset 120 */
-    uint32_t      st_flags;        /* offset 124 */
-    uint32_t      st_gen;          /* offset 128 */
-    int32_t       st_lspare;       /* offset 132 */
-    int64_t       st_qspare[2];    /* offset 136, 16 bytes */
+    int32_t       st_dev;
+    uint16_t      st_mode;
+    uint16_t      st_nlink;
+    uint64_t      st_ino;
+    uint32_t      st_uid;
+    uint32_t      st_gid;
+    int32_t       st_rdev;
+    int32_t       _pad1;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
+    struct timespec st_birthtim;
+    int64_t       st_size;
+    int64_t       st_blocks;
+    int32_t       st_blksize;
+    uint32_t      st_flags;
+    uint32_t      st_gen;
+    int32_t       st_lspare;
+    int64_t       st_qspare[2];
 };
 
 static void translate_stat(const struct stat *ls, struct macos_stat *ms) {
     memset(ms, 0, sizeof(*ms));
-    ms->st_dev = (int64_t)ls->st_dev;
+    ms->st_dev = (int32_t)ls->st_dev;
     ms->st_mode = (uint16_t)ls->st_mode;
     ms->st_nlink = (uint16_t)ls->st_nlink;
     ms->st_ino = ls->st_ino;
     ms->st_uid = ls->st_uid;
     ms->st_gid = ls->st_gid;
-    ms->st_rdev = (int64_t)ls->st_rdev;
+    ms->st_rdev = (int32_t)ls->st_rdev;
     ms->st_atim = ls->st_atim;
     ms->st_mtim = ls->st_mtim;
     ms->st_ctim = ls->st_ctim;
@@ -153,38 +153,42 @@ static int (*real_fstat)(int, struct stat *);
 int macify_stat(const char *path, struct macos_stat *buf) __asm__("stat");
 int macify_stat(const char *path, struct macos_stat *buf) {
     if (!real_stat) real_stat = dlsym(RTLD_NEXT, "stat");
-    if (!real_stat) { errno = ENOSYS; return -1; }
-    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (!is_macos)
         return real_stat(path, (struct stat *)buf);
-    struct stat ls;
-    int ret = real_stat(path, &ls);
-    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: stat(\"%s\") = %d mode=0x%x size=%lld\n",
-            path, ret, ret == 0 ? buf->st_mode : 0,
-            ret == 0 ? (long long)buf->st_size : 0LL);
-        (void)write(2, b, n);
+    /* Prefix path translation */
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
     }
+    struct stat ls;
+    int ret = real_stat(eff, &ls);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
 int macify_lstat(const char *path, struct macos_stat *buf) __asm__("lstat");
 int macify_lstat(const char *path, struct macos_stat *buf) {
     if (!real_lstat) real_lstat = dlsym(RTLD_NEXT, "lstat");
-    if (!real_lstat) { errno = ENOSYS; return -1; }
-    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (!is_macos)
         return real_lstat(path, (struct stat *)buf);
-    struct stat ls;
-    int ret = real_lstat(path, &ls);
-    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: lstat(\"%s\") = %d mode=0x%x size=%lld\n",
-            path, ret, ret == 0 ? buf->st_mode : 0,
-            ret == 0 ? (long long)buf->st_size : 0LL);
-        (void)write(2, b, n);
+    /* Prefix path translation */
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
     }
+    struct stat ls;
+    int ret = real_lstat(eff, &ls);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -195,14 +199,7 @@ int macify_fstat(int fd, struct macos_stat *buf) {
         return real_fstat(fd, (struct stat *)buf);
     struct stat ls;
     int ret = real_fstat(fd, &ls);
-    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: fstat(%d) = %d mode=0x%x size=%lld\n",
-            fd, ret, ret == 0 ? buf->st_mode : 0,
-            ret == 0 ? (long long)buf->st_size : 0LL);
-        (void)write(2, b, n);
-    }
+    if (ret == 0) translate_stat(&ls, buf);
     return ret;
 }
 
@@ -214,15 +211,13 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (!real_fstatat) real_fstatat = dlsym(RTLD_NEXT, "fstatat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstatat(dirfd, pathname, (struct stat *)buf, flags);
-    /* Translate macOS AT_FDCWD (-2) to Linux AT_FDCWD (-100) */
-    int linux_dirfd = (dirfd == -2) ? -100 : dirfd;
     int linux_flags = 0;
-    if (flags & 0x0200) linux_flags |= 0x0100;  /* AT_SYMLINK_NOFOLLOW */
-    if (flags & 0x0400) linux_flags |= 0x0400;  /* AT_SYMLINK_FOLLOW */
-    if (flags & 0x0800) linux_flags |= 0x0200;  /* AT_REMOVEDIR */
+    if (flags & 0x0200) linux_flags |= 0x0100;
+    if (flags & 0x0400) linux_flags |= 0x0400;
+    if (flags & 0x0800) linux_flags |= 0x0200;
     if (flags & 0x1000) linux_flags |= 0x0200;
     struct stat ls;
-    int ret = real_fstatat(linux_dirfd, pathname, &ls, linux_flags);
+    int ret = real_fstatat(dirfd, pathname, &ls, linux_flags);
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
 }
@@ -254,19 +249,15 @@ struct passwd *macify_getpwuid(uid_t uid) {
     return (struct passwd *)&macos_pw;
 }
 
-int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) __asm__("getpwuid_r");
-int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+struct passwd *macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) __asm__("getpwuid_r");
+struct passwd *macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
     static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getpwuid_r");
     int r = real(uid, pwd, buf, buflen, result);
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: getpwuid_r(%u) = %d result=%p dir=%s\n",
-            uid, r, (void*)(result ? *result : NULL),
-            (r == 0 && result && *result) ? (*result)->pw_dir : "(null)");
-        (void)write(2, b, n);
+    if (r == 0 && *result) {
+        (*result)->pw_name = pwd->pw_name;
     }
-    return r;
+    return (struct passwd *)(long)r;
 }
 
 struct passwd *macify_getpwnam(const char *name) __asm__("getpwnam");
@@ -289,107 +280,4 @@ struct passwd *macify_getpwnam(const char *name) {
     macos_pw.pw_expire = 0;
     macos_pw.pw_class = "";
     return (struct passwd *)&macos_pw;
-}
-
-/* access — check file accessibility. macOS and Linux have the same
- * flag values (F_OK=0, R_OK=4, W_OK=2, X_OK=1), so we can pass through
- * directly to glibc. We override to add tracing and ensure it works. */
-int macify_access(const char *path, int mode) __asm__("access");
-int macify_access(const char *path, int mode) {
-    static int (*real_access)(const char *, int) = NULL;
-    if (!real_access) real_access = dlsym(RTLD_NEXT, "access");
-    if (!real_access) { errno = ENOSYS; return -1; }
-    int ret = real_access(path, mode);
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: access(\"%s\", %d) = %d\n", path, mode, ret);
-        (void)write(2, b, n);
-    }
-    return ret;
-}
-
-/* realpath — resolve absolute pathname. macOS and Linux have the same
- * behavior, so we pass through. We override to add tracing. */
-char *macify_realpath(const char *path, char *resolved) __asm__("realpath");
-char *macify_realpath(const char *path, char *resolved) {
-    static char *(*real_realpath)(const char *, char *) = NULL;
-    if (!real_realpath) real_realpath = dlsym(RTLD_NEXT, "realpath");
-    char *ret = real_realpath(path, resolved);
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: realpath(\"%s\") = %s\n",
-            path ? path : "(null)", ret ? ret : "(null)");
-        (void)write(2, b, n);
-    }
-    return ret;
-}
-
-/* getcwd — get current working directory. Pass through with tracing. */
-char *macify_getcwd(char *buf, size_t size) __asm__("getcwd");
-char *macify_getcwd(char *buf, size_t size) {
-    static char *(*real_getcwd)(char *, size_t) = NULL;
-    if (!real_getcwd) real_getcwd = dlsym(RTLD_NEXT, "getcwd");
-    char *ret = real_getcwd(buf, size);
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: getcwd() = %s\n", ret ? ret : "(null)");
-        (void)write(2, b, n);
-    }
-    return ret;
-}
-
-/* isatty — check if fd is a terminal. bat calls isatty(1) to decide
- * whether to use color/paging. On Linux, isatty uses TCGETS ioctl.
- * On macOS, isatty uses TIOCGETA ioctl. We override to use Linux's
- * TCGETS so it works correctly. */
-int macify_isatty(int fd) __asm__("isatty");
-int macify_isatty(int fd) {
-    static int (*real_isatty)(int) = NULL;
-    if (!real_isatty) real_isatty = dlsym(RTLD_NEXT, "isatty");
-    int ret = real_isatty(fd);
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[128]; int n = snprintf(b, sizeof(b),
-            "macify: isatty(%d) = %d\n", fd, ret);
-        (void)write(2, b, n);
-    }
-    return ret;
-}
-
-/* ioctl — translate macOS terminal ioctls to Linux.
- * macOS uses different ioctl request codes for terminal operations.
- * Without translation, isatty() and TIOCGWINSZ fail with ENOTTY. */
-int macify_ioctl(int fd, unsigned long request, ...) __asm__("ioctl");
-int macify_ioctl(int fd, unsigned long request, ...) {
-    static int (*real_ioctl)(int, unsigned long, ...) = NULL;
-    if (!real_ioctl) real_ioctl = dlsym(RTLD_NEXT, "ioctl");
-    va_list ap;
-    va_start(ap, request);
-    void *arg = va_arg(ap, void *);
-    va_end(ap);
-
-    /* Translate macOS terminal ioctls to Linux */
-    unsigned long linux_request = request;
-    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
-        /* macOS TIOCGETA (0x402c7413) → Linux TCGETS (0x5401) */
-        if (request == 0x402c7413) linux_request = 0x5401;
-        /* macOS TIOCGWINSZ (0x40087468) → Linux TIOCGWINSZ (0x5413) */
-        else if (request == 0x40087468) linux_request = 0x5413;
-        /* macOS TIOCGPGRP (0x40047477) → Linux TIOCGPGRP (0x540F) */
-        else if (request == 0x40047477) linux_request = 0x540F;
-        /* macOS FIONREAD (0x4004667F) → Linux FIONREAD (0x541B) */
-        else if (request == 0x4004667F) linux_request = 0x541B;
-        /* macOS FIONBIO (0x8004667E) → Linux FIONBIO (0x5421) */
-        else if (request == 0x8004667E) linux_request = 0x5421;
-        /* macOS TIOCMGET (0x4004746A) → Linux TIOCMGET (0x5415) */
-        else if (request == 0x4004746A) linux_request = 0x5415;
-    }
-
-    int ret = real_ioctl(fd, linux_request, arg);
-    if (getenv("MACIFY_TRACE_IOCTL")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: ioctl(%d, 0x%lx->0x%lx) = %d\n",
-            fd, request, linux_request, ret);
-        (void)write(2, b, n);
-    }
-    return ret;
 }

@@ -271,5 +271,11 @@ uint64_t setup_stack(int argc, char **argv, char **envp, void **stack_base, size
 void jump_to_entry(uint64_t entry, uint64_t stack_top) __attribute__((noreturn));
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) __attribute__((noreturn));
 
+/* prefix.c — macOS filesystem prefix (like Wine's drive_c) */
+void macify_init_prefix(void);
+int macify_translate_path(const char *path, char *out, size_t out_size);
+int macify_should_hide_path(const char *path);
+const char *macify_get_prefix(void);
+
 #endif /* MACIFY_H */
 const char *bsd_syscall_name(uint32_t bsd_nr);
