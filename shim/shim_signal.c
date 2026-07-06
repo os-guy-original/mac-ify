@@ -28,6 +28,19 @@ int is_forked_child(void) {
  * Set in macify_init_stdio constructor. */
 void (*macify_sa_restorer)(void) = NULL;
 
+/* Our own signal restorer function — calls rt_sigreturn syscall.
+ * This is used as sa_restorer for signal handlers installed via
+ * raw syscall (bypassing glibc's sigaction wrapper which normally
+ * sets sa_restorer to __restore_rt). */
+__attribute__((naked))
+void macify_restore_rt(void) {
+    __asm__ volatile(
+        "mov $15, %%rax\n\t"    /* SYS_rt_sigreturn = 15 */
+        "syscall\n\t"
+        :::
+    );
+}
+
 /* Constructor to initialize the stdio pointers */
 __attribute__((constructor))
 static void macify_init_stdio(void) {
@@ -47,8 +60,8 @@ static void macify_init_stdio(void) {
     /* Cache glibc's signal restorer function for use in sigaction override.
      * SA_RESTORER is REQUIRED on modern Linux kernels — without it, signal
      * delivery fails with SIGSEGV (SI_KERNEL).
-     * CRITICAL: Use real_dlsym (not dlsym) because our dlsym override
-     * would return our shim's sigaction instead of glibc's. */
+     * Try to get glibc's __restore_rt via probe. If that fails, use our own
+     * macify_restore_rt function. */
     static int (*real_sa)(int, const struct sigaction *, struct sigaction *) = NULL;
     if (!real_sa && real_dlsym) real_sa = real_dlsym(RTLD_NEXT, "sigaction");
     if (real_sa) {
@@ -61,6 +74,10 @@ static void macify_init_stdio(void) {
         real_sa(SIGUSR1, &probe, &old);
         macify_sa_restorer = probe.sa_restorer;
         real_sa(SIGUSR1, &old, NULL);
+    }
+    /* Fallback: use our own restorer if probe failed */
+    if (!macify_sa_restorer) {
+        macify_sa_restorer = macify_restore_rt;
     }
 
     /* Print shim load address for debugging */
@@ -114,26 +131,7 @@ static void macify_init_stdio(void) {
     memset(&sa, 0, sizeof(sa));
     sa.handler = macify_crash_handler;
     sa.flags = 0x09000004;  /* SA_SIGINFO | SA_ONSTACK | SA_RESTORER */
-    /* Set sa_restorer to glibc's __restore_rt function.
-     * We find it by looking up the restorer used by glibc's sigaction. */
-    {
-        struct sigaction probe;
-        memset(&probe, 0, sizeof(probe));
-        probe.sa_sigaction = (void *)macify_crash_handler;
-        probe.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        sigemptyset(&probe.sa_mask);
-        /* Call glibc's sigaction to let it set sa_restorer, then read it back */
-        static int (*real_sa)(int, const struct sigaction *, struct sigaction *) = NULL;
-        if (!real_sa) real_sa = dlsym(RTLD_NEXT, "sigaction");
-        if (real_sa) {
-            struct sigaction old;
-            real_sa(SIGUSR1, &probe, &old);  /* probe with SIGUSR1 (harmless) */
-            /* Now probe has sa_restorer set by glibc */
-            sa.restorer = probe.sa_restorer;
-            /* Restore old SIGUSR1 handler */
-            real_sa(SIGUSR1, &old, NULL);
-        }
-    }
+    sa.restorer = macify_sa_restorer ? macify_sa_restorer : macify_restore_rt;
     /* Block ALL signals during crash handler */
     memset(sa.mask, 0xff, sizeof(sa.mask));
     long r;
@@ -517,21 +515,22 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
      * the wrong offsets, causing signal handlers to be installed with
      * wrong flags (no SA_ONSTACK, no SA_SIGINFO, no SA_RESTORER). */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        if (!real_sigaction) {
-            real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
-            if (!real_sigaction) {
-                /* RTLD_NEXT might not find it if libc is loaded before shim.
-                 * Try RTLD_DEFAULT which searches all libraries. */
-                real_sigaction = real_dlsym(RTLD_DEFAULT, "sigaction");
+        /* Non-macOS caller: pass through to kernel via raw rt_sigaction syscall.
+         * We can't use glibc's sigaction() because our dlsym override might
+         * return our shim's sigaction instead of glibc's. The raw syscall
+         * goes directly to the kernel.
+         * CRITICAL: We must set SA_RESTORER and sa_restorer, because the
+         * kernel requires it on modern Linux. Glibc's sigaction wrapper
+         * normally does this, but we're bypassing it. */
+        if (act) {
+            struct sigaction modified_act = *act;
+            if (!(modified_act.sa_flags & 0x01000000) && macify_sa_restorer) {
+                modified_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
+                modified_act.sa_restorer = macify_sa_restorer;
             }
+            return syscall(13, signum, &modified_act, oldact, sizeof(sigset_t));
         }
-        if (!real_sigaction) {
-            char b[128];
-            int n = snprintf(b, sizeof(n), "macify: WARNING: real_sigaction=NULL, sig=%d\n", signum);
-            (void)write(2, b, n);
-            return -1;
-        }
-        return real_sigaction(signum, act, oldact);
+        return syscall(13, signum, NULL, oldact, sizeof(sigset_t));
     }
 
     /* macOS caller: translate signal number and struct layout */
@@ -678,7 +677,11 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         p_linux_oldact = &linux_oldact;
     }
 
-    int result = real_sigaction(signum, p_linux_act, p_linux_oldact);
+    /* Use raw rt_sigaction syscall instead of real_sigaction, because
+     * real_sigaction might be NULL (glibc loaded before shim, so
+     * real_dlsym(RTLD_NEXT, "sigaction") returns NULL).
+     * The linux_act already has SA_RESTORER and sa_restorer set. */
+    int result = syscall(13, signum, p_linux_act, p_linux_oldact, sizeof(sigset_t));
 
     if (oldact && result == 0) {
         struct macos_sigaction *macos_old = (struct macos_sigaction *)oldact;
@@ -698,33 +701,35 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 sighandler_t macify_signal(int signum, sighandler_t handler) __asm__("signal");
 sighandler_t macify_signal(int signum, sighandler_t handler) {
     if (signum == SIGSEGV || signum == SIGBUS) {
-        /* Install our crash handler via real sigaction */
-        if (!real_sigaction) {
-            real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
-        }
+        /* Install our crash handler via raw rt_sigaction syscall */
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = macify_crash_handler;
-        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        if (macify_sa_restorer) {
+            sa.sa_flags |= 0x01000000;  /* SA_RESTORER */
+            sa.sa_restorer = macify_sa_restorer;
+        }
         sigemptyset(&sa.sa_mask);
-        real_sigaction(signum, &sa, NULL);
+        syscall(13, signum, &sa, NULL, sizeof(sigset_t));
         return SIG_DFL;
     }
     if (signum == SIGILL) {
         /* Never let the macOS binary replace our SIGILL handler. */
         return SIG_DFL;
     }
-    /* For other signals: convert signal() to sigaction() with SA_ONSTACK.
-     * Go requires all signal handlers to use SA_ONSTACK. */
-    if (!real_sigaction) {
-        real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
-    }
+    /* For other signals: convert signal() to raw rt_sigaction syscall
+     * with SA_ONSTACK and SA_RESTORER. */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handler;
     sa.sa_flags = SA_ONSTACK;
+    if (macify_sa_restorer) {
+        sa.sa_flags |= 0x01000000;  /* SA_RESTORER */
+        sa.sa_restorer = macify_sa_restorer;
+    }
     sigemptyset(&sa.sa_mask);
-    real_sigaction(signum, &sa, NULL);
+    syscall(13, signum, &sa, NULL, sizeof(sigset_t));
     return SIG_DFL;
 }
 
@@ -1006,10 +1011,9 @@ int macify_sigaltstack(const void *ss, void *oss) {
         p_oss = &linux_oss;
     }
 
-    /* Call the real sigaltstack (glibc's, via dlsym) */
-    static int (*real_sigaltstack)(const stack_t *, stack_t *) = NULL;
-    if (!real_sigaltstack) real_sigaltstack = dlsym(RTLD_NEXT, "sigaltstack");
-    int result = real_sigaltstack(p_ss, p_oss);
+    /* Call the real sigaltstack via raw syscall (bypass glibc, which might
+     * not be findable via dlsym due to symbol interposition). */
+    int result = syscall(131, p_ss, p_oss);
 
     if (oss && result == 0) {
         /* Convert Linux-format stack_t back to macOS format */

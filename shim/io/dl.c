@@ -137,9 +137,9 @@ void *dlsym(void *handle, const char *symbol) {
     }
 
     void *result = real_dlsym(handle, symbol);
-    if (!result && getenv("MACIFY_TRACE_DLSYM")) {
+    if (getenv("MACIFY_TRACE_DLSYM")) {
         char b[256];
-        int n = snprintf(b, sizeof(b), "macify: dlsym(%s) = NULL (handle=%p)\n", symbol, handle);
+        int n = snprintf(b, sizeof(b), "macify: dlsym(%s) = %p\n", symbol, result);
         (void)write(2, b, n);
     }
     return result;

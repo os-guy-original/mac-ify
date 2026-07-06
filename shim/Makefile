@@ -2,7 +2,7 @@
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11 -fPIC
-LDFLAGS ?= -shared -lpthread -ldl -lm
+LDFLAGS ?= -shared -lpthread -ldl -lm -Wl,-z,now
 
 BIN_DIR  = ../build
 LIB      = $(BIN_DIR)/libmacify_shim.so

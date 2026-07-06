@@ -562,14 +562,19 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                         }
                         if (addr) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
+                            if (getenv("MACIFY_TRACE_FIXUPS")) {
+                                fprintf(stderr, "macify: fixup sym=%s -> %p\n", sym, addr);
+                            }
                             if (strcmp(sym, "malloc_size") == 0) {
                                 fprintf(stderr, "macify: chained fixup malloc_size at chain_ptr=%p (page+0x%lx) -> %p\n",
                                         (void*)chain_ptr, (unsigned long)(chain_ptr - page_base), addr);
                                 fflush(stderr);
                             }
                         } else {
-                            fprintf(stderr, "macify: chained fixup UNRESOLVED: sym=%s lib_ordinal=%d\n",
-                                    sym, lib_ordinal);
+                            if (getenv("MACIFY_TRACE_FIXUPS")) {
+                                fprintf(stderr, "macify: chained fixup UNRESOLVED: sym=%s lib_ordinal=%d\n",
+                                        sym, lib_ordinal);
+                            }
                         }
                     }
                 } else {
