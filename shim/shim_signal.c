@@ -181,6 +181,27 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     greg_t *regs = uc->uc_mcontext.gregs;
 
+    /* Print first 8 stack entries IMMEDIATELY — before anything that
+     * might crash. This is critical for debugging rip=0 (NULL function
+     * pointer call) since the return address is at [rsp]. */
+    {
+        char sb[256];
+        int sn = 0;
+        uint64_t sp = (uint64_t)regs[REG_RSP];
+        sn = snprintf(sb, sizeof(sb), "rsp=0x%lx stack:", (unsigned long)sp);
+        write(2, sb, sn);
+        for (int i = 0; i < 8; i++) {
+            uint64_t val = 0;
+            /* Carefully read — might fault */
+            if (sp + i*8 > 0x10000 && sp + i*8 < 0x7fffffffffffUL) {
+                val = *(volatile uint64_t *)(sp + i*8);
+            }
+            sn = snprintf(sb, sizeof(sb), " 0x%016lx", (unsigned long)val);
+            write(2, sb, sn);
+        }
+        write(2, "\n", 1);
+    }
+
     /* Check signal stack validity */
     stack_t cur_ss;
     memset(&cur_ss, 0, sizeof(cur_ss));

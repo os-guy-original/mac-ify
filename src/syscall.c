@@ -505,6 +505,40 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     }
 
     write(2, buf, pos);
+
+    /* Print first 16 stack entries to help debug rip=0 (NULL function pointer)
+     * and other crashes. The return address is at [rsp]. */
+    {
+        char sb[160];
+        int sn;
+        uint64_t sp = (uint64_t)regs[REG_RSP];
+        extern uint64_t g_tls_g_addr;
+        /* Find rclone base for decoding return addresses */
+        uint64_t rclone_base = 0;
+        for (int i = 0; i < g_nsegments; i++) {
+            if (g_segments[i].is_pagezero) continue;
+            if (strcmp(g_segments[i].name, "__TEXT") == 0) {
+                rclone_base = g_segments[i].vmaddr;
+                break;
+            }
+        }
+        sn = snprintf(sb, sizeof(sb), "\nstack (rclone_base=0x%lx):\n", (unsigned long)rclone_base);
+        write(2, sb, sn);
+        for (int i = 0; i < 16; i++) {
+            uint64_t addr = sp + (uint64_t)i * 8;
+            uint64_t val = 0;
+            if (addr > 0x10000 && addr < 0x7fffffffffffUL) {
+                val = *(volatile uint64_t *)addr;
+            }
+            char tag[32] = "";
+            if (rclone_base && val >= rclone_base && val < rclone_base + 0x5000000) {
+                snprintf(tag, sizeof(tag), " rclone+0x%lx", (unsigned long)(val - rclone_base));
+            }
+            sn = snprintf(sb, sizeof(sb), "  sp+%02d: 0x%016lx%s\n", i, (unsigned long)val, tag);
+            write(2, sb, sn);
+        }
+    }
+
     print_stats();
     _exit(128 + sig);
 }
