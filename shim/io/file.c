@@ -207,13 +207,15 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (!real_fstatat) real_fstatat = dlsym(RTLD_NEXT, "fstatat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstatat(dirfd, pathname, (struct stat *)buf, flags);
+    /* Translate macOS AT_FDCWD (-2) to Linux AT_FDCWD (-100) */
+    int linux_dirfd = (dirfd == -2) ? -100 : dirfd;
     int linux_flags = 0;
-    if (flags & 0x0200) linux_flags |= 0x0100;
-    if (flags & 0x0400) linux_flags |= 0x0400;
-    if (flags & 0x0800) linux_flags |= 0x0200;
+    if (flags & 0x0200) linux_flags |= 0x0100;  /* AT_SYMLINK_NOFOLLOW */
+    if (flags & 0x0400) linux_flags |= 0x0400;  /* AT_SYMLINK_FOLLOW */
+    if (flags & 0x0800) linux_flags |= 0x0200;  /* AT_REMOVEDIR */
     if (flags & 0x1000) linux_flags |= 0x0200;
     struct stat ls;
-    int ret = real_fstatat(dirfd, pathname, &ls, linux_flags);
+    int ret = real_fstatat(linux_dirfd, pathname, &ls, linux_flags);
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
 }

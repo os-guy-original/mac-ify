@@ -147,6 +147,43 @@ int open(const char *pathname, int flags, ...) {
     return fd;
 }
 
+/* openat — like open but relative to a directory fd.
+ * macOS grep uses openat() instead of open() for file access.
+ *
+ * CRITICAL: macOS AT_FDCWD = -2, Linux AT_FDCWD = -100.
+ * Without translating this, openat(-2, ...) returns EBADF on Linux.
+ *
+ * Also translates macOS open flags to Linux (0x20000=O_RDONLY etc). */
+int openat(int dirfd, const char *pathname, int flags, ...) {
+    LAZY_INIT_IO();
+    mode_t mode = 0;
+    int linux_flags;
+    int linux_dirfd = dirfd;
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        linux_flags = (int)translate_open_flags((unsigned int)flags);
+        /* Translate macOS AT_FDCWD (-2) to Linux AT_FDCWD (-100) */
+        if (dirfd == -2) linux_dirfd = -100;  /* AT_FDCWD */
+    } else {
+        linux_flags = flags;
+    }
+    if (linux_flags & LINUX_O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    static int (*real_openat)(int, const char *, int, ...) = NULL;
+    if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
+    int fd = real_openat(linux_dirfd, pathname, linux_flags, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b), "macify: openat(%d->%d, \"%s\", 0x%x->0x%x) = %d\n",
+                dirfd, linux_dirfd, pathname ? pathname : "(null)", flags, linux_flags, fd);
+        (void)write(2, b, n);
+    }
+    return fd;
+}
+
 int madvise(void *addr, size_t length, int advice) {
     LAZY_INIT_IO();
     if (advice == MACOS_MADV_FREE) advice = LINUX_MADV_FREE;
