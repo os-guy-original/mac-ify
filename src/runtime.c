@@ -204,17 +204,20 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
     setup_gs_base(entry);
 
-    /* For Go binaries: block ALL signals except SIGSEGV/SIGBUS/SIGFPE/SIGILL. */
+    /* For Go binaries: block only SIGURG (async preemption signal).
+     * On kernel 5.10, we blocked ALL signals to prevent GS base clobbering
+     * during signal delivery. But on kernel 7.0+, GS base survives signal
+     * delivery, so we only need to block SIGURG to prevent the preemption
+     * signal from arriving before m.gsignal is allocated.
+     * Blocking ALL signals causes Go's scheduler to deadlock (no SIGVTALRM
+     * for timer-based preemption), which triggers morestack on g0. */
     if (g_tls_g_addr) {
-        sigset_t all_mask;
-        sigfillset(&all_mask);
-        sigdelset(&all_mask, SIGSEGV);
-        sigdelset(&all_mask, SIGBUS);
-        sigdelset(&all_mask, SIGFPE);
-        sigdelset(&all_mask, SIGILL);
-        sigprocmask(SIG_BLOCK, &all_mask, NULL);
+        sigset_t go_mask;
+        sigemptyset(&go_mask);
+        sigaddset(&go_mask, 23);  /* SIGURG (Linux) = macOS SIGURG (16) */
+        sigprocmask(SIG_BLOCK, &go_mask, NULL);
         if (g_verbose) {
-            fprintf(stderr, "macify: Go binary — blocking all signals\n");
+            fprintf(stderr, "macify: Go binary — blocking SIGURG\n");
         }
     }
 
