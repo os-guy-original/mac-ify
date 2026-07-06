@@ -9,6 +9,11 @@ tests/real/*
 !tests/real/README.md
 tests/binaries/*.bin
 
+# Test results / logs
+*.out
+*.log
+/tmp/
+
 # Archives
 *.tar.gz
 *.zip
@@ -21,3 +26,18 @@ tests/binaries/*.bin
 # IDE
 .vscode/
 .idea/
+
+# Session worklog (internal development notes, not part of the project)
+worklog.md
+
+# Skills (AI assistant tooling, not part of the project)
+skills/
+
+# Upload directory (user-uploaded files, not part of the project)
+upload/
+
+# Debug / temporary files
+*.tmp
+*.bak
+core
+core.*
