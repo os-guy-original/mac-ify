@@ -1,5 +1,6 @@
 #include "macify.h"
 #include <sys/utsname.h>
+#include <stdlib.h>
 
 
 /* Stack setup — build the macOS-style entry stack:
@@ -222,12 +223,26 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         fprintf(stderr, "macify: comm page at 0x7fffffe00000 = %p\n", comm_page);
     }
 
-    /* For Go binaries: block only SIGURG (async preemption signal).
+    /* For Go binaries: disable async preemption and block SIGURG.
+     *
+     * Async preemption (SIGURG-based) doesn't work reliably through our
+     * signal translation layer. Go's sigtrampgo handler accesses g.m via
+     * gs:0x30, and our signal wrapper's GS base management can conflict
+     * with the kernel's signal delivery on kernel 5.10.
+     *
+     * Setting GODEBUG=asyncpreemptoff=1 tells Go to use cooperative
+     * preemption only (safe points), which works correctly.
+     *
+     * We also block SIGURG initially to prevent signals from arriving
+     * before Go's runtime is ready. Go will unblock it later (but since
+     * async preempt is off, SIGURG won't be used for preemption).
+     *
      * CRITICAL: Use memset + raw syscall, NOT sigemptyset/sigaddset/sigprocmask.
-     * Our shim's sigemptyset/sigaddset overrides write only 4 bytes, but glibc's
-     * sigset_t is 128 bytes. Using them leaves 124 bytes uninitialized, causing
-     * random signals to be blocked/unblocked. */
+     * Our shim's overrides write only 4 bytes for macOS callers. */
     if (g_tls_g_addr) {
+        /* GODEBUG=asyncpreemptoff=1 and GOMAXPROCS=1 are set in main.c
+         * before setup_stack, so Go sees them in envp. */
+
         sigset_t go_mask;
         memset(&go_mask, 0, sizeof(go_mask));
         /* Set bit for SIGURG (signal 23, bit 22 in sigset) */
@@ -236,7 +251,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         /* Use raw syscall to bypass our shim's sigprocmask override */
         syscall(14, 0 /*SIG_BLOCK*/, &go_mask, NULL, sizeof(go_mask));
         if (g_verbose) {
-            fprintf(stderr, "macify: Go binary — blocking SIGURG\n");
+            fprintf(stderr, "macify: Go binary — blocking SIGURG, async preempt off\n");
         }
     }
 

@@ -574,9 +574,43 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
+    /* For Go binaries: set GODEBUG=asyncpreemptoff=1 and GOMAXPROCS=1
+     * BEFORE setup_stack, so they appear in the envp array passed to main.
+     * Go reads these during runtime.schedinit (very early in startup).
+     *
+     * We detect Go binaries by scanning the entry point for the GS test
+     * pattern (mov gs:[0x30], 0x123). This is the same check that
+     * setup_gs_base does later. */
+    {
+        int is_go = 0;
+        if (g_entry_rip) {
+            uint8_t *code = (uint8_t *)g_entry_rip;
+            static const uint8_t gs_test[] = {
+                0x65, 0x48, 0xc7, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0x23, 0x01, 0x00, 0x00
+            };
+            for (int i = 0; i < 0x400 - sizeof(gs_test); i++) {
+                if (memcmp(code + i, gs_test, sizeof(gs_test)) == 0) {
+                    is_go = 1;
+                    break;
+                }
+            }
+        }
+        if (is_go) {
+            setenv("GODEBUG", "asyncpreemptoff=1", 0);
+            setenv("GOMAXPROCS", "1", 0);
+            if (g_verbose) {
+                fprintf(stderr, "macify: Go binary detected — setting GODEBUG=asyncpreemptoff=1 GOMAXPROCS=1\n");
+            }
+        }
+    }
+
     void *stack_base = NULL;
     size_t stack_size = 0;
-    uint64_t stack_top = setup_stack(app_argc, app_argv, envp, &stack_base, &stack_size);
+    /* Use environ (not envp) so any setenv() calls above are included.
+     * envp is the original array from macify's main and doesn't include
+     * env vars added via setenv. environ is updated by setenv. */
+    extern char **environ;
+    uint64_t stack_top = setup_stack(app_argc, app_argv, environ, &stack_base, &stack_size);
 
     /* Register our allocated stack with the shim so pthread_get_stack*_np
      * returns the correct info for the main thread. Without this, Rust's

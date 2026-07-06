@@ -653,19 +653,26 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
             }
             /* For non-macOS callers (macify itself): pass through normally */
         } else {
-            /* For all other signals: pass through Go's handler directly
-             * with SA_ONSTACK and SA_RESTORER. */
+            /* For all other signals (including SIGURG for async preemption):
+             * Install our wrapper that restores GS base before calling Go's
+             * handler. This is CRITICAL for async preemption — Go's
+             * sigtrampgo reads gs:0x30 to find the current g, and if GS base
+             * was clobbered by signal delivery, it reads garbage. */
             extern uint64_t g_tls_g_addr;
             if (g_tls_g_addr) {
-                /* Go binary: pass through Go's handler with SA_ONSTACK */
-                linux_act.sa_flags |= SA_ONSTACK;
+                /* Go binary: install signal wrapper that restores GS base */
+                extern void macify_go_signal_wrapper(int, siginfo_t *, void *);
+                extern void *macify_saved_go_handlers[];
+                if (signum >= 0 && signum < 32) {
+                    macify_saved_go_handlers[signum] = (void *)macos_act->handler;
+                }
+                linux_act.sa_sigaction = macify_go_signal_wrapper;
+                linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
             } else {
                 /* Non-Go: just add SA_ONSTACK and pass through */
                 linux_act.sa_flags |= SA_ONSTACK;
             }
-            /* CRITICAL: Add SA_RESTORER and set sa_restorer.
-             * Without SA_RESTORER, signal delivery fails on modern Linux
-             * kernels with SIGSEGV (SI_KERNEL). */
+            /* CRITICAL: Add SA_RESTORER and set sa_restorer. */
             if (macify_sa_restorer) {
                 linux_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
                 linux_act.sa_restorer = macify_sa_restorer;
@@ -734,38 +741,76 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
 }
 
 /* sigaddset/sigemptyset/sigfillset: macOS sigset_t = 4 bytes, Linux = 128.
- * glibc's versions write 128 bytes into a 4-byte buffer, corrupting the
- * stack. We override to work with the macOS 4-byte sigset_t. */
+ *
+ * CRITICAL: These functions are called by BOTH macOS code (4-byte sigset)
+ * AND glibc internal code (128-byte sigset). Due to symbol interposition,
+ * glibc's internal calls to sigemptyset/sigaddset get OUR overrides.
+ *
+ * If we only write 4 bytes when glibc expects 128, the remaining 124 bytes
+ * contain stack garbage, causing glibc to see random signals as blocked.
+ * This corrupts glibc's internal signal handling and causes data corruption.
+ *
+ * Solution: check the caller. If macOS code, use 4-byte sigset. If glibc,
+ * delegate to glibc's real version (found via real_dlsym). */
 int sigaddset(sigset_t *set, int signum) {
     if (!set) return -1;
-    uint32_t *mask = (uint32_t *)set;
-    *mask |= (1u << (signum - 1));
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        /* macOS caller: 4-byte sigset */
+        uint32_t *mask = (uint32_t *)set;
+        *mask |= (1u << (signum - 1));
+        return 0;
+    }
+    /* glibc caller: 128-byte sigset — set bit directly */
+    unsigned long *bits = (unsigned long *)set;
+    if (signum > 0 && signum <= 64) bits[0] |= (1UL << (signum - 1));
     return 0;
 }
 
 int sigdelset(sigset_t *set, int signum) {
     if (!set) return -1;
-    uint32_t *mask = (uint32_t *)set;
-    *mask &= ~(1u << (signum - 1));
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        uint32_t *mask = (uint32_t *)set;
+        *mask &= ~(1u << (signum - 1));
+        return 0;
+    }
+    /* glibc caller: 128-byte sigset — clear bit directly */
+    unsigned long *bits = (unsigned long *)set;
+    if (signum > 0 && signum <= 64) bits[0] &= ~(1UL << (signum - 1));
     return 0;
 }
 
 int sigemptyset(sigset_t *set) {
     if (!set) return -1;
-    *(uint32_t *)set = 0;
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        *(uint32_t *)set = 0;
+        return 0;
+    }
+    /* glibc caller: zero the full 128-byte sigset */
+    memset(set, 0, sizeof(sigset_t));
     return 0;
 }
 
 int sigfillset(sigset_t *set) {
     if (!set) return -1;
-    *(uint32_t *)set = 0xFFFFFFFF;
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        *(uint32_t *)set = 0xFFFFFFFF;
+        return 0;
+    }
+    /* glibc caller: fill the full 128-byte sigset */
+    memset(set, 0xff, sizeof(sigset_t));
     return 0;
 }
 
 int sigismember(const sigset_t *set, int signum) {
     if (!set) return 0;
-    uint32_t mask = *(const uint32_t *)set;
-    return (mask & (1u << (signum - 1))) ? 1 : 0;
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        uint32_t mask = *(const uint32_t *)set;
+        return (mask & (1u << (signum - 1))) ? 1 : 0;
+    }
+    /* glibc caller: check 128-byte sigset */
+    const unsigned long *bits = (const unsigned long *)set;
+    if (signum > 0 && signum <= 64) return (bits[0] & (1UL << (signum - 1))) ? 1 : 0;
+    return 0;
 }
 
 /* ── pthread_sigmask / sigprocmask ────────────────────────────
@@ -1218,26 +1263,34 @@ static int go_is_ready(void) {
 
 void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
     if (getenv("MACIFY_TRACE_SIGNAL")) {
-        char b[128]; int n = snprintf(b, sizeof(b), "macify: go_signal_wrapper(sig=%d) go_ready=%d\n",
-                sig, macify_go_signal_ready);
+        char b[256]; int n = snprintf(b, sizeof(b), "macify: go_signal_wrapper(sig=%d) go_ready=%d handler=%p\n",
+                sig, macify_go_signal_ready,
+                (sig >= 0 && sig < 32) ? macify_saved_go_handlers[sig] : NULL);
         (void)write(2, b, n);
     }
-    /* Restore GS base before calling Go's handler.
-     * Use ONLY arch_prctl (not wrgsbase) — on kernel 5.10, wrgsbase
-     * is unsafe during signal delivery. */
-    extern uint64_t g_tls_g_addr;
-    if (g_tls_g_addr) {
-        uint64_t gs_base = g_tls_g_addr - 0x30;
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
-    }
+    /* Do NOT restore GS base here — the kernel already preserves GS base
+     * during signal delivery (we use arch_prctl, not wrgsbase, so the
+     * kernel shadow is correct). Calling arch_prctl inside the signal
+     * handler can cause issues on kernel 5.10. */
 
     if (go_is_ready()) {
         /* Go is ready — call the saved Go handler */
         if (sig >= 0 && sig < 32 && macify_saved_go_handlers[sig]) {
             void (*go_handler)(int, siginfo_t *, void *) =
                 (void (*)(int, siginfo_t *, void *))macify_saved_go_handlers[sig];
+            if (getenv("MACIFY_TRACE_SIGNAL")) {
+                char b[128]; int n = snprintf(b, sizeof(b),
+                    "macify: calling Go handler sig=%d fn=%p\n", sig, go_handler);
+                (void)write(2, b, n);
+            }
             go_handler(sig, info, uctx);
             return;
+        }
+    } else {
+        if (getenv("MACIFY_TRACE_SIGNAL")) {
+            char b[128]; int n = snprintf(b, sizeof(b),
+                "macify: Go NOT ready, deferring sig=%d\n", sig);
+            (void)write(2, b, n);
         }
     }
     /* Go is NOT ready — defer the signal by re-blocking it.
