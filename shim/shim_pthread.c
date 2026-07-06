@@ -489,33 +489,22 @@ static void convert_macos_mutex(pthread_mutex_t *m) {
 static void convert_macos_cond(pthread_cond_t *c) {
     unsigned int sig = *(unsigned int *)c;
     if (sig == MACOS_PTHREAD_COND_SIG) {
-        /* macOS pthread_cond_t is only 32 bytes, but glibc's is 48 bytes.
-         * We CANNOT write glibc's PTHREAD_COND_INITIALIZER into the macOS
-         * buffer (16-byte overflow). Instead, allocate a glibc cond on the
-         * heap and store the pointer in the macOS cond's opaque field. */
-        pthread_cond_t *glibc_cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-        if (!glibc_cond) return;
+        /* macOS pthread_cond_t is 64 bytes (8-byte long __sig + 56-byte opaque).
+         * glibc's pthread_cond_t is 48 bytes. Since macOS cond is LARGER,
+         * we can safely write glibc's PTHREAD_COND_INITIALIZER directly
+         * into the macOS cond buffer (in-place conversion).
+         *
+         * This is MUCH safer than the old heap-allocation + magic-signature
+         * scheme. The old scheme stored "MCCN" (0x4D43434E) at offset 0,
+         * which glibc's internal code misinterpreted as a pointer, causing
+         * SIGSEGV at [0x4D43434E + offset]. */
         static const pthread_cond_t glibc_init = PTHREAD_COND_INITIALIZER;
-        memcpy(glibc_cond, &glibc_init, sizeof(pthread_cond_t));
-        /* Store our magic signature and the heap pointer in the macOS cond.
-         * macOS cond layout: [sig(4)] [pad(4)] [opaque(24)]
-         * We overwrite with: [magic(4)] [pad(4)] [pointer(8)] */
-        *(unsigned int *)c = 0x4D43434E;  /* "MCCN" = Macify Cond */
-        void **ptr_loc = (void **)((char *)c + 8);
-        *ptr_loc = glibc_cond;
-    } else if (sig == 0x4D43434E) {
-        /* Already converted — heap cond exists */
+        memcpy(c, &glibc_init, sizeof(pthread_cond_t));
     }
 }
 
-/* Get the glibc cond pointer from a macOS cond (after conversion). */
+/* After convert_macos_cond, the cond IS a glibc cond — just return it. */
 static pthread_cond_t *get_glibc_cond(pthread_cond_t *c) {
-    unsigned int sig = *(unsigned int *)c;
-    if (sig == 0x4D43434E) {
-        void **ptr_loc = (void **)((char *)c + 8);
-        return (pthread_cond_t *)*ptr_loc;
-    }
-    /* Not converted — it's already a glibc cond (or being used directly) */
     return c;
 }
 
@@ -612,54 +601,13 @@ int pthread_cond_broadcast(pthread_cond_t *c) {
 
 int pthread_cond_init(pthread_cond_t *c, const pthread_condattr_t *a) {
     LAZY_INIT();
-    /* Allocate a glibc cond on the heap (macOS cond is too small for glibc) */
-    pthread_cond_t *glibc_cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-    if (!glibc_cond) {
-        if (getenv("MACIFY_SSL_DEBUG")) {
-            char b[128];
-            snprintf(b, sizeof(b),
-                     "SSL_DEBUG: pthread_cond_init cond=%p attr=%p -> ENOMEM (malloc failed)\n",
-                     (void *)c, (void *)a);
-            (void)write(2, b, strlen(b));
-        }
-        return ENOMEM;
-    }
-    int ret = real_cond_init(glibc_cond, a);
-    if (ret != 0) {
-        free(glibc_cond);
-        if (getenv("MACIFY_SSL_DEBUG")) {
-            char b[128];
-            snprintf(b, sizeof(b),
-                     "SSL_DEBUG: pthread_cond_init cond=%p attr=%p -> %d (real_cond_init failed)\n",
-                     (void *)c, (void *)a, ret);
-            (void)write(2, b, strlen(b));
-        }
-        return ret;
-    }
-    *(unsigned int *)c = 0x4D43434E;  /* Macify Cond magic */
-    void **ptr_loc = (void **)((char *)c + 8);
-    *ptr_loc = glibc_cond;
-    if (getenv("MACIFY_SSL_DEBUG")) {
-        char b[128];
-        snprintf(b, sizeof(b),
-                 "SSL_DEBUG: pthread_cond_init cond=%p attr=%p -> 0 (glibc_cond=%p)\n",
-                 (void *)c, (void *)a, (void *)glibc_cond);
-        (void)write(2, b, strlen(b));
-    }
-    return 0;
+    /* macOS cond is 64 bytes, glibc's is 48 — init directly in-place */
+    return real_cond_init(c, a);
 }
 
 int pthread_cond_destroy(pthread_cond_t *c) {
     LAZY_INIT();
     unsigned int sig = *(unsigned int *)c;
-    if (sig == 0x4D43434E) {
-        /* Our heap-allocated cond — destroy and free */
-        void **ptr_loc = (void **)((char *)c + 8);
-        pthread_cond_t *glibc_cond = (pthread_cond_t *)*ptr_loc;
-        int ret = real_cond_destroy(glibc_cond);
-        free(glibc_cond);
-        return ret;
-    }
     if (sig == MACOS_PTHREAD_COND_SIG) return 0;  /* uninit macOS cond */
     return real_cond_destroy(c);
 }
