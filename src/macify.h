@@ -272,3 +272,4 @@ void jump_to_entry(uint64_t entry, uint64_t stack_top) __attribute__((noreturn))
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) __attribute__((noreturn));
 
 #endif /* MACIFY_H */
+const char *bsd_syscall_name(uint32_t bsd_nr);
