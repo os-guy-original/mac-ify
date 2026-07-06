@@ -261,7 +261,7 @@ void dispatch_after(unsigned long when, void *queue, void *block) {
     (void)when; (void)queue;
     if (block) {
         typedef void (*block_fn)(void);
-        block_fn fn = *(block_fn *)block;  /* block first 8 bytes = invoke fn */
+        block_fn fn = *(block_fn *)((char *)block + 16);  /* block invoke at offset 16 (after isa+flags) */
         if (fn) fn();
     }
 }

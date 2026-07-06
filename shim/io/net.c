@@ -618,7 +618,7 @@ ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
                  sockfd, len, flags, dest_addr, r, saved);
         macify_net_dbg(b);
     }
-    TRANSLATE_ERRNO(r);
+    TRANSLATE_ERRNO_SAVED(r, saved);
     return r;
 }
 
@@ -637,7 +637,7 @@ ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) {
                  sockfd, len, flags, r, saved);
         macify_net_dbg(b);
     }
-    TRANSLATE_ERRNO(r);
+    TRANSLATE_ERRNO_SAVED(r, saved);
     return r;
 }
 
@@ -657,7 +657,7 @@ ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) {
                  sockfd, len, flags, r, saved);
         macify_net_dbg(b);
     }
-    TRANSLATE_ERRNO(r);
+    TRANSLATE_ERRNO_SAVED(r, saved);
     return r;
 }
 
@@ -698,7 +698,7 @@ ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) {
                  sockfd, flags, r, saved);
         macify_net_dbg(b);
     }
-    TRANSLATE_ERRNO(r);
+    TRANSLATE_ERRNO_SAVED(r, saved);
     return r;
 }
 
@@ -715,7 +715,7 @@ ssize_t macify_recvmsg(int sockfd, void *msg, int flags) {
                  sockfd, flags, r, saved);
         macify_net_dbg(b);
     }
-    TRANSLATE_ERRNO(r);
+    TRANSLATE_ERRNO_SAVED(r, saved);
     return r;
 }
 

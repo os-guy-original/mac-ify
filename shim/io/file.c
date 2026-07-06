@@ -224,60 +224,76 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
 
 /* ── passwd ──────────────────────────────────────────────────── */
 
-static __thread struct { char *pw_name, *pw_passwd, *pw_gecos, *pw_dir, *pw_shell; uid_t pw_uid; gid_t pw_gid; long pw_change, pw_expire; char *pw_class; } macos_pw;
+/* macOS struct passwd layout (x86_64):
+ *   pw_name, pw_passwd, pw_uid, pw_gid, pw_change, pw_class,
+ *   pw_gecos, pw_dir, pw_shell, pw_expire
+ * (different field order from Linux's struct passwd!) */
+struct macos_passwd {
+    char    *pw_name;     /* offset 0  */
+    char    *pw_passwd;   /* offset 8  */
+    uid_t    pw_uid;      /* offset 16 */
+    gid_t    pw_gid;      /* offset 20 */
+    time_t   pw_change;   /* offset 24 */
+    char    *pw_class;    /* offset 32 */
+    char    *pw_gecos;    /* offset 40 */
+    char    *pw_dir;      /* offset 48 */
+    char    *pw_shell;    /* offset 56 */
+    time_t   pw_expire;   /* offset 64 */
+};
+
+static __thread struct macos_passwd macos_pw;
 static __thread char macos_pw_name[256], macos_pw_dir[256], macos_pw_shell[256];
 
 struct passwd *macify_getpwuid(uid_t uid) __asm__("getpwuid");
 struct passwd *macify_getpwuid(uid_t uid) {
     static struct passwd *(*real)(uid_t) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getpwuid");
+    if (!real) return NULL;
     struct passwd *lp = real(uid);
     if (!lp) return NULL;
-    strncpy(macos_pw_name, lp->pw_name, 255);
-    strncpy(macos_pw_dir, lp->pw_dir, 255);
-    strncpy(macos_pw_shell, lp->pw_shell, 255);
+    strncpy(macos_pw_name, lp->pw_name, 255); macos_pw_name[255] = '\0';
+    strncpy(macos_pw_dir, lp->pw_dir, 255); macos_pw_dir[255] = '\0';
+    strncpy(macos_pw_shell, lp->pw_shell, 255); macos_pw_shell[255] = '\0';
     macos_pw.pw_name = macos_pw_name;
     macos_pw.pw_passwd = lp->pw_passwd;
     macos_pw.pw_uid = lp->pw_uid;
     macos_pw.pw_gid = lp->pw_gid;
+    macos_pw.pw_change = 0;
+    macos_pw.pw_class = "";
     macos_pw.pw_gecos = lp->pw_gecos;
     macos_pw.pw_dir = macos_pw_dir;
     macos_pw.pw_shell = macos_pw_shell;
-    macos_pw.pw_change = 0;
     macos_pw.pw_expire = 0;
-    macos_pw.pw_class = "";
     return (struct passwd *)&macos_pw;
 }
 
-struct passwd *macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) __asm__("getpwuid_r");
-struct passwd *macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) __asm__("getpwuid_r");
+int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
     static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getpwuid_r");
-    int r = real(uid, pwd, buf, buflen, result);
-    if (r == 0 && *result) {
-        (*result)->pw_name = pwd->pw_name;
-    }
-    return (struct passwd *)(long)r;
+    if (!real) { errno = ENOSYS; return -1; }
+    return real(uid, pwd, buf, buflen, result);
 }
 
 struct passwd *macify_getpwnam(const char *name) __asm__("getpwnam");
 struct passwd *macify_getpwnam(const char *name) {
     static struct passwd *(*real)(const char *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getpwnam");
+    if (!real) return NULL;
     struct passwd *lp = real(name);
     if (!lp) return NULL;
-    strncpy(macos_pw_name, lp->pw_name, 255);
-    strncpy(macos_pw_dir, lp->pw_dir, 255);
-    strncpy(macos_pw_shell, lp->pw_shell, 255);
+    strncpy(macos_pw_name, lp->pw_name, 255); macos_pw_name[255] = '\0';
+    strncpy(macos_pw_dir, lp->pw_dir, 255); macos_pw_dir[255] = '\0';
+    strncpy(macos_pw_shell, lp->pw_shell, 255); macos_pw_shell[255] = '\0';
     macos_pw.pw_name = macos_pw_name;
     macos_pw.pw_passwd = lp->pw_passwd;
     macos_pw.pw_uid = lp->pw_uid;
     macos_pw.pw_gid = lp->pw_gid;
+    macos_pw.pw_change = 0;
+    macos_pw.pw_class = "";
     macos_pw.pw_gecos = lp->pw_gecos;
     macos_pw.pw_dir = macos_pw_dir;
     macos_pw.pw_shell = macos_pw_shell;
-    macos_pw.pw_change = 0;
     macos_pw.pw_expire = 0;
-    macos_pw.pw_class = "";
     return (struct passwd *)&macos_pw;
 }

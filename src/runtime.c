@@ -46,6 +46,10 @@ uint64_t setup_stack(int argc, char **argv, char **envp, void **out_stack_base, 
     uint8_t *str = (uint8_t *)top;
     uint64_t *argv_ptrs = calloc((size_t)argc, sizeof(uint64_t));
     uint64_t *envp_ptrs = calloc((size_t)nenv + 1, sizeof(uint64_t));
+    if (!argv_ptrs || !envp_ptrs) {
+        fprintf(stderr, "macify: out of memory in setup_stack\n");
+        exit(1);
+    }
 
     for (int i = 0; i < argc; i++) {
         size_t len = strlen(argv[i]) + 1;
@@ -283,7 +287,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         "mov %%eax, %[ret]\n\t"
         : [ret] "=r"(ret)
         : [entry] "r"(entry), [stk] "r"(stack_top)
-        : "rax", "rcx", "rdx", "rsi", "rdi", "r11", "memory"
+        : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     /* Flush stdio buffers before exiting — macOS binaries use buffered I/O */
     fflush(NULL);

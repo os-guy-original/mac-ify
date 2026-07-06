@@ -1,0 +1,836 @@
+     1→     1→/* net.c — network: select, poll, getaddrinfo, socket, connect, bind,
+     2→     2→ * sendto, recv, accept, getsockname, inet_ntop, inet_pton, writev, readv */
+     3→     3→#include "io_internal.h"
+     4→     4→#include <sys/select.h>
+     5→     5→#include <poll.h>
+     6→     6→#include <netdb.h>
+     7→     7→#include <sys/socket.h>
+     8→     8→#include <sys/uio.h>
+     9→     9→
+    10→    10→/* macOS struct timeval layout (x86_64):
+    11→    11→ *   offset 0:  tv_sec   (long — 8 bytes)
+    12→    12→ *   offset 8:  tv_usec  (long — 8 bytes)
+    13→    13→ * Total: 16 bytes, tv_usec is 8 bytes.
+    14→    14→ *
+    15→    15→ * If we pass the macOS struct directly to glibc's select, glibc reads
+    16→    16→ * tv_usec as a 64-bit long, picking up 4 bytes of uninitialized padding
+    17→    17→ * (or adjacent stack data). The garbage high 32 bits make tv_usec a
+    18→    18→ * gigantic number, and the kernel's select sleeps for billions of years
+    19→    19→ * — exactly the "hang" we observe during the GnuTLS handshake when wget
+    20→    20→ * calls select() to wait for readability. Translate the struct. */
+    21→    21→struct macos_timeval {
+    22→    22→    long       tv_sec;    /* 8 bytes */
+    23→    23→    int32_t    tv_usec;   /* 4 bytes (macOS: __int32_t) */
+    24→    24→    /* implicit 4-byte padding */
+    25→    25→};
+    26→    26→
+    27→    27→int macify_select(int nfds, void *readfds, void *writefds, void *exceptfds,
+    28→    28→                  void *timeout) __asm__("select");
+    29→    29→int macify_select(int nfds, void *readfds, void *writefds, void *exceptfds,
+    30→    30→                  void *timeout) {
+    31→    31→    if (macify_net_debug_enabled < 0) {
+    32→    32→        const char *e = getenv("MACIFY_NET_DEBUG");
+    33→    33→        macify_net_debug_enabled = (e && e[0]) ? 1 : 0;
+    34→    34→    }
+    35→    35→    /* Convert macOS struct timeval → Linux struct timeval. */
+    36→    36→    struct timeval linux_tv;
+    37→    37→    struct timeval *linux_tv_ptr = NULL;
+    38→    38→    if (timeout) {
+    39→    39→        struct macos_timeval *mtv = (struct macos_timeval *)timeout;
+    40→    40→        linux_tv.tv_sec  = (time_t)mtv->tv_sec;
+    41→    41→        linux_tv.tv_usec = (suseconds_t)mtv->tv_usec;
+    42→    42→        linux_tv_ptr = &linux_tv;
+    43→    43→        if (macify_net_debug_enabled) {
+    44→    44→            char b[256];
+    45→    45→            snprintf(b, sizeof(b), "select: ENTER nfds=%d macos_tv=%ld.%d linux_tv=%ld.%ld\n",
+    46→    46→                     nfds, (long)mtv->tv_sec, (int)mtv->tv_usec,
+    47→    47→                     (long)linux_tv.tv_sec, (long)linux_tv.tv_usec);
+    48→    48→            (void)write(2, b, strlen(b));
+    49→    49→        }
+    50→    50→    }
+    51→    51→    static int (*real_select)(int, fd_set *, fd_set *, fd_set *, struct timeval *) = NULL;
+    52→    52→    if (!real_select) real_select = dlsym(RTLD_NEXT, "__select");
+    53→    53→    if (!real_select) return -1;
+    54→    54→    int r = real_select(nfds, (fd_set *)readfds, (fd_set *)writefds,
+    55→    55→                       (fd_set *)exceptfds, linux_tv_ptr);
+    56→    56→    if (macify_net_debug_enabled) {
+    57→    57→        char b[128];
+    58→    58→        int saved = errno;
+    59→    59→        snprintf(b, sizeof(b), "select: ret=%d errno=%d\n", r, saved);
+    60→    60→        (void)write(2, b, strlen(b));
+    61→    61→    }
+    62→    62→    /* On return, copy the updated timeout back to the macOS struct
+    63→    63→     * (select modifies the timeout to reflect the time not slept). */
+    64→    64→    if (timeout && r >= 0) {
+    65→    65→        struct macos_timeval *mtv = (struct macos_timeval *)timeout;
+    66→    66→        mtv->tv_sec  = (long)linux_tv.tv_sec;
+    67→    67→        mtv->tv_usec = (int32_t)linux_tv.tv_usec;
+    68→    68→    }
+    69→    69→    return r;
+    70→    70→}
+    71→    71→
+    72→    72→/* poll — glibc exports __poll, not poll. Same API on both platforms. */
+    73→    73→int macify_poll(struct pollfd *fds, nfds_t nfds, int timeout) __asm__("poll");
+    74→    74→int macify_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    75→    75→    if (macify_net_debug_enabled < 0) {
+    76→    76→        const char *e = getenv("MACIFY_NET_DEBUG");
+    77→    77→        macify_net_debug_enabled = (e && e[0]) ? 1 : 0;
+    78→    78→    }
+    79→    79→    if (macify_net_debug_enabled) {
+    80→    80→        char b[256];
+    81→    81→        snprintf(b, sizeof(b), "poll: ENTER nfds=%u timeout=%d [fd=%d events=0x%x]\n",
+    82→    82→                 (unsigned)nfds, timeout, nfds > 0 ? fds[0].fd : -1, nfds > 0 ? fds[0].events : 0);
+    83→    83→        (void)write(2, b, strlen(b));
+    84→    84→    }
+    85→    85→    static int (*real_poll)(struct pollfd *, nfds_t, int) = NULL;
+    86→    86→    if (!real_poll) real_poll = dlsym(RTLD_NEXT, "__poll");
+    87→    87→    if (!real_poll) return -1;
+    88→    88→    int r = real_poll(fds, nfds, timeout);
+    89→    89→    if (macify_net_debug_enabled < 0) {
+    90→    90→        const char *e = getenv("MACIFY_NET_DEBUG");
+    91→    91→        macify_net_debug_enabled = (e && e[0]) ? 1 : 0;
+    92→    92→    }
+    93→    93→    if (macify_net_debug_enabled && nfds > 0) {
+    94→    94→        char buf[256];
+    95→    95→        snprintf(buf, sizeof(buf), "poll: nfds=%u timeout=%d ret=%d [fd=%d events=0x%x revents=0x%x]\n",
+    96→    96→                 (unsigned)nfds, timeout, r, fds[0].fd, fds[0].events, fds[0].revents);
+    97→    97→        (void)write(2, buf, strlen(buf));
+    98→    98→    }
+    99→    99→    return r;
+   100→   100→}
+   101→   101→
+   102→   102→/* getaddrinfo — macOS struct addrinfo has a DIFFERENT layout from glibc's!
+   103→   103→ *
+   104→   104→ * glibc (Linux) addrinfo layout:
+   105→   105→ *   offset 0:  ai_flags      (int)
+   106→   106→ *   offset 4:  ai_family     (int)
+   107→   107→ *   offset 8:  ai_socktype   (int)
+   108→   108→ *   offset 12: ai_protocol   (int)
+   109→   109→ *   offset 16: ai_addrlen    (socklen_t)
+   110→   110→ *   offset 24: ai_addr       (struct sockaddr *)   <-- addr first
+   111→   111→ *   offset 32: ai_canonname  (char *)
+   112→   112→ *   offset 40: ai_next       (struct addrinfo *)
+   113→   113→ *
+   114→   114→ * macOS addrinfo layout (from <netdb.h>):
+   115→   115→ *   offset 0:  ai_flags      (int)
+   116→   116→ *   offset 4:  ai_family     (int)
+   117→   117→ *   offset 8:  ai_socktype   (int)
+   118→   118→ *   offset 12: ai_protocol   (int)
+   119→   119→ *   offset 16: ai_addrlen    (socklen_t)
+   120→   120→ *   offset 24: ai_canonname  (char *)               <-- canonname first
+   121→   121→ *   offset 32: ai_addr       (struct sockaddr *)    <-- addr second (SWAPPED!)
+   122→   122→ *   offset 40: ai_next       (struct addrinfo *)
+   123→   123→ *
+   124→   124→ * A macOS binary compiled against macOS headers reads ai_addr from offset 32.
+   125→   125→ * If we return glibc's addrinfo as-is, it reads ai_canonname (typically NULL)
+   126→   126→ * instead, then dereferences NULL+offset → SIGSEGV.
+   127→   127→ *
+   128→   128→ * Fix: rebuild the linked list with macOS layout (swap ai_canonname/ai_addr)
+   129→   129→ * before returning to the macOS binary. We allocate the nodes ourselves so
+   130→   130→ * freeaddrinfo must also be ours (not glibc's).
+   131→   131→ *
+   132→   132→ * glibc's getaddrinfo can also hang if NSS tries to communicate with nscd;
+   133→   133→ * our fork/clone/wait4 stubs prevent that.
+   134→   134→ *
+   135→   135→ * The hints parameter is safe to pass as-is to glibc because glibc only reads
+   136→   136→ * ai_flags, ai_family, ai_socktype, ai_protocol from hints (offsets 0–12,
+   137→   137→ * which are identical in both layouts), and ignores the rest. */
+   138→   138→
+   139→   139→/* macOS-layout addrinfo (canonname at offset 24, addr at offset 32). */
+   140→   140→struct macos_addrinfo {
+   141→   141→    int ai_flags;                  /* 0  */
+   142→   142→    int ai_family;                 /* 4  */
+   143→   143→    int ai_socktype;               /* 8  */
+   144→   144→    int ai_protocol;               /* 12 */
+   145→   145→    socklen_t ai_addrlen;          /* 16 */
+   146→   146→    char *ai_canonname;            /* 24 — swapped vs Linux */
+   147→   147→    struct sockaddr *ai_addr;      /* 32 — swapped vs Linux */
+   148→   148→    struct macos_addrinfo *ai_next;/* 40 */
+   149→   149→};
+   150→   150→
+   151→   151→int macify_getaddrinfo(const char *node, const char *service,
+   152→   152→                       const void *hints, void **res) __asm__("getaddrinfo");
+   153→   153→int macify_getaddrinfo(const char *node, const char *service,
+   154→   154→                       const void *hints, void **res) {
+   155→   155→    macify_net_dbg("getaddrinfo: enter\n");
+   156→   156→    static int (*real_gai)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
+   157→   157→    if (!real_gai) real_gai = dlsym(RTLD_NEXT, "getaddrinfo");
+   158→   158→
+   159→   159→    /* Translate macOS hints → Linux hints.
+   160→   160→     * The first 16 bytes (flags/family/socktype/protocol) are at the same
+   161→   161→     * offsets, but the flag BIT VALUES differ between macOS and Linux.
+   162→   162→     * Also, macOS socklen_t is 4 bytes vs Linux's 8, so ai_addrlen is at
+   163→   163→     * a different effective width. We rebuild a clean Linux addrinfo. */
+   164→   164→    struct addrinfo linux_hints;
+   165→   165→    memset(&linux_hints, 0, sizeof(linux_hints));
+   166→   166→    if (hints) {
+   167→   167→        const struct macos_addrinfo *mh = (const struct macos_addrinfo *)hints;
+   168→   168→        /* Translate ai_flags: macOS uses different bit values */
+   169→   169→        int mf = mh->ai_flags;
+   170→   170→        int lf = 0;
+   171→   171→        /* Common flags that are the SAME on both: */
+   172→   172→        /* AI_PASSIVE=1, AI_CANONNAME=2, AI_NUMERICHOST=4 — same on both */
+   173→   173→        if (mf & 0x01) lf |= 0x01;  /* AI_PASSIVE */
+   174→   174→        if (mf & 0x02) lf |= 0x02;  /* AI_CANONNAME */
+   175→   175→        if (mf & 0x04) lf |= 0x04;  /* AI_NUMERICHOST */
+   176→   176→        /* macOS AI_V4MAPPED=8, Linux AI_V4MAPPED=8 — same */
+   177→   177→        if (mf & 0x08) lf |= 0x08;  /* AI_V4MAPPED */
+   178→   178→        /* macOS AI_ALL=16, Linux AI_ALL=16 — same */
+   179→   179→        if (mf & 0x10) lf |= 0x10;  /* AI_ALL */
+   180→   180→        /* macOS AI_ADDRCONFIG=256, Linux AI_ADDRCONFIG=32 */
+   181→   181→        if (mf & 0x100) lf |= 0x20; /* AI_ADDRCONFIG */
+   182→   182→        /* macOS AI_NUMERICSERV=1024, Linux AI_NUMERICSERV=1024 — same! */
+   183→   183→        if (mf & 0x400) lf |= 0x400; /* AI_NUMERICSERV */
+   184→   184→        /* macOS AI_UNUSABLE=0x1000 → not directly mappable, ignore */
+   185→   185→        linux_hints.ai_flags = lf;
+   186→   186→        linux_hints.ai_family = mh->ai_family;
+   187→   187→        linux_hints.ai_socktype = mh->ai_socktype;
+   188→   188→        linux_hints.ai_protocol = mh->ai_protocol;
+   189→   189→    }
+   190→   190→
+   191→   191→    struct addrinfo *linux_res = NULL;
+   192→   192→    int r = real_gai(node, service, hints ? &linux_hints : NULL, &linux_res);
+   193→   193→    char buf[256];
+   194→   194→
+   195→   195→    if (r != 0 || !linux_res) {
+   196→   196→        snprintf(buf, sizeof(buf), "getaddrinfo: ret=%d errno=%d gai_strerror=%s\n",
+   197→   197→                 r, errno, gai_strerror(r));
+   198→   198→        macify_net_dbg(buf);
+   199→   199→        if (res) *res = NULL;
+   200→   200→        return r;
+   201→   201→    }
+   202→   202→
+   203→   203→    /* Rebuild the addrinfo linked list with macOS layout.
+   204→   204→     * We allocate each node (and copies of sockaddr + canonname) ourselves
+   205→   205→     * so freeaddrinfo can free them directly without invoking glibc. */
+   206→   206→    struct macos_addrinfo *macos_head = NULL, *macos_tail = NULL;
+   207→   207→    int node_count = 0;
+   208→   208→    for (struct addrinfo *p = linux_res; p; p = p->ai_next) {
+   209→   209→        struct macos_addrinfo *m = (struct macos_addrinfo *)malloc(sizeof(*m));
+   210→   210→        if (!m) { r = EAI_MEMORY; break; }
+   211→   211→        m->ai_flags    = p->ai_flags;
+   212→   212→        m->ai_family   = p->ai_family;
+   213→   213→        m->ai_socktype = p->ai_socktype;
+   214→   214→        m->ai_protocol = p->ai_protocol;
+   215→   215→        m->ai_addrlen  = p->ai_addrlen;
+   216→   216→        m->ai_canonname = NULL;
+   217→   217→        m->ai_addr     = NULL;
+   218→   218→        m->ai_next     = NULL;
+   219→   219→
+   220→   220→        /* Copy the sockaddr and convert from Linux to macOS format.
+   221→   221→         * Linux sockaddr: sa_family(2) at offset 0, then port/addr
+   222→   222→         * macOS sockaddr: sin_len(1) at offset 0, sin_family(1) at offset 1,
+   223→   223→         *                 then port/addr
+   224→   224→         * A macOS binary reads sin_family from offset 1, so if we leave the
+   225→   225→         * Linux format, it sees 0x00 (high byte of AF_INET=2) and fails
+   226→   226→         * with EAFNOSUPPORT when calling inet_ntop. */
+   227→   227→        if (p->ai_addr && p->ai_addrlen > 0) {
+   228→   228→            uint8_t *addr_copy = (uint8_t *)malloc(p->ai_addrlen);
+   229→   229→            if (addr_copy) {
+   230→   230→                memset(addr_copy, 0, p->ai_addrlen);
+   231→   231→                if (p->ai_family == 2) { /* AF_INET */
+   232→   232→                    /* macOS sockaddr_in: sin_len=16, sin_family=2, port, addr */
+   233→   233→                    addr_copy[0] = 16;  /* sin_len */
+   234→   234→                    addr_copy[1] = 2;   /* sin_family = AF_INET */
+   235→   235→                    memcpy(addr_copy + 2, (uint8_t *)p->ai_addr + 2, 2);  /* port */
+   236→   236→                    memcpy(addr_copy + 4, (uint8_t *)p->ai_addr + 4, 4);  /* addr */
+   237→   237→                } else if (p->ai_family == 10) { /* AF_INET6 (Linux) */
+   238→   238→                    /* macOS sockaddr_in6: sin6_len=28, sin6_family=30, port, flowinfo, addr, scope */
+   239→   239→                    addr_copy[0] = 28;  /* sin6_len */
+   240→   240→                    addr_copy[1] = 30;  /* sin6_family = AF_INET6 (macOS) */
+   241→   241→                    memcpy(addr_copy + 2, (uint8_t *)p->ai_addr + 2, 26); /* port+flowinfo+addr+scope */
+   242→   242→                } else {
+   243→   243→                    /* Unknown family — copy as-is */
+   244→   244→                    memcpy(addr_copy, p->ai_addr, p->ai_addrlen);
+   245→   245→                }
+   246→   246→                m->ai_addr = (struct sockaddr *)addr_copy;
+   247→   247→            }
+   248→   248→        }
+   249→   249→        if (p->ai_canonname) {
+   250→   250→            size_t cn_len = strlen(p->ai_canonname) + 1;
+   251→   251→            char *cn = (char *)malloc(cn_len);
+   252→   252→            if (cn) {
+   253→   253→                memcpy(cn, p->ai_canonname, cn_len);
+   254→   254→                m->ai_canonname = cn;
+   255→   255→            }
+   256→   256→        }
+   257→   257→
+   258→   258→        if (!macos_head) macos_head = m;
+   259→   259→        else             macos_tail->ai_next = m;
+   260→   260→        macos_tail = m;
+   261→   261→        node_count++;
+   262→   262→    }
+   263→   263→
+   264→   264→    /* Free glibc's linked list — we no longer need it. */
+   265→   265→    static void (*real_free)(struct addrinfo *) = NULL;
+   266→   266→    if (!real_free) real_free = dlsym(RTLD_NEXT, "freeaddrinfo");
+   267→   267→    real_free(linux_res);
+   268→   268→
+   269→   269→    if (r != 0 && macos_head) {
+   270→   270→        /* Allocation failed mid-way — free what we built. */
+   271→   271→        struct macos_addrinfo *cur = macos_head;
+   272→   272→        while (cur) {
+   273→   273→            struct macos_addrinfo *next = cur->ai_next;
+   274→   274→            free(cur->ai_canonname);
+   275→   275→            free(cur->ai_addr);
+   276→   276→            free(cur);
+   277→   277→            cur = next;
+   278→   278→        }
+   279→   279→        if (res) *res = NULL;
+   280→   280→        return r;
+   281→   281→    }
+   282→   282→
+   283→   283→    if (res) *res = macos_head;
+   284→   284→
+   285→   285→    /* Debug: show the first result. Note: read ai_addr from offset 0x20 (32)
+   286→   286→     * to confirm the macOS layout is correct. */
+   287→   287→    if (macos_head) {
+   288→   288→        struct macos_addrinfo *a = macos_head;
+   289→   289→        uint8_t *ab = (uint8_t *)a->ai_addr;
+   290→   290→        if (a->ai_family == 2 && a->ai_addr && a->ai_addrlen >= 8) {
+   291→   291→            uint8_t *ip = ab + 4;
+   292→   292→            snprintf(buf, sizeof(buf),
+   293→   293→                     "getaddrinfo: ok family=%d ip=%u.%u.%u.%u port=%u (nodes=%d)\n",
+   294→   294→                     a->ai_family, ip[0], ip[1], ip[2], ip[3],
+   295→   295→                     (ab[2] << 8) | ab[3], node_count);
+   296→   296→        } else {
+   297→   297→            snprintf(buf, sizeof(buf),
+   298→   298→                     "getaddrinfo: ok family=%d addrlen=%u (nodes=%d)\n",
+   299→   299→                     a->ai_family, (unsigned)a->ai_addrlen, node_count);
+   300→   300→        }
+   301→   301→        macify_net_dbg(buf);
+   302→   302→    }
+   303→   303→    return r;
+   304→   304→}
+   305→   305→
+   306→   306→void macify_freeaddrinfo(void *ai) __asm__("freeaddrinfo");
+   307→   307→void macify_freeaddrinfo(void *ai) {
+   308→   308→    /* Free the macOS-layout addrinfo list that we allocated in
+   309→   309→     * macify_getaddrinfo. We must NOT call glibc's freeaddrinfo because the
+   310→   310→     * node layout is different (ai_canonname/ai_addr swapped) — glibc would
+   311→   311→     * dereference offset 24 as ai_addr and try to free it, corrupting the
+   312→   312→     * heap. */
+   313→   313→    struct macos_addrinfo *cur = (struct macos_addrinfo *)ai;
+   314→   314→    while (cur) {
+   315→   315→        struct macos_addrinfo *next = cur->ai_next;
+   316→   316→        free(cur->ai_canonname);
+   317→   317→        free(cur->ai_addr);
+   318→   318→        free(cur);
+   319→   319→        cur = next;
+   320→   320→    }
+   321→   321→}
+   322→   322→
+   323→   323→/* wait4 — allow for macOS callers (hyperfine needs it to wait for subprocesses).
+   324→   324→ * Block for non-macOS (glibc NSS) to prevent deadlocks. */
+   325→   325→/* fork/clone/wait4/read/write are in process.c */
+   326→   326→/* setsockopt — macOS uses SO_NOSIGPIPE (0x1022) which doesn't exist on
+   327→   327→ * Linux. Linux uses MSG_NOSIGNAL on send() instead. We intercept
+   328→   328→ * setsockopt and silently ignore SO_NOSIGPIPE, translating it to a no-op.
+   329→   329→ * Also translate other macOS-specific socket options. */
+   330→   330→
+   331→   331→
+   332→   332→/* Translate macOS SOL_SOCKET optname to Linux optname.
+   333→   333→ * macOS uses 0x1000-base for most options; Linux uses small integers.
+   334→   334→ * Critical: SO_ERROR (macOS 0x1007 → Linux 4) — curl checks this
+   335→   335→ * after non-blocking connect to determine if the connect succeeded. */
+   336→   336→static int translate_sol_socket_optname(int optname) {
+   337→   337→    switch (optname) {
+   338→   338→        case 0x1:    return 1;     /* SO_DEBUG (same) */
+   339→   339→        case 0x4:    return 2;     /* SO_REUSEADDR */
+   340→   340→        case 0x8:    return 9;     /* SO_KEEPALIVE */
+   341→   341→        case 0x10:   return 5;     /* SO_DONTROUTE */
+   342→   342→        case 0x20:   return 6;     /* SO_BROADCAST */
+   343→   343→        case 0x80:   return 13;    /* SO_LINGER */
+   344→   344→        case 0x100:  return 10;    /* SO_OOBINLINE */
+   345→   345→        case 0x200:  return 15;    /* SO_REUSEPORT */
+   346→   346→        case 0x1001: return 7;     /* SO_SNDBUF */
+   347→   347→        case 0x1002: return 8;     /* SO_RCVBUF */
+   348→   348→        case 0x1003: return 19;    /* SO_SNDLOWAT */
+   349→   349→        case 0x1004: return 18;    /* SO_RCVLOWAT */
+   350→   350→        case 0x1005: return 47;    /* SO_SNDTIMEO */
+   351→   351→        case 0x1006: return 20;    /* SO_RCVTIMEO */
+   352→   352→        case 0x1007: return 4;     /* SO_ERROR */
+   353→   353→        case 0x1008: return 3;     /* SO_TYPE */
+   354→   354→        case 0x1016: return 38;    /* SO_PROTOCOL */
+   355→   355→        case 0x1022: return -1;    /* SO_NOSIGPIPE — handled by caller (no-op) */
+   356→   356→        default:     return optname; /* unknown, pass through */
+   357→   357→    }
+   358→   358→}
+   359→   359→
+   360→   360→int macify_setsockopt(int sockfd, int level, int optname,
+   361→   361→                      const void *optval, socklen_t optlen) __asm__("setsockopt");
+   362→   362→int macify_setsockopt(int sockfd, int level, int optname,
+   363→   363→                      const void *optval, socklen_t optlen) {
+   364→   364→    /* macOS SOL_SOCKET = 0xFFFF, Linux SOL_SOCKET = 1 */
+   365→   365→    if (level == 0xFFFF) level = SOL_SOCKET;
+   366→   366→
+   367→   367→    /* macOS SO_NOSIGPIPE = 0x1022 — not on Linux, silently ignore */
+   368→   368→    if (level == SOL_SOCKET && optname == 0x1022) {
+   369→   369→        return 0;
+   370→   370→    }
+   371→   371→
+   372→   372→    /* macOS IPPROTO_TCP = 6, IPPROTO_IP = 0, IPPROTO_IPV6 = 41
+   373→   373→     * Linux IPPROTO_TCP = 6, IPPROTO_IP = 0, IPPROTO_IPV6 = 41 (same!) */
+   374→   374→
+   375→   375→    /* Translate SOL_SOCKET optnames from macOS to Linux values. */
+   376→   376→    if (level == SOL_SOCKET) {
+   377→   377→        int translated = translate_sol_socket_optname(optname);
+   378→   378→        if (translated != optname && translated > 0) optname = translated;
+   379→   379→    }
+   380→   380→
+   381→   381→    static int (*real_setsockopt)(int, int, int, const void *, socklen_t) = NULL;
+   382→   382→    if (!real_setsockopt) real_setsockopt = dlsym(RTLD_NEXT, "setsockopt");
+   383→   383→    int ret = real_setsockopt(sockfd, level, optname, optval, optlen);
+   384→   384→    int saved_errno = errno;
+   385→   385→    /* If setsockopt fails with ENOPROTOOPT or EINVAL, the option doesn't
+   386→   386→     * exist on Linux. Silently succeed so curl doesn't abort the connection. */
+   387→   387→    if (ret == -1 && (saved_errno == 92 || saved_errno == 22)) {
+   388→   388→        return 0;
+   389→   389→    }
+   390→   390→    if (ret == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
+   391→   391→        errno = macify_linux_to_macos_errno(saved_errno);
+   392→   392→    return ret;
+   393→   393→}
+   394→   394→
+   395→   395→/* getsockopt — translate macOS SOL_SOCKET level and optname.
+   396→   396→ * Critical for curl: after non-blocking connect, curl calls
+   397→   397→ * getsockopt(SO_ERROR) to check if the connect succeeded. macOS
+   398→   398→ * SO_ERROR=0x1007 must be translated to Linux SO_ERROR=4, otherwise
+   399→   399→ * glibc returns ENOPROTOOPT and curl treats connect as failed. */
+   400→   400→int macify_getsockopt(int sockfd, int level, int optname,
+   401→   401→                      void *optval, socklen_t *optlen) __asm__("getsockopt");
+   402→   402→int macify_getsockopt(int sockfd, int level, int optname,
+   403→   403→                      void *optval, socklen_t *optlen) {
+   404→   404→    if (level == 0xFFFF) level = SOL_SOCKET;
+   405→   405→    if (level == SOL_SOCKET) {
+   406→   406→        if (optname == 0x1022) {  /* SO_NOSIGPIPE — return 0 (disabled) */
+   407→   407→            if (optval && optlen && *optlen >= sizeof(int)) {
+   408→   408→                *(int *)optval = 0;
+   409→   409→            }
+   410→   410→            return 0;
+   411→   411→        }
+   412→   412→        int translated = translate_sol_socket_optname(optname);
+   413→   413→        if (translated != optname) optname = translated;
+   414→   414→    }
+   415→   415→    static int (*real_getsockopt)(int, int, int, void *, socklen_t *) = NULL;
+   416→   416→    if (!real_getsockopt) real_getsockopt = dlsym(RTLD_NEXT, "getsockopt");
+   417→   417→    int ret = real_getsockopt(sockfd, level, optname, optval, optlen);
+   418→   418→    if (ret == -1) {
+   419→   419→        int saved = errno;
+   420→   420→        /* Silently succeed for ENOPROTOOPT (option not supported on Linux) */
+   421→   421→        if (saved == 92) return 0;
+   422→   422→        if (macify_caller_is_macos_text(__builtin_return_address(0)))
+   423→   423→            errno = macify_linux_to_macos_errno(saved);
+   424→   424→    }
+   425→   425→    return ret;
+   426→   426→}
+   427→   427→
+   428→   428→/* connect — translate macOS sockaddr to Linux sockaddr.
+   429→   429→ * macOS sockaddr has a 1-byte sa_len at offset 0, then 1-byte sa_family
+   430→   430→ * at offset 1. Linux sockaddr has 2-byte sa_family at offset 0 (no sa_len).
+   431→   431→ * We must remove the sa_len byte and shift sa_family to offset 0.
+   432→   432→ *
+   433→   433→ * macOS AF_INET6 = 30, Linux AF_INET6 = 10. */
+   434→   434→/* Read /etc/resolv.conf and return the first nameserver IP (static buffer).
+   435→   435→ * Used to redirect c-ares's hardcoded 127.0.0.1:53 fallback to the real
+   436→   436→ * DNS server. */
+   437→   437→static const char *get_resolv_conf_dns_server(void) {
+   438→   438→    static char ip[64] = {0};
+   439→   439→    if (ip[0]) return ip;
+   440→   440→    FILE *fp = fopen("/etc/resolv.conf", "r");
+   441→   441→    if (!fp) return NULL;
+   442→   442→    char line[256];
+   443→   443→    while (fgets(line, sizeof(line), fp)) {
+   444→   444→        char *p = line;
+   445→   445→        while (*p == ' ' || *p == '\t') p++;
+   446→   446→        if (strncmp(p, "nameserver", 10) != 0) continue;
+   447→   447→        p += 10;
+   448→   448→        while (*p == ' ' || *p == '\t') p++;
+   449→   449→        char *end = p;
+   450→   450→        while (*end && *end != '\n' && *end != ' ' && *end != '\t') end++;
+   451→   451→        *end = '\0';
+   452→   452→        if (*p) {
+   453→   453→            strncpy(ip, p, sizeof(ip) - 1);
+   454→   454→            break;
+   455→   455→        }
+   456→   456→    }
+   457→   457→    fclose(fp);
+   458→   458→    return ip[0] ? ip : NULL;
+   459→   459→}
+   460→   460→
+   461→   461→int macify_connect(int sockfd, const void *addr, socklen_t addrlen) __asm__("connect");
+   462→   462→int macify_connect(int sockfd, const void *addr, socklen_t addrlen) {
+   463→   463→    if (!addr || addrlen < 2) { errno = 22; return -1; }
+   464→   464→    const uint8_t *p = (const uint8_t *)addr;
+   465→   465→    uint8_t linux_addr[256];
+   466→   466→    memset(linux_addr, 0, sizeof(linux_addr));
+   467→   467→    macify_net_dbg_hex("connect: raw addr:", p, addrlen > 32 ? 32 : addrlen);
+   468→   468→
+   469→   469→    /* Detect macOS sockaddr: either p[0]==16 (sin_len set) or
+   470→   470→     * p[1] is a valid macOS family (2=AF_INET, 30=AF_INET6) while
+   471→   471→     * p[0] is 0 or not a valid Linux family. */
+   472→   472→    int is_macos = 0;
+   473→   473→    if (p[0] == 16 && addrlen >= 8) is_macos = 1;       /* sin_len=16 for IPv4 */
+   474→   474→    else if (p[0] == 28 && addrlen >= 8) is_macos = 1;   /* sin_len=28 for IPv6 */
+   475→   475→    else if (p[0] == 0 && (p[1] == 2 || p[1] == 30) && addrlen >= 8) is_macos = 1; /* sin_len not set */
+   476→   476→    /* Also check if p[0] is NOT a valid Linux family but p[1] is a valid macOS family */
+   477→   477→    else if (p[0] != 1 && p[0] != 2 && p[0] != 10 && p[0] != 16 && p[0] != 17 &&
+   478→   478→             p[1] >= 1 && p[1] <= 30 && addrlen >= 8) is_macos = 1;
+   479→   479→
+   480→   480→    if (is_macos) {
+   481→   481→        uint16_t family = p[1];
+   482→   482→        if (family == MACOS_AF_INET6) {
+   483→   483→            /* IPv6: macOS sockaddr_in6 (28 bytes) → Linux sockaddr_in6 (28 bytes)
+   484→   484→             * macOS: [sa_len(1)] [sa_family(1)] [port(2)] [flowinfo(4)] [addr(16)] [scope(4)]
+   485→   485→             * Linux: [family(2)] [port(2)] [flowinfo(4)] [addr(16)] [scope(4)] */
+   486→   486→            uint16_t lf = LINUX_AF_INET6;
+   487→   487→            memcpy(linux_addr + 0, &lf, 2);
+   488→   488→            memcpy(linux_addr + 2, p + 2, 2);      /* port */
+   489→   489→            memcpy(linux_addr + 4, p + 4, 4);      /* flowinfo */
+   490→   490→            memcpy(linux_addr + 8, p + 8, 16);     /* addr (16 bytes!) */
+   491→   491→            memcpy(linux_addr + 24, p + 24, 4);    /* scope_id */
+   492→   492→            addrlen = 28;
+   493→   493→        } else {
+   494→   494→            /* IPv4: macOS sockaddr_in (16 bytes) → Linux sockaddr_in (16 bytes) */
+   495→   495→            uint16_t lf = 2; /* AF_INET */
+   496→   496→            memcpy(linux_addr + 0, &lf, 2);
+   497→   497→            memcpy(linux_addr + 2, p + 2, 2);      /* port */
+   498→   498→            memcpy(linux_addr + 4, p + 4, 4);      /* addr */
+   499→   499→            addrlen = 16;
+   500→   500→        }
+   501→   501→
+   502→   502→        /* Redirect 127.0.0.1:53 (c-ares's hardcoded fallback) to the real
+   503→   503→         * DNS server from /etc/resolv.conf. c-ares on macOS uses
+   504→   504→         * dns_configuration_copy/SCDynamicStore to get DNS servers, but
+   505→   505→         * our stubs return NULL, so c-ares falls back to 127.0.0.1:53.
+   506→   506→         * We redirect those connects to the real DNS server. */
+   507→   507→        if (family == 2 /* AF_INET */ &&
+   508→   508→            linux_addr[2] == 0x00 && linux_addr[3] == 0x35 /* port 53 */ &&
+   509→   509→            linux_addr[4] == 0x7f && linux_addr[5] == 0x00 &&
+   510→   510→            linux_addr[6] == 0x00 && linux_addr[7] == 0x01 /* 127.0.0.1 */) {
+   511→   511→            const char *real_dns = get_resolv_conf_dns_server();
+   512→   512→            if (real_dns) {
+   513→   513→                struct in_addr ia;
+   514→   514→                if (inet_pton(AF_INET, real_dns, &ia) == 1) {
+   515→   515→                    memcpy(linux_addr + 4, &ia.s_addr, 4);
+   516→   516→                    char b[128];
+   517→   517→                    snprintf(b, sizeof(b), "connect: redirected 127.0.0.1:53 -> %s:53\n", real_dns);
+   518→   518→                    macify_net_dbg(b);
+   519→   519→                }
+   520→   520→            }
+   521→   521→        }
+   522→   522→    } else {
+   523→   523→        /* Already Linux format */
+   524→   524→        size_t cl = addrlen; if (cl > sizeof(linux_addr)) cl = sizeof(linux_addr);
+   525→   525→        memcpy(linux_addr, p, cl);
+   526→   526→    }
+   527→   527→
+   528→   528→    macify_net_dbg_hex("connect: linux addr:", linux_addr, addrlen > 32 ? 32 : addrlen);
+   529→   529→    static int (*real_connect)(int, const struct sockaddr *, socklen_t) = NULL;
+   530→   530→    if (!real_connect) real_connect = dlsym(RTLD_NEXT, "connect");
+   531→   531→    int r = real_connect(sockfd, (const struct sockaddr *)linux_addr, addrlen);
+   532→   532→    int saved_errno = errno;
+   533→   533→    char buf[128];
+   534→   534→    snprintf(buf, sizeof(buf), "connect: ret=%d errno=%d (EINPROGRESS=36 macOS, 115 Linux)\n", r, saved_errno);
+   535→   535→    macify_net_dbg(buf);
+   536→   536→    /* Only translate errno on failure; do NOT clobber errno on success
+   537→   537→     * (callers may check errno even when ret==0, and a stale non-zero
+   538→   538→     * errno could be misinterpreted as a failure). Only translate when
+   539→   539→     * the caller is the macOS binary itself (Linux libraries like
+   540→   540→     * libgnutls expect Linux errno values). */
+   541→   541→    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) {
+   542→   542→        errno = macify_linux_to_macos_errno(saved_errno);
+   543→   543→    }
+   544→   544→    return r;
+   545→   545→}
+   546→   546→
+   547→   547→/* bind — translate macOS sockaddr to Linux */
+   548→   548→int macify_bind(int sockfd, const void *addr, socklen_t addrlen) __asm__("bind");
+   549→   549→int macify_bind(int sockfd, const void *addr, socklen_t addrlen) {
+   550→   550→    if (!addr || addrlen < 2) { errno = 22; return -1; }
+   551→   551→    const uint8_t *p = (const uint8_t *)addr;
+   552→   552→    uint8_t linux_addr[256];
+   553→   553→    memset(linux_addr, 0, sizeof(linux_addr));
+   554→   554→    if (p[1] == MACOS_AF_INET6 && (p[0] == 28 || p[0] == 0) && addrlen >= 28) {
+   555→   555→        uint16_t lf = LINUX_AF_INET6;
+   556→   556→        memcpy(linux_addr + 0, &lf, 2);
+   557→   557→        memcpy(linux_addr + 2, p + 2, 2);      /* port */
+   558→   558→        memcpy(linux_addr + 4, p + 4, 4);      /* flowinfo */
+   559→   559→        memcpy(linux_addr + 8, p + 8, 16);     /* addr */
+   560→   560→        memcpy(linux_addr + 24, p + 24, 4);    /* scope_id */
+   561→   561→        addrlen = 28;
+   562→   562→    } else if ((p[0] == 16 || p[0] == 0) && p[1] == 2 && addrlen >= 8) {
+   563→   563→        uint16_t lf = 2;
+   564→   564→        memcpy(linux_addr + 0, &lf, 2);
+   565→   565→        memcpy(linux_addr + 2, p + 2, 2);
+   566→   566→        memcpy(linux_addr + 4, p + 4, 4);
+   567→   567→        addrlen = 16;
+   568→   568→    } else {
+   569→   569→        size_t cl = addrlen; if (cl > sizeof(linux_addr)) cl = sizeof(linux_addr);
+   570→   570→        memcpy(linux_addr, p, cl);
+   571→   571→    }
+   572→   572→    static int (*real_bind)(int, const struct sockaddr *, socklen_t) = NULL;
+   573→   573→    if (!real_bind) real_bind = dlsym(RTLD_NEXT, "bind");
+   574→   574→    return real_bind(sockfd, (const struct sockaddr *)linux_addr, addrlen);
+   575→   575→}
+   576→   576→
+   577→   577→/* sendto — translate macOS sockaddr to Linux */
+   578→   578→ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
+   579→   579→                      const void *dest_addr, socklen_t addrlen) __asm__("sendto");
+   580→   580→ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
+   581→   581→                      const void *dest_addr, socklen_t addrlen) {
+   582→   582→    macify_net_dbg("sendto: entered\n");
+   583→   583→    flags |= MSG_NOSIGNAL;
+   584→   584→    uint8_t linux_addr[256];
+   585→   585→    const struct sockaddr *p_addr = NULL;
+   586→   586→    socklen_t linux_addrlen = 0;
+   587→   587→    if (dest_addr && addrlen >= 2) {
+   588→   588→        const uint8_t *p = (const uint8_t *)dest_addr;
+   589→   589→        memset(linux_addr, 0, sizeof(linux_addr));
+   590→   590→        if (p[1] == MACOS_AF_INET6 && (p[0] == 28 || p[0] == 0) && addrlen >= 28) {
+   591→   591→            uint16_t lf = LINUX_AF_INET6;
+   592→   592→            memcpy(linux_addr + 0, &lf, 2);
+   593→   593→            memcpy(linux_addr + 2, p + 2, 2);
+   594→   594→            memcpy(linux_addr + 4, p + 4, 4);
+   595→   595→            memcpy(linux_addr + 8, p + 8, 16);
+   596→   596→            memcpy(linux_addr + 24, p + 24, 4);
+   597→   597→            linux_addrlen = 28;
+   598→   598→        } else if ((p[0] == 16 || p[0] == 0) && p[1] == 2 && addrlen >= 8) {
+   599→   599→            uint16_t lf = 2;
+   600→   600→            memcpy(linux_addr + 0, &lf, 2);
+   601→   601→            memcpy(linux_addr + 2, p + 2, 2);
+   602→   602→            memcpy(linux_addr + 4, p + 4, 4);
+   603→   603→            linux_addrlen = 16;
+   604→   604→        } else {
+   605→   605→            size_t cl = addrlen; if (cl > sizeof(linux_addr)) cl = sizeof(linux_addr);
+   606→   606→            memcpy(linux_addr, p, cl);
+   607→   607→            linux_addrlen = cl;
+   608→   608→        }
+   609→   609→        p_addr = (const struct sockaddr *)linux_addr;
+   610→   610→    }
+   611→   611→    static ssize_t (*real_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t) = NULL;
+   612→   612→    if (!real_sendto) real_sendto = dlsym(RTLD_NEXT, "sendto");
+   613→   613→    ssize_t r = real_sendto(sockfd, buf, len, flags, p_addr, linux_addrlen);
+   614→   614→    int saved = errno;
+   615→   615→    {
+   616→   616→        char b[200];
+   617→   617→        snprintf(b, sizeof(b), "sendto: fd=%d len=%zu flags=0x%x dest=%p ret=%zd errno=%d\n",
+   618→   618→                 sockfd, len, flags, dest_addr, r, saved);
+   619→   619→        macify_net_dbg(b);
+   620→   620→    }
+   621→   621→    TRANSLATE_ERRNO(r);
+   622→   622→    return r;
+   623→   623→}
+   624→   624→
+   625→   625→/* send — add MSG_NOSIGNAL (macOS uses SO_NOSIGPIPE instead) */
+   626→   626→ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) __asm__("send");
+   627→   627→ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) {
+   628→   628→    macify_net_dbg("send: entered\n");
+   629→   629→    flags |= MSG_NOSIGNAL;  /* prevent SIGPIPE since SO_NOSIGPIPE is no-op */
+   630→   630→    static ssize_t (*real_send)(int, const void *, size_t, int) = NULL;
+   631→   631→    if (!real_send) real_send = dlsym(RTLD_NEXT, "send");
+   632→   632→    ssize_t r = real_send(sockfd, buf, len, flags);
+   633→   633→    int saved = errno;
+   634→   634→    {
+   635→   635→        char b[160];
+   636→   636→        snprintf(b, sizeof(b), "send: fd=%d len=%zu flags=0x%x ret=%zd errno=%d\n",
+   637→   637→                 sockfd, len, flags, r, saved);
+   638→   638→        macify_net_dbg(b);
+   639→   639→    }
+   640→   640→    TRANSLATE_ERRNO(r);
+   641→   641→    return r;
+   642→   642→}
+   643→   643→
+   644→   644→/* recv — delegate to glibc (same API).
+   645→   645→ * Only translate errno when the caller is the macOS binary itself; Linux
+   646→   646→ * libraries (e.g. libgnutls) call recv through our shim too and must see
+   647→   647→ * Linux errno values (especially EAGAIN=11). */
+   648→   648→ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) __asm__("recv");
+   649→   649→ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) {
+   650→   650→    static ssize_t (*real_recv)(int, void *, size_t, int) = NULL;
+   651→   651→    if (!real_recv) real_recv = dlsym(RTLD_NEXT, "recv");
+   652→   652→    ssize_t r = real_recv(sockfd, buf, len, flags);
+   653→   653→    int saved = errno;
+   654→   654→    {
+   655→   655→        char b[160];
+   656→   656→        snprintf(b, sizeof(b), "recv: fd=%d len=%zu flags=0x%x ret=%zd errno=%d\n",
+   657→   657→                 sockfd, len, flags, r, saved);
+   658→   658→        macify_net_dbg(b);
+   659→   659→    }
+   660→   660→    TRANSLATE_ERRNO(r);
+   661→   661→    return r;
+   662→   662→}
+   663→   663→
+   664→   664→/* Forward declaration — defined after accept/getsockname section */
+   665→   665→void linux_to_macos_sockaddr(void *addr, socklen_t addrlen);
+   666→   666→
+   667→   667→/* recvfrom — convert Linux sockaddr to macOS format */
+   668→   668→ssize_t macify_recvfrom(int sockfd, void *buf, size_t len, int flags,
+   669→   669→                        void *src_addr, socklen_t *addrlen) __asm__("recvfrom");
+   670→   670→ssize_t macify_recvfrom(int sockfd, void *buf, size_t len, int flags,
+   671→   671→                        void *src_addr, socklen_t *addrlen) {
+   672→   672→    static ssize_t (*real_recvfrom)(int, void *, size_t, int, struct sockaddr *, socklen_t *) = NULL;
+   673→   673→    if (!real_recvfrom) real_recvfrom = dlsym(RTLD_NEXT, "recvfrom");
+   674→   674→    ssize_t ret = real_recvfrom(sockfd, buf, len, flags, (struct sockaddr *)src_addr, addrlen);
+   675→   675→    if (ret == -1) {
+   676→   676→        if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+   677→   677→            int saved = errno;
+   678→   678→            errno = macify_linux_to_macos_errno(saved);
+   679→   679→        }
+   680→   680→    } else if (src_addr && addrlen && *addrlen >= 2) {
+   681→   681→        linux_to_macos_sockaddr(src_addr, *addrlen);
+   682→   682→    }
+   683→   683→    return ret;
+   684→   684→}
+   685→   685→
+   686→   686→/* sendmsg — pass through to glibc but translate errno. macOS curl's c-ares
+   687→   687→ * uses sendmsg to send UDP DNS queries. */
+   688→   688→ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) __asm__("sendmsg");
+   689→   689→ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) {
+   690→   690→    macify_net_dbg("sendmsg: entered\n");
+   691→   691→    static ssize_t (*real_sendmsg)(int, const struct msghdr *, int) = NULL;
+   692→   692→    if (!real_sendmsg) real_sendmsg = dlsym(RTLD_NEXT, "sendmsg");
+   693→   693→    ssize_t r = real_sendmsg(sockfd, (const struct msghdr *)msg, flags);
+   694→   694→    int saved = errno;
+   695→   695→    {
+   696→   696→        char b[160];
+   697→   697→        snprintf(b, sizeof(b), "sendmsg: fd=%d flags=0x%x ret=%zd errno=%d\n",
+   698→   698→                 sockfd, flags, r, saved);
+   699→   699→        macify_net_dbg(b);
+   700→   700→    }
+   701→   701→    TRANSLATE_ERRNO(r);
+   702→   702→    return r;
+   703→   703→}
+   704→   704→
+   705→   705→/* recvmsg — pass through to glibc but translate errno and AF_INET6. */
+   706→   706→ssize_t macify_recvmsg(int sockfd, void *msg, int flags) __asm__("recvmsg");
+   707→   707→ssize_t macify_recvmsg(int sockfd, void *msg, int flags) {
+   708→   708→    static ssize_t (*real_recvmsg)(int, struct msghdr *, int) = NULL;
+   709→   709→    if (!real_recvmsg) real_recvmsg = dlsym(RTLD_NEXT, "recvmsg");
+   710→   710→    ssize_t r = real_recvmsg(sockfd, (struct msghdr *)msg, flags);
+   711→   711→    int saved = errno;
+   712→   712→    {
+   713→   713→        char b[160];
+   714→   714→        snprintf(b, sizeof(b), "recvmsg: fd=%d flags=0x%x ret=%zd errno=%d\n",
+   715→   715→                 sockfd, flags, r, saved);
+   716→   716→        macify_net_dbg(b);
+   717→   717→    }
+   718→   718→    TRANSLATE_ERRNO(r);
+   719→   719→    return r;
+   720→   720→}
+   721→   721→
+   722→   722→/* accept — convert Linux sockaddr to macOS format */
+   723→   723→int macify_accept(int sockfd, void *addr, socklen_t *addrlen) __asm__("accept");
+   724→   724→int macify_accept(int sockfd, void *addr, socklen_t *addrlen) {
+   725→   725→    static int (*real_accept)(int, struct sockaddr *, socklen_t *) = NULL;
+   726→   726→    if (!real_accept) real_accept = dlsym(RTLD_NEXT, "accept");
+   727→   727→    int ret = real_accept(sockfd, (struct sockaddr *)addr, addrlen);
+   728→   728→    if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
+   729→   729→        linux_to_macos_sockaddr(addr, *addrlen);
+   730→   730→    }
+   731→   731→    return ret;
+   732→   732→}
+   733→   733→
+   734→   734→/* getsockname / getpeername — convert Linux sockaddr to macOS format.
+   735→   735→ * Linux sockaddr: [sa_family(2)] [data(14)]
+   736→   736→ * macOS sockaddr:  [sa_len(1)] [sa_family(1)] [data(14)]
+   737→   737→ * curl reads sa_family from offset 1 (macOS layout), so we must shift. */
+   738→   738→void linux_to_macos_sockaddr(void *addr, socklen_t addrlen) {
+   739→   739→    if (!addr || addrlen < 2) return;
+   740→   740→    uint8_t *p = (uint8_t *)addr;
+   741→   741→    uint8_t linux_family = p[0];  /* Linux: family is at offset 0 (low byte) */
+   742→   742→    uint8_t macos_family = linux_family;
+   743→   743→    if (linux_family == LINUX_AF_INET6) macos_family = MACOS_AF_INET6;
+   744→   744→    /* Shift: move bytes 1..N right by 1, put sa_len at 0, sa_family at 1 */
+   745→   745→    memmove(p + 1, p, addrlen - 1);
+   746→   746→    p[0] = (uint8_t)addrlen;  /* sa_len */
+   747→   747→    p[1] = macos_family;     /* sa_family */
+   748→   748→}
+   749→   749→
+   750→   750→int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) __asm__("getsockname");
+   751→   751→int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) {
+   752→   752→    static int (*real)(int, struct sockaddr *, socklen_t *) = NULL;
+   753→   753→    if (!real) real = dlsym(RTLD_NEXT, "getsockname");
+   754→   754→    
+   755→   755→    int ret = real(sockfd, (struct sockaddr *)addr, addrlen);
+   756→   756→    if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
+   757→   757→        linux_to_macos_sockaddr(addr, *addrlen);
+   758→   758→    }
+   759→   759→    return ret;
+   760→   760→}
+   761→   761→
+   762→   762→int macify_getpeername(int sockfd, void *addr, socklen_t *addrlen) __asm__("getpeername");
+   763→   763→int macify_getpeername(int sockfd, void *addr, socklen_t *addrlen) {
+   764→   764→    static int (*real)(int, struct sockaddr *, socklen_t *) = NULL;
+   765→   765→    if (!real) real = dlsym(RTLD_NEXT, "getpeername");
+   766→   766→    int ret = real(sockfd, (struct sockaddr *)addr, addrlen);
+   767→   767→    if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
+   768→   768→        linux_to_macos_sockaddr(addr, *addrlen);
+   769→   769→    }
+   770→   770→    return ret;
+   771→   771→}
+   772→   772→
+   773→   773→/* socket — translate macOS address family constants to Linux.
+   774→   774→ * macOS AF_INET6 = 30, Linux AF_INET6 = 10. Other families are the same.
+   775→   775→ * macOS SOL_SOCKET = 0xFFFF, Linux SOL_SOCKET = 1 (handled in setsockopt). */
+   776→   776→
+   777→   777→int macify_socket(int domain, int type, int protocol) __asm__("socket");
+   778→   778→int macify_socket(int domain, int type, int protocol) {
+   779→   779→    char buf[128];
+   780→   780→    snprintf(buf, sizeof(buf), "socket: domain=%d type=%d proto=%d\n", domain, type, protocol);
+   781→   781→    macify_net_dbg(buf);
+   782→   782→    if (domain == MACOS_AF_INET6) domain = LINUX_AF_INET6;
+   783→   783→    /* On Linux, socket(AF_INET, SOCK_STREAM, 0) is preferred over
+   784→   784→     * specifying IPPROTO_TCP (6) explicitly. Some macOS binaries pass 6. */
+   785→   785→    if (protocol == 6) protocol = 0;  /* IPPROTO_TCP → default */
+   786→   786→    static int (*real_socket)(int, int, int) = NULL;
+   787→   787→    if (!real_socket) real_socket = dlsym(RTLD_NEXT, "socket");
+   788→   788→    int r = real_socket(domain, type, protocol);
+   789→   789→    int saved_errno = errno;
+   790→   790→    /* Only translate errno on FAILURE. On success, errno may contain a
+   791→   791→     * stale value from a previous syscall, and translating it would set
+   792→   792→     * a bogus macOS errno that confuses the caller. */
+   793→   793→    if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) {
+   794→   794→        errno = macify_linux_to_macos_errno(saved_errno);
+   795→   795→    }
+   796→   796→    snprintf(buf, sizeof(buf), "socket: ret=%d errno=%d\n", r, r == -1 ? errno : saved_errno);
+   797→   797→    macify_net_dbg(buf);
+   798→   798→    return r;
+   799→   799→}
+   800→   800→
+   801→   801→/* inet_ntop — macOS AF_INET6 = 30, Linux AF_INET6 = 10. The macOS binary
+   802→   802→ * passes AF_INET6=30 to inet_ntop, which Linux doesn't understand. */
+   803→   803→const char *macify_inet_ntop(int af, const void *src, char *dst, socklen_t size) __asm__("inet_ntop");
+   804→   804→const char *macify_inet_ntop(int af, const void *src, char *dst, socklen_t size) {
+   805→   805→    if (macify_net_debug_enabled < 0) {
+   806→   806→        const char *e = getenv("MACIFY_NET_DEBUG");
+   807→   807→        macify_net_debug_enabled = (e && e[0]) ? 1 : 0;
+   808→   808→    }
+   809→   809→    int orig_af = af;
+   810→   810→    /* Translate macOS address family constants to Linux */
+   811→   811→    if (af == MACOS_AF_INET6) af = LINUX_AF_INET6;
+   812→   812→    /* Also handle macOS sa_len being passed as AF (16 for IPv4, 28 for IPv6) */
+   813→   813→    if (af == 16) af = 2;       /* sa_len=16 → AF_INET */
+   814→   814→    else if (af == 28) af = 10; /* sa_len=28 → AF_INET6 (Linux) */
+   815→   815→    static const char *(*real)(int, const void *, char *, socklen_t) = NULL;
+   816→   816→    if (!real) real = dlsym(RTLD_NEXT, "inet_ntop");
+   817→   817→    const char *result = real(af, src, dst, size);
+   818→   818→    if (macify_net_debug_enabled) {
+   819→   819→        char b[256];
+   820→   820→        const char *show = result ? dst : "(null)";
+   821→   821→        snprintf(b, sizeof(b), "inet_ntop: orig_af=%d af=%d src=%p size=%d result=%p dst=%s errno=%d\n",
+   822→   822→                 orig_af, af, src, (int)size, (void *)result, show, errno);
+   823→   823→        (void)write(2, b, strlen(b));
+   824→   824→    }
+   825→   825→    return result;
+   826→   826→}
+   827→   827→
+   828→   828→/* inet_pton — translate AF_INET6 */
+   829→   829→int macify_inet_pton(int af, const char *src, void *dst) __asm__("inet_pton");
+   830→   830→int macify_inet_pton(int af, const char *src, void *dst) {
+   831→   831→    if (af == MACOS_AF_INET6) af = LINUX_AF_INET6;
+   832→   832→    static int (*real)(int, const char *, void *) = NULL;
+   833→   833→    if (!real) real = dlsym(RTLD_NEXT, "inet_pton");
+   834→   834→    return real(af, src, dst);
+   835→   835→}
+   836→   836→

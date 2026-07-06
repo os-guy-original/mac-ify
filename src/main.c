@@ -442,11 +442,11 @@ int main(int argc, char **argv, char **envp) {
 
     /* Execute chained fixups (modern macOS 11+ format; replaces LC_DYLD_INFO
      * bind/rebase opcodes for newer binaries). */
-    { const char m[] = "BEFORE CHAINED\n"; write(2, m, sizeof(m)-1); }
+    if (g_verbose) { const char m[] = "BEFORE CHAINED\n"; write(2, m, sizeof(m)-1); }
     if (g_has_chained_fixups) {
         if (execute_chained_fixups(file_data, file_size) < 0) return 1;
     }
-    { const char m[] = "AFTER CHAINED\n"; write(2, m, sizeof(m)-1); }
+    if (g_verbose) { const char m[] = "AFTER CHAINED\n"; write(2, m, sizeof(m)-1); }
     /* Skip __DATA_CONST reprotect for now */
     /* Verify malloc_size GOT entry */
     {
@@ -512,13 +512,11 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: image header set to %#lx\n",
                         (unsigned long)header);
             }
-            /* Force OpenSSL init globals to success (curl's statically-linked
-             * OpenSSL may fail init due to missing macOS framework stubs).
-             * Only do this for curl (which has the ossl_init_*_ret_ globals
-             * at the hardcoded addresses). Other binaries don't have these
-             * globals, and writing to random memory would crash them. */
-            if (strstr(path, "curl") || strstr(path, "wget")) {
-                setenv("MACIFY_FORCE_SSL", "1", 1);
+            /* Force OpenSSL init globals to success ONLY when explicitly
+             * requested via MACIFY_FORCE_SSL=1 env var. The old code
+             * auto-detected curl/wget by path substring, but the hardcoded
+             * addresses are version-pinned and crash other binaries. */
+            if (getenv("MACIFY_FORCE_SSL")) {
                 void (*force_ssl)(void) =
                     (void (*)(void))dlsym(g_dylibs[0].handle,
                                           "macify_force_ssl_init_success");

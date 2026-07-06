@@ -1,0 +1,1055 @@
+     1→#include "shim.h"
+     2→#include <time.h>
+     3→#include <sched.h>
+     4→#include <sys/mman.h>   /* mprotect */
+     5→#include <string.h>     /* memcpy */
+     6→
+     7→/* macOS clock ID constants differ from Linux:
+     8→ *   macOS CLOCK_REALTIME=0, CLOCK_MONOTONIC=6, CLOCK_PROCESS_CPUTIME_ID=12,
+     9→ *   CLOCK_THREAD_CPUTIME_ID=16
+    10→ *   Linux CLOCK_REALTIME=0, CLOCK_MONOTONIC=1, CLOCK_PROCESS_CPUTIME_ID=2,
+    11→ *   CLOCK_THREAD_CPUTIME_ID=3
+    12→ * OpenSSL and other libraries call clock_gettime with macOS clock IDs.
+    13→ * We translate them to Linux equivalents. */
+    14→#define MACOS_CLOCK_MONOTONIC             6
+    15→#define MACOS_CLOCK_PROCESS_CPUTIME_ID   12
+    16→#define MACOS_CLOCK_THREAD_CPUTIME_ID    16
+    17→#define MACOS_CLOCK_UPTIME_RAW           8
+    18→#define MACOS_CLOCK_MONOTONIC_RAW        4
+    19→
+    20→int macify_clock_gettime(int clk_id, struct timespec *tp) __asm__("clock_gettime");
+    21→int macify_clock_gettime(int clk_id, struct timespec *tp) {
+    22→    switch (clk_id) {
+    23→        case MACOS_CLOCK_MONOTONIC:
+    24→            clk_id = CLOCK_MONOTONIC;
+    25→            break;
+    26→        case MACOS_CLOCK_PROCESS_CPUTIME_ID:
+    27→            clk_id = CLOCK_PROCESS_CPUTIME_ID;
+    28→            break;
+    29→        case MACOS_CLOCK_THREAD_CPUTIME_ID:
+    30→            clk_id = CLOCK_THREAD_CPUTIME_ID;
+    31→            break;
+    32→        case MACOS_CLOCK_UPTIME_RAW:
+    33→        case MACOS_CLOCK_MONOTONIC_RAW:
+    34→            clk_id = CLOCK_MONOTONIC_RAW;
+    35→            break;
+    36→        /* CLOCK_REALTIME (0) is the same on both platforms */
+    37→    }
+    38→    static int (*real_clock_gettime)(int, struct timespec *) = NULL;
+    39→    if (!real_clock_gettime) real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
+    40→    return real_clock_gettime(clk_id, tp);
+    41→}
+    42→
+    43→int _pthread_getname_np(pthread_t thread, char *name, size_t len) {
+    44→    return pthread_getname_np(thread, name, len);
+    45→}
+    46→
+    47→/* OSSpinLock — deprecated macOS spinlock. We implement using atomic ops.
+    48→ * OSSpinLock is just an int32_t: 0 = unlocked, 1 = locked. */
+    49→void OSSpinLockLock(volatile int32_t *lock) {
+    50→    while (__sync_lock_test_and_set(lock, 1)) {
+    51→        while (*lock) __asm__ volatile("pause");
+    52→    }
+    53→}
+    54→void OSSpinLockUnlock(volatile int32_t *lock) {
+    55→    __sync_lock_release(lock);
+    56→}
+    57→int OSSpinLockTry(volatile int32_t *lock) {
+    58→    return __sync_lock_test_and_set(lock, 1) == 0;
+    59→}
+    60→
+    61→/* pthread_atfork — register fork handlers. Pass through to glibc.
+    62→ * On glibc 2.34+, pthread_atfork only exists as a versioned symbol
+    63→ * with no default version, so dlsym returns NULL. Must use dlvsym. */
+    64→int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void)) {
+    65→    static int (*real_atfork)(void (*)(void), void (*)(void), void (*)(void)) = NULL;
+    66→    if (!real_atfork) {
+    67→        real_atfork = dlvsym(RTLD_NEXT, "pthread_atfork", "GLIBC_2.2.5");
+    68→        if (!real_atfork) real_atfork = dlsym(RTLD_NEXT, "pthread_atfork");
+    69→    }
+    70→    return real_atfork(prepare, parent, child);
+    71→}
+    72→
+    73→/* pthread_threadid_np — macOS function to get a unique thread ID.
+    74→ * Linux doesn't have this; use gettid() syscall instead. */
+    75→int pthread_threadid_np(pthread_t thread, uint64_t *thread_id) {
+    76→    (void)thread;
+    77→    if (thread_id) *thread_id = (uint64_t)syscall(186);  /* SYS_gettid */
+    78→    return 0;
+    79→}
+    80→
+    81→/* pthread_setname_np — macOS signature is `int pthread_setname_np(const char *name)`
+    82→ * (sets the name of the CALLING thread). Linux's signature is
+    83→ * `int pthread_setname_np(pthread_t thread, const char *name)` (sets name of ANY thread).
+    84→ * The ABI mismatch causes glibc to interpret the macOS `name` pointer as a
+    85→ * pthread_t and read garbage as the name, crashing in strlen.
+    86→ *
+    87→ * We export a 1-arg version that wraps glibc's 2-arg version, passing
+    88→ * pthread_self() as the thread. We must use __asm__ aliasing because
+    89→ * glibc's pthread.h declares pthread_setname_np with 2 args — including
+    90→ * that header would cause a conflicting declaration. */
+    91→int macify_pthread_setname_np(const char *name) __asm__("pthread_setname_np");
+    92→int macify_pthread_setname_np(const char *name) {
+    93→    /* glibc's pthread_setname_np is versioned; use dlvsym to find it. */
+    94→    static int (*real_setname)(pthread_t, const char *) = NULL;
+    95→    if (!real_setname) {
+    96→        real_setname = dlvsym(RTLD_NEXT, "pthread_setname_np", "GLIBC_2.2.5");
+    97→        if (!real_setname) real_setname = dlsym(RTLD_NEXT, "pthread_setname_np");
+    98→    }
+    99→    if (real_setname) return real_setname(pthread_self(), name);
+   100→    return 0;
+   101→}
+   102→
+   103→/* pthread_getname_np — macOS signature is `int pthread_getname_np(pthread_t thread, char *name, size_t len)`.
+   104→ * This matches Linux's signature, so we can pass through. But glibc's
+   105→ * pthread_getname_np returns 0 on success, while macOS returns 0 too.
+   106→ * However, glibc's version requires thread to be valid. Just pass through. */
+   107→int macify_pthread_getname_np(pthread_t thread, char *name, size_t len) __asm__("pthread_getname_np");
+   108→int macify_pthread_getname_np(pthread_t thread, char *name, size_t len) {
+   109→    static int (*real_getname)(pthread_t, char *, size_t) = NULL;
+   110→    if (!real_getname) {
+   111→        real_getname = dlvsym(RTLD_NEXT, "pthread_getname_np", "GLIBC_2.2.5");
+   112→        if (!real_getname) real_getname = dlsym(RTLD_NEXT, "pthread_getname_np");
+   113→    }
+   114→    if (real_getname) return real_getname(thread, name, len);
+   115→    if (name && len > 0) name[0] = '\0';
+   116→    return 0;
+   117→}
+   118→/* pthread_cond_timedwait_relative_np — macOS-specific variant that takes
+   119→ * a RELATIVE timeout (nanoseconds from now) instead of an absolute time.
+   120→ * Linux's pthread_cond_timedwait uses absolute time, so we convert. */
+   121→int pthread_cond_timedwait_relative_np(pthread_cond_t *c, pthread_mutex_t *m,
+   122→                                        const struct timespec *reltime) {
+   123→    if (!reltime) return pthread_cond_wait(c, m);
+   124→    struct timespec abstime;
+   125→    clock_gettime(CLOCK_REALTIME, &abstime);
+   126→    abstime.tv_sec += reltime->tv_sec;
+   127→    abstime.tv_nsec += reltime->tv_nsec;
+   128→    if (abstime.tv_nsec >= 1000000000) {
+   129→        abstime.tv_sec++;
+   130→        abstime.tv_nsec -= 1000000000;
+   131→    }
+   132→    return pthread_cond_timedwait(c, m, &abstime);
+   133→}
+   134→
+   135→/* macOS pthread extensions. */
+   136→
+   137→/* The loader allocates an 8MB stack for the macOS binary and switches to
+   138→ * it before calling main(). But glibc's pthread_getattr_np for the main
+   139→ * thread still returns the KERNEL's stack info (from /proc/self/maps),
+   140→ * not our allocated stack. Rust's runtime uses pthread_get_stackaddr_np
+   141→ * to find the main thread's stack, computes guard page addresses from it,
+   142→ * and crashes when those don't match the actual stack pointer.
+   143→ *
+   144→ * Fix: the loader calls __macify_set_stack_info() with our allocated
+   145→ * stack base/size. pthread_get_stack*_np returns these values for the
+   146→ * main thread instead of querying glibc. */
+   147→void *macify_main_stack_base = NULL;
+   148→size_t macify_main_stack_size = 0;
+   149→
+   150→void __macify_set_stack_info(void *base, size_t size) {
+   151→    macify_main_stack_base = base;
+   152→    macify_main_stack_size = size;
+   153→}
+   154→
+   155→void *pthread_get_stackaddr_np(pthread_t thread) {
+   156→    /* For the main thread, return our allocated stack top. For other
+   157→     * threads, query glibc. We detect the main thread by checking if
+   158→     * thread == pthread_self() AND our stack info has been set. */
+   159→    if (macify_main_stack_base && thread == pthread_self()) {
+   160→        return (char *)macify_main_stack_base + macify_main_stack_size;
+   161→    }
+   162→    pthread_attr_t attr;
+   163→    void *stackaddr = NULL;
+   164→    size_t stacksize = 0;
+   165→    pthread_getattr_np(thread, &attr);
+   166→    pthread_attr_getstack(&attr, &stackaddr, &stacksize);
+   167→    pthread_attr_destroy(&attr);
+   168→    return (char *)stackaddr + stacksize;  /* top of stack */
+   169→}
+   170→
+   171→size_t pthread_get_stacksize_np(pthread_t thread) {
+   172→    if (macify_main_stack_base && thread == pthread_self()) {
+   173→        return macify_main_stack_size;
+   174→    }
+   175→    pthread_attr_t attr;
+   176→    size_t stacksize = 0;
+   177→    pthread_getattr_np(thread, &attr);
+   178→    pthread_attr_getstacksize(&attr, &stacksize);
+   179→    pthread_attr_destroy(&attr);
+   180→    return stacksize;
+   181→}
+   182→/* Self-contained pthread TLS implementation.
+   183→ * 
+   184→ * macOS and glibc have different pthread_key_t sizes and different
+   185→ * pthread_once_t layouts. We bridge them by creating a mapping from
+   186→ * macOS key indices (0-255) to real glibc pthread_key_t values.
+   187→ * This ensures per-thread storage works correctly — critical for
+   188→ * OpenSSL which stores per-thread error queues in TLS.
+   189→ */
+   190→
+   191→#include <pthread.h>
+   192→
+   193→/* Our own pthread_key_create — allocates from our table.
+   194→ *
+   195→ * CRITICAL: We must use glibc's REAL per-thread TLS, not a global array.
+   196→ * OpenSSL stores per-thread error queues in TLS. If TLS is global, c-ares
+   197→ * background threads corrupt the main thread's error queue, causing
+   198→ * SSL_CTX_new to fail with SSL_R_INIT_LIBRARY.
+   199→ *
+   200→ * We create a mapping: macOS key (0-255) → glibc pthread_key_t.
+   201→ * Each macOS key_create allocates a real glibc key. All subsequent
+   202→ * getspecific/setspecific calls go through glibc's per-thread storage. */
+   203→#define MACIFY_MAX_KEYS 256
+   204→static pthread_key_t glibc_tls_keys[MACIFY_MAX_KEYS];
+   205→static int glibc_key_used[MACIFY_MAX_KEYS];
+   206→static int macify_next_key = 0;
+   207→static pthread_mutex_t macify_tls_mutex = PTHREAD_MUTEX_INITIALIZER;
+   208→static void (*macify_destructors[MACIFY_MAX_KEYS])(void *);
+   209→
+   210→static int (*real_glibc_key_create)(pthread_key_t *, void (*)(void *));
+   211→static void *(*real_glibc_getspecific)(pthread_key_t);
+   212→static int (*real_glibc_setspecific)(pthread_key_t, const void *);
+   213→
+   214→static void init_real_tls_funcs(void) {
+   215→    real_glibc_key_create = dlsym(RTLD_NEXT, "pthread_key_create");
+   216→    real_glibc_getspecific = dlsym(RTLD_NEXT, "pthread_getspecific");
+   217→    real_glibc_setspecific = dlsym(RTLD_NEXT, "pthread_setspecific");
+   218→}
+   219→
+   220→/* Our own pthread_key_create — allocates a glibc key and maps it. */
+   221→int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
+   222→    if (!real_glibc_key_create) init_real_tls_funcs();
+   223→    pthread_mutex_lock(&macify_tls_mutex);
+   224→    int k = macify_next_key++;
+   225→    pthread_mutex_unlock(&macify_tls_mutex);
+   226→
+   227→    int r;
+   228→    if (k >= MACIFY_MAX_KEYS) {
+   229→        r = EAGAIN;
+   230→    } else if (real_glibc_key_create(&glibc_tls_keys[k], destructor) != 0) {
+   231→        r = EAGAIN;
+   232→    } else {
+   233→        glibc_key_used[k] = 1;
+   234→        macify_destructors[k] = destructor;
+   235→        /* macOS pthread_key_t is unsigned long (8 bytes), but glibc's is
+   236→         * unsigned int (4 bytes). Write the full 8 bytes to match the macOS
+   237→         * ABI, so the macOS binary reads the correct key value. */
+   238→        *(unsigned long *)key = (unsigned long)k;
+   239→        r = 0;
+   240→    }
+   241→    if (getenv("MACIFY_SSL_DEBUG")) {
+   242→        char b[160];
+   243→        snprintf(b, sizeof(b),
+   244→                 "SSL_DEBUG: pthread_key_create key=%p dest=%p -> %d (k=%d)\n",
+   245→                 (void *)key, (void *)destructor, r, k);
+   246→        (void)write(2, b, strlen(b));
+   247→    }
+   248→    return r;
+   249→}
+   250→
+   251→/* Our own pthread_setspecific — delegate to glibc's per-thread storage */
+   252→int pthread_setspecific(pthread_key_t key, const void *value) {
+   253→    if (!real_glibc_setspecific) init_real_tls_funcs();
+   254→    unsigned int k = (unsigned int)(unsigned long)key;
+   255→    if (k >= MACIFY_MAX_KEYS || !glibc_key_used[k]) {
+   256→        return EINVAL;
+   257→    }
+   258→    return real_glibc_setspecific(glibc_tls_keys[k], value);
+   259→}
+   260→
+   261→/* Our own pthread_getspecific — delegate to glibc's per-thread storage */
+   262→void *pthread_getspecific(pthread_key_t key) {
+   263→    if (!real_glibc_getspecific) init_real_tls_funcs();
+   264→    unsigned int k = (unsigned int)(unsigned long)key;
+   265→    if (k >= MACIFY_MAX_KEYS || !glibc_key_used[k]) {
+   266→        return NULL;
+   267→    }
+   268→    return real_glibc_getspecific(glibc_tls_keys[k]);
+   269→}
+   270→
+   271→/* Our own pthread_once — correct implementation using atomic CAS.
+   272→ *
+   273→ * CRITICAL: The previous implementation set once_control = 1 BEFORE calling
+   274→ * init_routine. This broke the RUN_ONCE contract: if a second thread called
+   275→ * pthread_once while init_routine was still running, it would see "done" and
+   276→ * skip, then check init##_ossl_ret_ (which was still 0 because init hadn't
+   277→ * finished). This caused OPENSSL_init_crypto to return 0 (failure), which
+   278→ * made SSL_CTX_new fail with SSL_R_INIT_LIBRARY.
+   279→ *
+   280→ * This implementation uses 3 states:
+   281→ *   0x30B1BCBA / 0 = not yet initialized (macOS PTHREAD_ONCE_INIT)
+   282→ *   2 = in progress (a thread is running init_routine)
+   283→ *   1 = done (init_routine has completed)
+   284→ *
+   285→ * No global mutex is used, so recursive pthread_once calls with different
+   286→ * once_control variables don't deadlock. */
+   287→#define MACOS_PTHREAD_ONCE_INIT 0x30B1BCBA
+   288→
+   289→/* Forward declarations for the ret_ globals (defined later in this file) */
+   290→extern uint64_t macify_image_header;
+   291→struct ret_global_entry { const char *name; uint64_t static_addr; };
+   292→extern const struct ret_global_entry ret_global_entries[];
+   293→
+   294→int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
+   295→    static int ssl_debug = -1;
+   296→    if (ssl_debug < 0) {
+   297→        const char *e = getenv("MACIFY_SSL_DEBUG");
+   298→        ssl_debug = (e && e[0]) ? 1 : 0;
+   299→    }
+   300→    while (1) {
+   301→        long val = __atomic_load_n((long *)once_control, __ATOMIC_ACQUIRE);
+   302→
+   303→        if (val == 1) return 0;  /* already done */
+   304→
+   305→        if (val == MACOS_PTHREAD_ONCE_INIT || val == 0) {
+   306→            /* Try to claim it */
+   307→            long expected = val;
+   308→            if (__atomic_compare_exchange_n((long *)once_control, &expected, 2,
+   309→                                             0, __ATOMIC_ACQUIRE,
+   310→                                             __ATOMIC_RELAXED)) {
+   311→                /* We claimed it — call init */
+   312→                if (ssl_debug) {
+   313→                    char b[128];
+   314→                    snprintf(b, sizeof(b),
+   315→                             "SSL_DEBUG: pthread_once: once=%p init=%p\n",
+   316→                             (void *)once_control, (void *)init_routine);
+   317→                    (void)write(2, b, strlen(b));
+   318→                }
+   319→                init_routine();
+   320→                if (ssl_debug) {
+   321→                    char b[128];
+   322→                    snprintf(b, sizeof(b),
+   323→                             "SSL_DEBUG: pthread_once: once=%p init=%p DONE\n",
+   324→                             (void *)once_control, (void *)init_routine);
+   325→                    (void)write(2, b, strlen(b));
+   326→                }
+   327→
+   328→                /* Debug: check which ret_ globals are 0 after this init */
+   329→                if (ssl_debug && macify_image_header &&
+   330→                    getenv("MACIFY_FORCE_SSL")) {
+   331→                    uint64_t slide = macify_image_header - 0x100000000;
+   332→                    for (int i = 0; ret_global_entries[i].name; i++) {
+   333→                        uint64_t actual = ret_global_entries[i].static_addr + slide;
+   334→                        int *p = (int *)actual;
+   335→                        if (*p == 0) {
+   336→                            char b[256];
+   337→                            int n = snprintf(b, sizeof(b),
+   338→                                "SSL_DEBUG:   FAILED: %s @ 0x%lx = 0\n",
+   339→                                ret_global_entries[i].name, (unsigned long)actual);
+   340→                            (void)write(2, b, n);
+   341→                        }
+   342→                    }
+   343→                }
+   344→
+   345→                /* After the init_routine runs, force ALL OpenSSL
+   346→                 * ossl_init_*_ret_ globals to 1 (success) — but ONLY for
+   347→                 * curl/wget (which have these globals at the hardcoded
+   348→                 * addresses). For other binaries, skip this entirely.
+   349→                 *
+   350→                 * CRITICAL: This MUST happen BEFORE the release store to
+   351→                 * once_control below. If we mark once_control as "done"
+   352→                 * first, a concurrent thread calling RUN_ONCE will see
+   353→                 * "done" but read ret_=0 (not yet forced), causing it to
+   354→                 * treat the init as failed. */
+   355→                static int force_ssl_check = -1;
+   356→                if (force_ssl_check < 0) {
+   357→                    force_ssl_check = getenv("MACIFY_FORCE_SSL") ? 1 : 0;
+   358→                }
+   359→                if (force_ssl_check && macify_image_header) {
+   360→                    uint64_t slide = macify_image_header - 0x100000000;
+   361→                    for (int i = 0; ret_global_entries[i].name; i++) {
+   362→                        uint64_t actual = ret_global_entries[i].static_addr + slide;
+   363→                        int *p = (int *)actual;
+   364→                        if (*p == 0) *p = 1;
+   365→                    }
+   366→                }
+   367→
+   368→                __atomic_store_n((long *)once_control, 1, __ATOMIC_RELEASE);
+   369→                return 0;
+   370→            }
+   371→            /* CAS failed — another thread claimed it, fall through to wait */
+   372→        }
+   373→
+   374→        /* Another thread is initializing — wait for it to finish */
+   375→        while (__atomic_load_n((long *)once_control, __ATOMIC_ACQUIRE) == 2) {
+   376→            sched_yield();
+   377→        }
+   378→        /* Loop back and check if it's done (val == 1) */
+   379→    }
+   380→    return 0;
+   381→}
+   382→
+   383→
+   384→/* macOS pthread synchronization objects have a completely different layout
+   385→ * from glibc's. Statically-initialized objects carry a macOS signature
+   386→ * (0x32AAABA7 for mutex, 0x3CB0B5BB for cond, 0x2DA8B3B4 for rwlock) in
+   387→ * their first 4 bytes. When glibc's pthread_mutex_lock sees this non-zero
+   388→ * value, it interprets it as "already locked" and deadlocks on a futex.
+   389→ *
+   390→ * Solution: override the pthread_mutex/cond/rwlock functions. On each call,
+   391→ * check if the object still has a macOS signature. If so, overwrite it
+   392→ * in-place with glibc's PTHREAD_*_INITIALIZER (macOS objects are 64+ bytes;
+   393→ * glibc's are 40 bytes, so the overwrite is safe). Then delegate to glibc's
+   394→ * real function via dlsym(RTLD_NEXT, ...).
+   395→ */
+   396→
+   397→#define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u
+   398→#define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
+   399→#define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
+   400→
+   401→/* Cache glibc's real function pointers (resolved lazily on first use). */
+   402→static int   (*real_mutex_lock)(pthread_mutex_t *);
+   403→static int   (*real_mutex_trylock)(pthread_mutex_t *);
+   404→static int   (*real_mutex_unlock)(pthread_mutex_t *);
+   405→static int   (*real_mutex_init)(pthread_mutex_t *, const pthread_mutexattr_t *);
+   406→static int   (*real_mutex_destroy)(pthread_mutex_t *);
+   407→static int   (*real_cond_wait)(pthread_cond_t *, pthread_mutex_t *);
+   408→static int   (*real_cond_timedwait)(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
+   409→static int   (*real_cond_signal)(pthread_cond_t *);
+   410→static int   (*real_cond_broadcast)(pthread_cond_t *);
+   411→static int   (*real_cond_init)(pthread_cond_t *, const pthread_condattr_t *);
+   412→static int   (*real_cond_destroy)(pthread_cond_t *);
+   413→static int   (*real_rwlock_rdlock)(pthread_rwlock_t *);
+   414→static int   (*real_rwlock_wrlock)(pthread_rwlock_t *);
+   415→static int   (*real_rwlock_unlock)(pthread_rwlock_t *);
+   416→static int   (*real_rwlock_init)(pthread_rwlock_t *, const pthread_rwlockattr_t *);
+   417→static int   (*real_rwlock_destroy)(pthread_rwlock_t *);
+   418→
+   419→static void init_real_pthread_funcs(void) {
+   420→    real_mutex_lock     = dlsym(RTLD_NEXT, "pthread_mutex_lock");
+   421→    real_mutex_trylock  = dlsym(RTLD_NEXT, "pthread_mutex_trylock");
+   422→    real_mutex_unlock   = dlsym(RTLD_NEXT, "pthread_mutex_unlock");
+   423→    real_mutex_init     = dlsym(RTLD_NEXT, "pthread_mutex_init");
+   424→    real_mutex_destroy  = dlsym(RTLD_NEXT, "pthread_mutex_destroy");
+   425→    real_cond_wait      = dlsym(RTLD_NEXT, "pthread_cond_wait");
+   426→    real_cond_timedwait = dlsym(RTLD_NEXT, "pthread_cond_timedwait");
+   427→    real_cond_signal    = dlsym(RTLD_NEXT, "pthread_cond_signal");
+   428→    real_cond_broadcast = dlsym(RTLD_NEXT, "pthread_cond_broadcast");
+   429→    real_cond_init      = dlsym(RTLD_NEXT, "pthread_cond_init");
+   430→    real_cond_destroy   = dlsym(RTLD_NEXT, "pthread_cond_destroy");
+   431→    real_rwlock_rdlock  = dlsym(RTLD_NEXT, "pthread_rwlock_rdlock");
+   432→    real_rwlock_wrlock  = dlsym(RTLD_NEXT, "pthread_rwlock_wrlock");
+   433→    real_rwlock_unlock  = dlsym(RTLD_NEXT, "pthread_rwlock_unlock");
+   434→    real_rwlock_init    = dlsym(RTLD_NEXT, "pthread_rwlock_init");
+   435→    real_rwlock_destroy = dlsym(RTLD_NEXT, "pthread_rwlock_destroy");
+   436→}
+   437→
+   438→/* Convert a macOS-format mutex to glibc format in-place. The macOS mutex
+   439→ * is larger than glibc's (64+ vs 40 bytes), so overwriting the first
+   440→ * sizeof(pthread_mutex_t) bytes is safe. */
+   441→static void convert_macos_mutex(pthread_mutex_t *m) {
+   442→    unsigned int sig = *(unsigned int *)m;
+   443→    if (sig == MACOS_PTHREAD_MUTEX_SIG) {
+   444→        static const pthread_mutex_t glibc_init = PTHREAD_MUTEX_INITIALIZER;
+   445→        memcpy(m, &glibc_init, sizeof(pthread_mutex_t));
+   446→    }
+   447→}
+   448→
+   449→static void convert_macos_cond(pthread_cond_t *c) {
+   450→    unsigned int sig = *(unsigned int *)c;
+   451→    if (sig == MACOS_PTHREAD_COND_SIG) {
+   452→        /* macOS pthread_cond_t is only 32 bytes, but glibc's is 48 bytes.
+   453→         * We CANNOT write glibc's PTHREAD_COND_INITIALIZER into the macOS
+   454→         * buffer (16-byte overflow). Instead, allocate a glibc cond on the
+   455→         * heap and store the pointer in the macOS cond's opaque field. */
+   456→        pthread_cond_t *glibc_cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
+   457→        if (!glibc_cond) return;
+   458→        static const pthread_cond_t glibc_init = PTHREAD_COND_INITIALIZER;
+   459→        memcpy(glibc_cond, &glibc_init, sizeof(pthread_cond_t));
+   460→        /* Store our magic signature and the heap pointer in the macOS cond.
+   461→         * macOS cond layout: [sig(4)] [pad(4)] [opaque(24)]
+   462→         * We overwrite with: [magic(4)] [pad(4)] [pointer(8)] */
+   463→        *(unsigned int *)c = 0x4D43434E;  /* "MCCN" = Macify Cond */
+   464→        void **ptr_loc = (void **)((char *)c + 8);
+   465→        *ptr_loc = glibc_cond;
+   466→    } else if (sig == 0x4D43434E) {
+   467→        /* Already converted — heap cond exists */
+   468→    }
+   469→}
+   470→
+   471→/* Get the glibc cond pointer from a macOS cond (after conversion). */
+   472→static pthread_cond_t *get_glibc_cond(pthread_cond_t *c) {
+   473→    unsigned int sig = *(unsigned int *)c;
+   474→    if (sig == 0x4D43434E) {
+   475→        void **ptr_loc = (void **)((char *)c + 8);
+   476→        return (pthread_cond_t *)*ptr_loc;
+   477→    }
+   478→    /* Not converted — it's already a glibc cond (or being used directly) */
+   479→    return c;
+   480→}
+   481→
+   482→static void convert_macos_rwlock(pthread_rwlock_t *rw) {
+   483→    unsigned int sig = *(unsigned int *)rw;
+   484→    if (sig == MACOS_PTHREAD_RWLOCK_SIG) {
+   485→        static const pthread_rwlock_t glibc_init = PTHREAD_RWLOCK_INITIALIZER;
+   486→        memcpy(rw, &glibc_init, sizeof(pthread_rwlock_t));
+   487→    }
+   488→}
+   489→
+   490→#define LAZY_INIT() do { \
+   491→    if (!real_mutex_lock) init_real_pthread_funcs(); \
+   492→} while (0)
+   493→
+   494→int pthread_mutex_lock(pthread_mutex_t *m) {
+   495→    LAZY_INIT();
+   496→    convert_macos_mutex(m);
+   497→    return real_mutex_lock(m);
+   498→}
+   499→
+   500→int pthread_mutex_trylock(pthread_mutex_t *m) {
+   501→    LAZY_INIT();
+   502→    convert_macos_mutex(m);
+   503→    return real_mutex_trylock(m);
+   504→}
+   505→
+   506→int pthread_mutex_unlock(pthread_mutex_t *m) {
+   507→    LAZY_INIT();
+   508→    convert_macos_mutex(m);
+   509→    return real_mutex_unlock(m);
+   510→}
+   511→
+   512→int pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *a) {
+   513→    LAZY_INIT();
+   514→    int r = real_mutex_init(m, a);
+   515→    if (getenv("MACIFY_SSL_DEBUG")) {
+   516→        char b[128];
+   517→        snprintf(b, sizeof(b),
+   518→                 "SSL_DEBUG: pthread_mutex_init mutex=%p attr=%p -> %d\n",
+   519→                 (void *)m, (void *)a, r);
+   520→        (void)write(2, b, strlen(b));
+   521→    }
+   522→    return r;
+   523→}
+   524→
+   525→int pthread_mutex_destroy(pthread_mutex_t *m) {
+   526→    LAZY_INIT();
+   527→    /* Only destroy if it's a glibc-format mutex (don't touch macOS sig). */
+   528→    unsigned int sig = *(unsigned int *)m;
+   529→    if (sig != MACOS_PTHREAD_MUTEX_SIG) return real_mutex_destroy(m);
+   530→    return 0;
+   531→}
+   532→
+   533→int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
+   534→    LAZY_INIT();
+   535→    convert_macos_cond(c);
+   536→    convert_macos_mutex(m);
+   537→    return real_cond_wait(get_glibc_cond(c), m);
+   538→}
+   539→
+   540→int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
+   541→                           const struct timespec *ts) {
+   542→    LAZY_INIT();
+   543→    convert_macos_cond(c);
+   544→    convert_macos_mutex(m);
+   545→    return real_cond_timedwait(get_glibc_cond(c), m, ts);
+   546→}
+   547→
+   548→int pthread_cond_signal(pthread_cond_t *c) {
+   549→    LAZY_INIT();
+   550→    convert_macos_cond(c);
+   551→    return real_cond_signal(get_glibc_cond(c));
+   552→}
+   553→
+   554→int pthread_cond_broadcast(pthread_cond_t *c) {
+   555→    LAZY_INIT();
+   556→    convert_macos_cond(c);
+   557→    return real_cond_broadcast(get_glibc_cond(c));
+   558→}
+   559→
+   560→int pthread_cond_init(pthread_cond_t *c, const pthread_condattr_t *a) {
+   561→    LAZY_INIT();
+   562→    /* Allocate a glibc cond on the heap (macOS cond is too small for glibc) */
+   563→    pthread_cond_t *glibc_cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
+   564→    if (!glibc_cond) {
+   565→        if (getenv("MACIFY_SSL_DEBUG")) {
+   566→            char b[128];
+   567→            snprintf(b, sizeof(b),
+   568→                     "SSL_DEBUG: pthread_cond_init cond=%p attr=%p -> ENOMEM (malloc failed)\n",
+   569→                     (void *)c, (void *)a);
+   570→            (void)write(2, b, strlen(b));
+   571→        }
+   572→        return ENOMEM;
+   573→    }
+   574→    int ret = real_cond_init(glibc_cond, a);
+   575→    if (ret != 0) {
+   576→        free(glibc_cond);
+   577→        if (getenv("MACIFY_SSL_DEBUG")) {
+   578→            char b[128];
+   579→            snprintf(b, sizeof(b),
+   580→                     "SSL_DEBUG: pthread_cond_init cond=%p attr=%p -> %d (real_cond_init failed)\n",
+   581→                     (void *)c, (void *)a, ret);
+   582→            (void)write(2, b, strlen(b));
+   583→        }
+   584→        return ret;
+   585→    }
+   586→    *(unsigned int *)c = 0x4D43434E;  /* Macify Cond magic */
+   587→    void **ptr_loc = (void **)((char *)c + 8);
+   588→    *ptr_loc = glibc_cond;
+   589→    if (getenv("MACIFY_SSL_DEBUG")) {
+   590→        char b[128];
+   591→        snprintf(b, sizeof(b),
+   592→                 "SSL_DEBUG: pthread_cond_init cond=%p attr=%p -> 0 (glibc_cond=%p)\n",
+   593→                 (void *)c, (void *)a, (void *)glibc_cond);
+   594→        (void)write(2, b, strlen(b));
+   595→    }
+   596→    return 0;
+   597→}
+   598→
+   599→int pthread_cond_destroy(pthread_cond_t *c) {
+   600→    LAZY_INIT();
+   601→    unsigned int sig = *(unsigned int *)c;
+   602→    if (sig == 0x4D43434E) {
+   603→        /* Our heap-allocated cond — destroy and free */
+   604→        void **ptr_loc = (void **)((char *)c + 8);
+   605→        pthread_cond_t *glibc_cond = (pthread_cond_t *)*ptr_loc;
+   606→        int ret = real_cond_destroy(glibc_cond);
+   607→        free(glibc_cond);
+   608→        return ret;
+   609→    }
+   610→    if (sig == MACOS_PTHREAD_COND_SIG) return 0;  /* uninit macOS cond */
+   611→    return real_cond_destroy(c);
+   612→}
+   613→
+   614→int pthread_rwlock_rdlock(pthread_rwlock_t *rw) {
+   615→    LAZY_INIT();
+   616→    convert_macos_rwlock(rw);
+   617→    return real_rwlock_rdlock(rw);
+   618→}
+   619→
+   620→int pthread_rwlock_wrlock(pthread_rwlock_t *rw) {
+   621→    LAZY_INIT();
+   622→    convert_macos_rwlock(rw);
+   623→    return real_rwlock_wrlock(rw);
+   624→}
+   625→
+   626→int pthread_rwlock_unlock(pthread_rwlock_t *rw) {
+   627→    LAZY_INIT();
+   628→    convert_macos_rwlock(rw);
+   629→    return real_rwlock_unlock(rw);
+   630→}
+   631→
+   632→int pthread_rwlock_init(pthread_rwlock_t *rw, const pthread_rwlockattr_t *a) {
+   633→    LAZY_INIT();
+   634→    int r = real_rwlock_init(rw, a);
+   635→    if (getenv("MACIFY_SSL_DEBUG")) {
+   636→        char b[128];
+   637→        snprintf(b, sizeof(b),
+   638→                 "SSL_DEBUG: pthread_rwlock_init rw=%p attr=%p -> %d\n",
+   639→                 (void *)rw, (void *)a, r);
+   640→        (void)write(2, b, strlen(b));
+   641→    }
+   642→    return r;
+   643→}
+   644→
+   645→int pthread_rwlock_destroy(pthread_rwlock_t *rw) {
+   646→    LAZY_INIT();
+   647→    unsigned int sig = *(unsigned int *)rw;
+   648→    if (sig != MACOS_PTHREAD_RWLOCK_SIG) return real_rwlock_destroy(rw);
+   649→    return 0;
+   650→}
+   651→
+   652→
+   653→/* macOS pthread_attr_t is only 16 bytes (long sig + pointer), while glibc's
+   654→ * is 56 bytes. When glibc's pthread_attr_init writes 56 bytes into a
+   655→ * 16-byte macOS-format buffer, it overflows and corrupts the stack. We
+   656→ * allocate a glibc-format attr on the heap and store its pointer in the
+   657→ * macOS-format attr (which is big enough to hold a pointer + sig). */
+   658→
+   659→static int (*real_attr_init)(pthread_attr_t *);
+   660→static int (*real_attr_destroy)(pthread_attr_t *);
+   661→static int (*real_attr_setstacksize)(pthread_attr_t *, size_t);
+   662→static int (*real_attr_getstacksize)(const pthread_attr_t *, size_t *);
+   663→static int (*real_attr_setguardsize)(pthread_attr_t *, size_t);
+   664→
+   665→static void init_real_attr_funcs(void) {
+   666→    real_attr_init         = dlsym(RTLD_NEXT, "pthread_attr_init");
+   667→    real_attr_destroy      = dlsym(RTLD_NEXT, "pthread_attr_destroy");
+   668→    real_attr_setstacksize = dlsym(RTLD_NEXT, "pthread_attr_setstacksize");
+   669→    real_attr_getstacksize = dlsym(RTLD_NEXT, "pthread_attr_getstacksize");
+   670→    real_attr_setguardsize = dlsym(RTLD_NEXT, "pthread_attr_setguardsize");
+   671→}
+   672→
+   673→#define LAZY_INIT_ATTR() do { \
+   674→    if (!real_attr_init) init_real_attr_funcs(); \
+   675→} while (0)
+   676→
+   677→/* Get the glibc attr from a macOS attr. If the macOS attr doesn't have
+   678→ * our signature, allocate a new glibc attr. */
+   679→static pthread_attr_t *get_glibc_attr(struct macos_pthread_attr *macos_attr) {
+   680→    LAZY_INIT_ATTR();
+   681→    if (macos_attr->sig != MACOS_PTHREAD_ATTR_SIG || macos_attr->opaque == NULL) {
+   682→        /* Not initialized by us — allocate a new glibc attr */
+   683→        pthread_attr_t *glibc_attr = calloc(1, sizeof(pthread_attr_t));
+   684→        real_attr_init(glibc_attr);
+   685→        macos_attr->sig = MACOS_PTHREAD_ATTR_SIG;
+   686→        macos_attr->opaque = glibc_attr;
+   687→    }
+   688→    return (pthread_attr_t *)macos_attr->opaque;
+   689→}
+   690→
+   691→int pthread_attr_init(pthread_attr_t *attr) {
+   692→    LAZY_INIT_ATTR();
+   693→    struct macos_pthread_attr *ma = (struct macos_pthread_attr *)attr;
+   694→    pthread_attr_t *glibc_attr = calloc(1, sizeof(pthread_attr_t));
+   695→    real_attr_init(glibc_attr);
+   696→    ma->sig = MACOS_PTHREAD_ATTR_SIG;
+   697→    ma->opaque = glibc_attr;
+   698→    return 0;
+   699→}
+   700→
+   701→int pthread_attr_destroy(pthread_attr_t *attr) {
+   702→    LAZY_INIT_ATTR();
+   703→    struct macos_pthread_attr *ma = (struct macos_pthread_attr *)attr;
+   704→    if (ma->sig == MACOS_PTHREAD_ATTR_SIG && ma->opaque) {
+   705→        real_attr_destroy((pthread_attr_t *)ma->opaque);
+   706→        free(ma->opaque);
+   707→        ma->opaque = NULL;
+   708→        ma->sig = 0;
+   709→    }
+   710→    return 0;
+   711→}
+   712→
+   713→int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize) {
+   714→    pthread_attr_t *glibc_attr = get_glibc_attr((struct macos_pthread_attr *)attr);
+   715→    return real_attr_setstacksize(glibc_attr, stacksize);
+   716→}
+   717→
+   718→int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize) {
+   719→    pthread_attr_t *glibc_attr = get_glibc_attr((struct macos_pthread_attr *)(uintptr_t)attr);
+   720→    return real_attr_getstacksize(glibc_attr, stacksize);
+   721→}
+   722→
+   723→int pthread_attr_setguardsize(pthread_attr_t *attr, size_t guardsize) {
+   724→    pthread_attr_t *glibc_attr = get_glibc_attr((struct macos_pthread_attr *)attr);
+   725→    return real_attr_setguardsize(glibc_attr, guardsize);
+   726→}
+   727→
+   728→/* pthread_mutexattr — macOS uses the same layout as glibc for mutexattr
+   729→ * (it's small enough), but we need to override because macOS mutex types
+   730→ * differ: PTHREAD_MUTEX_NORMAL=0, ERRORCHECK=1, RECURSIVE=2, DEFAULT=3.
+   731→ * Linux: NORMAL=0, ERRORCHECK=2, RECURSIVE=1, DEFAULT=0.
+   732→ * We pass through to glibc and translate the type. */
+   733→int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
+   734→    static int (*real)(pthread_mutexattr_t *) = NULL;
+   735→    if (!real) real = dlsym(RTLD_NEXT, "pthread_mutexattr_init");
+   736→    return real(attr);
+   737→}
+   738→int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
+   739→    static int (*real)(pthread_mutexattr_t *) = NULL;
+   740→    if (!real) real = dlsym(RTLD_NEXT, "pthread_mutexattr_destroy");
+   741→    return real(attr);
+   742→}
+   743→int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
+   744→    static int (*real)(pthread_mutexattr_t *, int) = NULL;
+   745→    if (!real) real = dlsym(RTLD_NEXT, "pthread_mutexattr_settype");
+   746→    /* Translate macOS type to Linux type */
+   747→    int linux_type;
+   748→    switch (type) {
+   749→        case 0: linux_type = 0; break;  /* NORMAL → NORMAL */
+   750→        case 1: linux_type = 2; break;  /* ERRORCHECK → ERRORCHECK */
+   751→        case 2: linux_type = 1; break;  /* RECURSIVE → RECURSIVE */
+   752→        case 3: linux_type = 0; break;  /* DEFAULT → NORMAL */
+   753→        default: linux_type = type; break;
+   754→    }
+   755→    return real(attr, linux_type);
+   756→}
+   757→
+   758→/* pthread_create — the macOS binary passes a macOS-format attr. We need
+   759→ * to extract the glibc attr from it and pass that to glibc's
+   760→ * pthread_create. If the attr is NULL, pass NULL (use default).
+   761→ *
+   762→ * We also wrap start_routine to set up a signal stack (sigaltstack) for
+   763→ * each new thread. Without this, signals (SIGSEGV, SIGURG, etc.) can't
+   764→ * be delivered to Go-created threads, causing the process to be killed. */
+   765→
+   766→/* Thread start wrapper: sets up sigaltstack then calls the real routine. */
+   767→struct thread_start_args {
+   768→    void *(*start_routine)(void *);
+   769→    void *arg;
+   770→};
+   771→
+   772→static void *thread_start_wrapper(void *p) {
+   773→    struct thread_start_args *args = (struct thread_start_args *)p;
+   774→    void *(*routine)(void *) = args->start_routine;
+   775→    void *arg = args->arg;
+   776→    free(p);
+   777→
+   778→    /* Set up a signal stack for this thread (for SA_ONSTACK signal delivery).
+   779→     * Without this, SIGSEGV/SIGBUS on this thread kills the process. */
+   780→    char *thread_sigstack = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
+   781→                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   782→    if (thread_sigstack != MAP_FAILED) {
+   783→        stack_t ss;
+   784→        ss.ss_sp = thread_sigstack;
+   785→        ss.ss_size = 256 * 1024;
+   786→        ss.ss_flags = 0;
+   787→        sigaltstack(&ss, NULL);
+   788→    }
+   789→
+   790→    /* Block SIGURG for Go preemption safety (same as main thread). */
+   791→    extern uint64_t g_tls_g_addr;
+   792→    if (g_tls_g_addr) {
+   793→        sigset_t mask;
+   794→        sigemptyset(&mask);
+   795→        sigaddset(&mask, 23);  /* SIGURG */
+   796→        sigprocmask(SIG_BLOCK, &mask, NULL);
+   797→    }
+   798→
+   799→    return routine(arg);
+   800→}
+   801→
+   802→static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
+   803→                                   void *(*)(void *), void *);
+   804→
+   805→int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+   806→                   void *(*start_routine)(void *), void *arg) {
+   807→    if (!real_pthread_create) {
+   808→        real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
+   809→    }
+   810→    if (getenv("MACIFY_NET_DEBUG")) {
+   811→        char b[128];
+   812→        snprintf(b, sizeof(b), "pthread_create: start_routine=%p arg=%p\n",
+   813→                 (void *)start_routine, arg);
+   814→        (void)write(2, b, strlen(b));
+   815→    }
+   816→    pthread_attr_t *glibc_attr = NULL;
+   817→    if (attr) {
+   818→        struct macos_pthread_attr *ma = (struct macos_pthread_attr *)(uintptr_t)attr;
+   819→        if (ma->sig == MACOS_PTHREAD_ATTR_SIG) {
+   820→            glibc_attr = (pthread_attr_t *)ma->opaque;
+   821→        } else {
+   822→            glibc_attr = (pthread_attr_t *)(uintptr_t)attr;
+   823→        }
+   824→    }
+   825→    /* Wrap start_routine to set up sigaltstack for the new thread. */
+   826→    struct thread_start_args *wrapper_args = malloc(sizeof(*wrapper_args));
+   827→    if (!wrapper_args) return EAGAIN;
+   828→    wrapper_args->start_routine = start_routine;
+   829→    wrapper_args->arg = arg;
+   830→    int ret = real_pthread_create(thread, glibc_attr, thread_start_wrapper, wrapper_args);
+   831→    if (ret != 0) {
+   832→        free(wrapper_args);
+   833→    }
+   834→    return ret;
+   835→}
+   836→
+   837→/* ============================================================================
+   838→ * SSL init ret_global reader — for debugging OPENSSL_init_crypto failures.
+   839→ *
+   840→ * Each OpenSSL RUN_ONCE init function (ossl_init_X_ossl_) stores its return
+   841→ * value in a global variable (ossl_init_X_ossl_ret_). If any returns 0,
+   842→ * OPENSSL_init_crypto fails, which causes SSL_CTX_new to fail with
+   843→ * "SSL: could not create a context" (SSL reason 20).
+   844→ *
+   845→ * The shim can read these globals from the loaded macOS binary's memory.
+   846→ * The static addresses (from the symbol table) are hardcoded; we subtract
+   847→ * the static base (0x100000000) and add the actual image header address
+   848→ * (set by the loader via __macify_set_image_header).
+   849→ *
+   850→ * This is enabled by MACIFY_SSL_DEBUG=1.
+   851→ * ========================================================================== */
+   852→
+   853→extern uint64_t macify_image_header;
+   854→
+   855→/* ret_global_entry and ret_global_entries are forward-declared above
+   856→ * (before pthread_once) so the pthread_once override can access them. */
+   857→
+   858→const struct ret_global_entry ret_global_entries[] = {
+   859→    {"ssl_x509_store_ctx_init_ossl_ret_",               0x1007ab050},
+   860→    {"ossl_init_ssl_base_ossl_ret_",                    0x1007ab054},
+   861→    {"do_bio_type_init_ossl_ret_",                      0x1007ab06c},
+   862→    {"do_load_builtin_modules_ossl_ret_",               0x1007ab0b8},
+   863→    {"do_init_module_list_lock_ossl_ret_",              0x1007ab0bc},
+   864→    {"do_err_strings_init_ossl_ret_",                   0x1007ab0f0},
+   865→    {"default_context_do_thread_key_init_ossl_ret_",    0x1007ab3f8},
+   866→    {"default_context_do_init_ossl_ret_",               0x1007ab3fc},
+   867→    {"ossl_init_base_ossl_ret_",                        0x1007ab658},
+   868→    {"ossl_init_load_crypto_strings_ossl_ret_",         0x1007ab65c},
+   869→    {"ossl_init_load_ssl_strings_ossl_ret_",            0x1007ab660},
+   870→    {"ossl_init_add_all_ciphers_ossl_ret_",             0x1007ab664},
+   871→    {"ossl_init_add_all_digests_ossl_ret_",             0x1007ab668},
+   872→    {"ossl_init_config_ossl_ret_",                      0x1007ab66c},
+   873→    {"ossl_init_async_ossl_ret_",                       0x1007ab678},
+   874→    {"create_global_tevent_register_ossl_ret_",         0x1007ab680},
+   875→    {"o_names_init_ossl_ret_",                          0x1007ab718},
+   876→    {"obj_api_initialise_ossl_ret_",                    0x1007ab750},
+   877→    {"o_sig_init_ossl_ret_",                            0x1007ab770},
+   878→    {"do_rand_init_ossl_ret_",                          0x1007ab790},
+   879→    {"do_registry_init_ossl_ret_",                      0x1007ab8a0},
+   880→    {"ui_method_data_index_init_ossl_ret_",             0x1007abb78},
+   881→    {NULL, 0}
+   882→};
+   883→
+   884→/* Made non-static so shim_misc.c:exit() can call it directly when
+   885→ * MACIFY_SSL_DEBUG is set. The macify loader bypasses atexit handlers
+   886→ * (post_main_cleanup calls _exit directly), so an atexit registration
+   887→ * alone never fires. */
+   888→void macify_print_ret_globals(void) {
+   889→    if (!getenv("MACIFY_SSL_DEBUG")) return;
+   890→    if (!macify_image_header) {
+   891→        const char *msg = "SSL_DEBUG: image_header not set, can't read ret_globals\n";
+   892→        (void)write(2, msg, strlen(msg));
+   893→        return;
+   894→    }
+   895→    /* static base of the macOS binary is 0x100000000 */
+   896→    uint64_t slide = macify_image_header - 0x100000000;
+   897→    char b[256];
+   898→    snprintf(b, sizeof(b),
+   899→             "SSL_DEBUG: image_header=%#lx slide=%#lx — reading ret_globals:\n",
+   900→             (unsigned long)macify_image_header, (unsigned long)slide);
+   901→    (void)write(2, b, strlen(b));
+   902→    for (int i = 0; ret_global_entries[i].name; i++) {
+   903→        uint64_t actual = ret_global_entries[i].static_addr + slide;
+   904→        int *p = (int *)actual;
+   905→        /* Try to read — if it segfaults, the address is wrong */
+   906→        int v = *p;
+   907→        snprintf(b, sizeof(b), "  %-50s @ %#lx = %d\n",
+   908→                 ret_global_entries[i].name, (unsigned long)actual, v);
+   909→        (void)write(2, b, strlen(b));
+   910→    }
+   911→}
+   912→
+   913→__attribute__((constructor))
+   914→static void register_ret_global_printer(void) {
+   915→    if (getenv("MACIFY_SSL_DEBUG")) {
+   916→        atexit(macify_print_ret_globals);
+   917→    }
+   918→}
+   919→
+   920→/* Force all OpenSSL ossl_init_*_ret_ globals to 1 (success).
+   921→ *
+   922→ * curl's internal OpenSSL has RUN_ONCE init functions that store their
+   923→ * return value in globals like ossl_init_base_ossl_ret_. If any returns
+   924→ * 0, OPENSSL_init_crypto fails, and SSL_CTX_new_ex returns NULL.
+   925→ *
+   926→ * Some init functions may fail because they depend on macOS-specific
+   927→ * APIs (Security framework, keychain, etc.) that our stubs don't fully
+   928→ * implement. Rather than make every stub work perfectly, we just force
+   929→ * all ret_ globals to 1 so OPENSSL_init_crypto succeeds. The actual
+   930→ * crypto operations may still fail later, but at least SSL_CTX_new_ex
+   931→ * will return a valid context.
+   932→ *
+   933→ * Called by the macify loader AFTER setting the image header. */
+   934→
+   935→/* Hook globals for OSSL_LIB_CTX_new inline hook.
+   936→ * The hook calls the original OSSL_LIB_CTX_new (via trampoline), then
+   937→ * loads the default provider into the new libctx before returning. */
+   938→static void *(*macify_original_lib_ctx_new)(void) = NULL;
+   939→static void *(*macify_provider_load)(void *, const char *) = NULL;
+   940→
+   941→/* Our hook for OSSL_LIB_CTX_new.
+   942→ * Calling convention: System V AMD64, no args, returns OSSL_LIB_CTX*.
+   943→ * We call the original (via trampoline), then load the default provider. */
+   944→void *macify_ossl_lib_ctx_hook(void) {
+   945→    /* Call original OSSL_LIB_CTX_new */
+   946→    void *ctx = macify_original_lib_ctx_new();
+   947→    if (ctx && macify_provider_load) {
+   948→        /* Load the default provider into this new libctx */
+   949→        void *prov = macify_provider_load(ctx, "default");
+   950→        if (getenv("MACIFY_SSL_DEBUG")) {
+   951→            char b[160];
+   952→            int n = snprintf(b, sizeof(b),
+   953→                "SSL_DEBUG: hook: OSSL_LIB_CTX_new()=%p, OSSL_PROVIDER_load(ctx,\"default\")=%p\n",
+   954→                ctx, prov);
+   955→            (void)write(2, b, n);
+   956→        }
+   957→    }
+   958→    return ctx;
+   959→}
+   960→
+   961→void macify_force_ssl_init_success(void) {
+   962→    if (!macify_image_header) return;
+   963→    /* static base of the macOS binary is 0x100000000 */
+   964→    uint64_t slide = macify_image_header - 0x100000000;
+   965→    if (getenv("MACIFY_SSL_DEBUG")) {
+   966→        char b[128];
+   967→        int n = snprintf(b, sizeof(b), "SSL_DEBUG: force_ssl: image_header=0x%lx slide=0x%lx\n",
+   968→                (unsigned long)macify_image_header, (unsigned long)slide);
+   969→        (void)write(2, b, n);
+   970→    }
+   971→    for (int i = 0; ret_global_entries[i].name; i++) {
+   972→        uint64_t actual = ret_global_entries[i].static_addr + slide;
+   973→        int *p = (int *)actual;
+   974→        int old = *p;
+   975→        *p = 1;  /* force success */
+   976→        if (getenv("MACIFY_SSL_DEBUG")) {
+   977→            char b[256];
+   978→            int n = snprintf(b, sizeof(b), "SSL_DEBUG:  [%d] %s @ 0x%lx: %d -> 1\n",
+   979→                    i, ret_global_entries[i].name, (unsigned long)actual, old);
+   980→            (void)write(2, b, n);
+   981→        }
+   982→    }
+   983→
+   984→    /* Explicitly call OPENSSL_init_crypto and OSSL_PROVIDER_load("default")
+   985→     * to ensure the default provider is loaded and activated before SSL_CTX_new_ex.
+   986→     *
+   987→     * The function addresses are hardcoded from the static symbol table:
+   988→     *   OPENSSL_init_crypto @ 0x1005b0dd0
+   989→     *   OSSL_PROVIDER_load   @ 0x10035ac30
+   990→     *
+   991→     * We call them via function pointers computed from the slide.
+   992→     * This is safe because these functions are idempotent (RUN_ONCE guarded). */
+   993→    typedef int (*openssl_init_crypto_fn)(uint64_t, void *);
+   994→    typedef void *(*ossl_provider_load_fn)(void *, const char *);
+   995→
+   996→    openssl_init_crypto_fn init_crypto =
+   997→        (openssl_init_crypto_fn)(0x1005b0dd0UL + slide);
+   998→    ossl_provider_load_fn provider_load =
+   999→        (ossl_provider_load_fn)(0x10035ac30UL + slide);
+  1000→
+  1001→    /* Initialize OpenSSL crypto (idempotent) */
+  1002→    int crypto_ret = init_crypto(0, NULL);
+  1003→    if (getenv("MACIFY_SSL_DEBUG")) {
+  1004→        char b[128];
+  1005→        int n = snprintf(b, sizeof(b), "SSL_DEBUG: OPENSSL_init_crypto() = %d\n", crypto_ret);
+  1006→        (void)write(2, b, n);
+  1007→    }
+  1008→
+  1009→    /* Explicitly load the default provider (idempotent) */
+  1010→    void *prov = provider_load(NULL, "default");
+  1011→    if (getenv("MACIFY_SSL_DEBUG")) {
+  1012→        char b[128];
+  1013→        int n = snprintf(b, sizeof(b), "SSL_DEBUG: OSSL_PROVIDER_load(\"default\") = %p\n", prov);
+  1014→        (void)write(2, b, n);
+  1015→    }
+  1016→
+  1017→    /* Test: call EVP_CIPHER_fetch to see if ciphers are available */
+  1018→    {
+  1019→        typedef void *(*evp_cipher_fetch_fn)(void *, const char *, const char *);
+  1020→        evp_cipher_fetch_fn cipher_fetch =
+  1021→            (evp_cipher_fetch_fn)(0x100323c00UL + slide);
+  1022→        void *cipher = cipher_fetch(NULL, "AES-256-CBC", NULL);
+  1023→        if (getenv("MACIFY_SSL_DEBUG")) {
+  1024→            char b[128];
+  1025→            int n = snprintf(b, sizeof(b), "SSL_DEBUG: EVP_CIPHER_fetch(NULL,\"AES-256-CBC\",NULL) = %p\n", cipher);
+  1026→            (void)write(2, b, n);
+  1027→        }
+  1028→    }
+  1029→
+  1030→    /* Test: call ssl3_get_tls13_cipher_by_std_name to see if TLS 1.3 ciphers are found */
+  1031→    {
+  1032→        typedef void *(*ssl3_get_cipher_fn)(const char *);
+  1033→        ssl3_get_cipher_fn get_cipher =
+  1034→            (ssl3_get_cipher_fn)(0x100190d40UL + slide);
+  1035→        void *c1 = get_cipher("TLS_AES_256_GCM_SHA384");
+  1036→        void *c2 = get_cipher("TLS_CHACHA20_POLY1305_SHA256");
+  1037→        void *c3 = get_cipher("TLS_AES_128_GCM_SHA256");
+  1038→        if (getenv("MACIFY_SSL_DEBUG")) {
+  1039→            char b[256];
+  1040→            int n = snprintf(b, sizeof(b),
+  1041→                "SSL_DEBUG: ssl3_get_tls13_cipher_by_std_name:\n"
+  1042→                "  TLS_AES_256_GCM_SHA384 = %p\n"
+  1043→                "  TLS_CHACHA20_POLY1305_SHA256 = %p\n"
+  1044→                "  TLS_AES_128_GCM_SHA256 = %p\n",
+  1045→                c1, c2, c3);
+  1046→            (void)write(2, b, n);
+  1047→        }
+  1048→    }
+  1049→
+  1050→    /* Note: we previously tried inline-hooking OSSL_LIB_CTX_new to load the
+  1051→     * default provider into new libctxs, but curl doesn't call OSSL_LIB_CTX_new
+  1052→     * (it uses the global default libctx). The hook also caused a segfault
+  1053→     * due to trampoline alignment issues. Removed. */
+  1054→}
+  1055→

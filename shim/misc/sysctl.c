@@ -241,10 +241,9 @@ int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
                 return 0;
             }
             if (!oldlenp || *oldlenp < total) { errno = ENOMEM; return -1; }
-            /* Write argc (4 bytes, big-endian on macOS) */
-            uint32_t be_argc = ((uint32_t)argc >> 24) | (((uint32_t)argc >> 8) & 0xFF00) |
-                               (((uint32_t)argc << 8) & 0xFF0000) | ((uint32_t)argc << 24);
-            memcpy(oldp, &be_argc, 4);
+            /* Write argc (4 bytes, host-endian/little-endian on x86_64) */
+            uint32_t le_argc = (uint32_t)argc;
+            memcpy(oldp, &le_argc, 4);
             memcpy((char *)oldp + 4, buf, nread);
             *oldlenp = total;
             return 0;

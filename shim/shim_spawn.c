@@ -219,8 +219,16 @@ static int do_posix_spawn(pid_t *pid, const char *path,
         }
     }
 
-    posix_spawn_file_actions_destroy(&linux_fa);
-    posix_spawnattr_destroy(&linux_attr);
+    /* Call glibc's real destroy functions, NOT our overrides.
+     * Our overrides expect macOS-format buffers; these are glibc structs. */
+    {
+        static int (*real_fa_destroy)(void *) = NULL;
+        static int (*real_attr_destroy)(void *) = NULL;
+        if (!real_fa_destroy) real_fa_destroy = dlsym(RTLD_NEXT, "posix_spawn_file_actions_destroy");
+        if (!real_attr_destroy) real_attr_destroy = dlsym(RTLD_NEXT, "posix_spawnattr_destroy");
+        if (real_fa_destroy) real_fa_destroy(&linux_fa);
+        if (real_attr_destroy) real_attr_destroy(&linux_attr);
+    }
     return ret;
 }
 

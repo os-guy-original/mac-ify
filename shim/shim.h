@@ -128,7 +128,7 @@ extern int16_t macify_mapupper[256];
 #define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u
 #define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
 #define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
-#define MACOS_PTHREAD_ATTR_SIG   0x54485241
+#define MACOS_PTHREAD_ATTR_SIG   0x54485244u
 #define MACOS_PTHREAD_ONCE_INIT  0x30B1BCBA
 #define MACIFY_MAX_KEYS 256
 
@@ -152,4 +152,10 @@ struct sc_obj {
 #define TRANSLATE_ERRNO(r) do { \
     if ((r) == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) \
         errno = macify_linux_to_macos_errno(errno); \
+} while (0)
+
+/* TRANSLATE_ERRNO_SAVED — like TRANSLATE_ERRNO but uses saved errno */
+#define TRANSLATE_ERRNO_SAVED(r, saved) do { \
+    if ((r) == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) \
+        errno = macify_linux_to_macos_errno(saved); \
 } while (0)

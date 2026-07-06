@@ -477,7 +477,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
         for (uint16_t page_idx = 0; page_idx < page_count; page_idx++) {
             uint16_t page_start = page_starts[page_idx];
             fprintf(stderr, "macify:   page %u: start=0x%x\n", page_idx, page_start);
-            fflush(stderr);
+            if (getenv("MACIFY_VERBOSE")) fflush(stderr);
             if (page_start == 0xFFFF) continue;  /* DYLD_CHAINED_PTR_START_NONE */
             /* page_start=0 means fixups start at beginning of page (valid) */
 
@@ -566,9 +566,9 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                                 fprintf(stderr, "macify: fixup sym=%s -> %p (GOT=%p)\n", sym, addr, (void*)chain_ptr);
                             }
                             if (strcmp(sym, "malloc_size") == 0) {
-                                fprintf(stderr, "macify: chained fixup malloc_size at chain_ptr=%p (page+0x%lx) -> %p\n",
+                                if (getenv("MACIFY_VERBOSE")) fprintf(stderr, "macify: chained fixup malloc_size at chain_ptr=%p (page+0x%lx) -> %p\n",
                                         (void*)chain_ptr, (unsigned long)(chain_ptr - page_base), addr);
-                                fflush(stderr);
+                                if (getenv("MACIFY_VERBOSE")) fflush(stderr);
                             }
                         } else {
                             if (getenv("MACIFY_TRACE_FIXUPS")) {
