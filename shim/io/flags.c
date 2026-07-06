@@ -137,7 +137,14 @@ int open(const char *pathname, int flags, ...) {
         mode = va_arg(ap, int);
         va_end(ap);
     }
-    return real_open(pathname, linux_flags, mode);
+    int fd = real_open(pathname, linux_flags, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b), "macify: open(\"%s\", 0x%x->0x%x) = %d\n",
+                pathname ? pathname : "(null)", flags, linux_flags, fd);
+        (void)write(2, b, n);
+    }
+    return fd;
 }
 
 int madvise(void *addr, size_t length, int advice) {

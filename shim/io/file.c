@@ -153,22 +153,38 @@ static int (*real_fstat)(int, struct stat *);
 int macify_stat(const char *path, struct macos_stat *buf) __asm__("stat");
 int macify_stat(const char *path, struct macos_stat *buf) {
     if (!real_stat) real_stat = dlsym(RTLD_NEXT, "stat");
+    if (!real_stat) { errno = ENOSYS; return -1; }
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_stat(path, (struct stat *)buf);
     struct stat ls;
     int ret = real_stat(path, &ls);
     if (ret == 0) translate_stat(&ls, buf);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: stat(\"%s\") = %d mode=0x%x size=%lld\n",
+            path, ret, ret == 0 ? buf->st_mode : 0,
+            ret == 0 ? (long long)buf->st_size : 0LL);
+        (void)write(2, b, n);
+    }
     return ret;
 }
 
 int macify_lstat(const char *path, struct macos_stat *buf) __asm__("lstat");
 int macify_lstat(const char *path, struct macos_stat *buf) {
     if (!real_lstat) real_lstat = dlsym(RTLD_NEXT, "lstat");
+    if (!real_lstat) { errno = ENOSYS; return -1; }
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_lstat(path, (struct stat *)buf);
     struct stat ls;
     int ret = real_lstat(path, &ls);
     if (ret == 0) translate_stat(&ls, buf);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: lstat(\"%s\") = %d mode=0x%x size=%lld\n",
+            path, ret, ret == 0 ? buf->st_mode : 0,
+            ret == 0 ? (long long)buf->st_size : 0LL);
+        (void)write(2, b, n);
+    }
     return ret;
 }
 
@@ -260,4 +276,21 @@ struct passwd *macify_getpwnam(const char *name) {
     macos_pw.pw_expire = 0;
     macos_pw.pw_class = "";
     return (struct passwd *)&macos_pw;
+}
+
+/* access — check file accessibility. macOS and Linux have the same
+ * flag values (F_OK=0, R_OK=4, W_OK=2, X_OK=1), so we can pass through
+ * directly to glibc. We override to add tracing and ensure it works. */
+int macify_access(const char *path, int mode) __asm__("access");
+int macify_access(const char *path, int mode) {
+    static int (*real_access)(const char *, int) = NULL;
+    if (!real_access) real_access = dlsym(RTLD_NEXT, "access");
+    if (!real_access) { errno = ENOSYS; return -1; }
+    int ret = real_access(path, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: access(\"%s\", %d) = %d\n", path, mode, ret);
+        (void)write(2, b, n);
+    }
+    return ret;
 }
