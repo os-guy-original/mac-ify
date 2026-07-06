@@ -48,11 +48,17 @@ Get `rclone_macos` (a macOS Go binary) to run on Linux via the macify translatio
 - The crash appears to be a signal delivery issue (SIGSEGV at adr=0 with rip at a non-memory-accessing instruction)
 
 ## Next Steps
-- The crash is at glibc's futex wrapper, AFTER the syscall. The `cmp` instruction at rip doesn't access memory, so the SIGSEGV is likely from signal delivery (kernel trying to deliver a signal and failing).
-- Possible causes:
-  1. Go's runtime sets up a signal stack via a path we don't intercept
-  2. The signal stack is being corrupted
-  3. Go's runtime is in a bad state due to our kqueue/kevent stubs not behaving correctly
-- Try: implement a more complete kqueue/kevent emulation (using epoll actually)
-- Try: check if Go's runtime expects kevent to block (return only after events arrive)
-- Try: trace ALL signals to see what's being delivered
+- The crash is SIGSEGV with si_code=128 (SI_KERNEL) at adr=0. This means the kernel tried to deliver a signal and failed (likely signal stack issue).
+- The crash happens on the main thread (rsp in main stack range), on g0/systemstack.
+- The rip is at glibc's futex wrapper (FUTEX_WAKE), AFTER the syscall — the SIGSEGV was delivered during/after the futex syscall.
+- Key observations:
+  1. The SIGILL handler is NEVER called — Go 1.24 on darwin uses Libc for all syscalls, not raw syscalls
+  2. sigaltstack is only called with ss=NULL (queries) — Go never sets a new signal stack
+  3. Our 256KB signal stack (static array in shim) is the active one
+  4. Increasing to 1MB mmap'd stack caused an EARLIER crash (before kqueue)
+- Possible next investigations:
+  1. Check if Go's gsignal stack allocation is failing (gsignal.stack might be NULL)
+  2. Check if the signal stack is being unmapped by something
+  3. Try implementing a real kqueue emulation using epoll (track fds, return actual events)
+  4. Check if Go's runtime calls `stackalloc` or similar that might fail
+  5. The crash might be from Go's runtime calling a Libc function that uses futex internally, and the futex address is in a region that gets unmapped
