@@ -131,6 +131,10 @@ void macify_CFRelease(void *cf) {
         free(arr);
     } else if (o->tag == SC_TAG_DICT) {
         macify_CFRelease(o->data);
+    } else if (o->tag == SC_TAG_DATA) {
+        free(o->data);
+    } else if (o->tag == SC_TAG_BOOL || o->tag == SC_TAG_NULL) {
+        /* No payload to free — just free the object */
     }
     /* SC_TAG_STORE has no payload */
     free(o);
@@ -426,24 +430,33 @@ void CFArrayAppendValue(void *arr, const void *val) {
 }
 
 void *CFDataCreate(void *alloc, const void *bytes, long length) {
-    (void)alloc; (void)length;
-    return bytes ? (void *)bytes : NULL;
+    (void)alloc;
+    if (!bytes && length > 0) return NULL;
+    struct sc_obj *d = (struct sc_obj *)calloc(1, sizeof(*d));
+    if (!d) return NULL;
+    d->tag = SC_TAG_DATA;
+    d->count = (uint32_t)length;
+    if (length > 0) {
+        d->data = malloc(length);
+        if (d->data) memcpy(d->data, bytes, length);
+    }
+    return d;
 }
 
-/* CFDataGetLength — return the length of a CFData.
- * Since our CFDataCreate returns the raw bytes pointer, we can't know
- * the length. Return 0 as a safe default. */
+/* CFDataGetLength — return the length of a CFData. */
 long CFDataGetLength(const void *data) {
-    (void)data;
-    return 0;
+    if (!data) return 0;
+    struct sc_obj *o = (struct sc_obj *)data;
+    return (o->tag == SC_TAG_DATA) ? (long)o->count : 0;
 }
 
 /* CFDataGetBytes — see cf_compat.c (avoids system header conflict) */
 
-/* CFDataGetBytePtr — return pointer to the bytes. Since our CFData
- * IS the bytes pointer, just return it. */
+/* CFDataGetBytePtr — return pointer to the bytes. */
 const void *CFDataGetBytePtr(const void *data) {
-    return data;
+    if (!data) return NULL;
+    struct sc_obj *o = (struct sc_obj *)data;
+    return (o->tag == SC_TAG_DATA) ? o->data : NULL;
 }
 
 /* CFDataCreateMutable — create a mutable CFData. Return NULL. */
@@ -538,10 +551,17 @@ long CFGetRetainCount(const void *cf) {
     return 1;
 }
 
-/* CFStringCreateWithCStringNoCopy — create a CFString without copying. */
+/* CFStringCreateWithCStringNoCopy — create a CFString without copying.
+ * Returns a proper sc_obj wrapper pointing to the original C string. */
 void *CFStringCreateWithCStringNoCopy(void *alloc, const char *cStr, int encoding, void *contentsDeallocator) {
     (void)alloc; (void)encoding; (void)contentsDeallocator;
-    return (void *)cStr;  /* just return the C string pointer */
+    if (!cStr) return NULL;
+    struct sc_obj *s = (struct sc_obj *)calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->tag = SC_TAG_STRING;
+    s->count = (uint32_t)strlen(cStr);
+    s->data = (void *)cStr;  /* no copy — points to caller's buffer */
+    return s;
 }
 
 /* CFStringCreateWithFormat, CFStringGetCStringPtr — see cf_compat.c */

@@ -139,6 +139,9 @@ extern int16_t macify_mapupper[256];
 #define SC_TAG_ARRAY      0x5C02  /* fake CFArray */
 #define SC_TAG_DICT       0x5C03  /* fake CFDictionary */
 #define SC_TAG_STORE      0x5C04  /* fake SCDynamicStoreRef */
+#define SC_TAG_DATA       0x5C05  /* fake CFData */
+#define SC_TAG_BOOL       0x5C06  /* fake CFBoolean */
+#define SC_TAG_NULL       0x5C07  /* fake CFNull */
 
 struct sc_obj {
     uint32_t tag;       /* one of SC_TAG_* */

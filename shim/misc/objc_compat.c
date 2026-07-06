@@ -321,21 +321,41 @@ void *macify_CFStringCreateWithBytes(void *alloc, const void *bytes,
     return s;
 }
 
-/* CFBooleanCreate — create a CFBoolean. Return a sentinel. */
-static char cf_bool_true_sentinel[16] = {1};
-static char cf_bool_false_sentinel[16] = {0};
+/* CFBooleanCreate — create a CFBoolean using proper sc_obj. */
 void *CFBooleanCreate(void *alloc, int value) {
     (void)alloc;
-    return value ? cf_bool_true_sentinel : cf_bool_false_sentinel;
+    struct sc_obj *b = (struct sc_obj *)calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    b->tag = SC_TAG_BOOL;
+    b->count = value ? 1 : 0;
+    return b;
 }
 
-/* kCFBooleanTrue / kCFBooleanFalse — global CFBoolean refs. */
-void *kCFBooleanTrue = cf_bool_true_sentinel;
-void *kCFBooleanFalse = cf_bool_false_sentinel;
+/* kCFBooleanTrue / kCFBooleanFalse — global CFBoolean refs.
+ * These are allocated once (leaked intentionally — globals never freed). */
+static void *alloc_bool(int v) {
+    struct sc_obj *b = (struct sc_obj *)calloc(1, sizeof(*b));
+    if (b) { b->tag = SC_TAG_BOOL; b->count = v ? 1 : 0; }
+    return b;
+}
+void *kCFBooleanTrue = NULL;
+void *kCFBooleanFalse = NULL;
 
 /* kCFNull — global CFNull reference. */
-static char cf_null_sentinel[16] = {0};
-void *kCFNull = cf_null_sentinel;
+static void *alloc_null(void) {
+    struct sc_obj *n = (struct sc_obj *)calloc(1, sizeof(*n));
+    if (n) { n->tag = SC_TAG_NULL; n->count = 0; }
+    return n;
+}
+void *kCFNull = NULL;
+
+/* Initialize global CF sentinels — called from constructor */
+__attribute__((constructor))
+static void init_cf_globals(void) {
+    if (!kCFBooleanTrue) kCFBooleanTrue = alloc_bool(1);
+    if (!kCFBooleanFalse) kCFBooleanFalse = alloc_bool(0);
+    if (!kCFNull) kCFNull = alloc_null();
+}
 
 /* ── LaunchServices stub ────────────────────────────────────────
  * LSCopyApplicationURLsForBundleIdentifier — return NULL (no apps found). */

@@ -53,30 +53,28 @@ char *___progname = "macify-app";
 char *__progname = "macify-app";
 
 /* __stack_chk_guard — stack canary value global.
- * 
- * On macOS, __stack_chk_guard is a global variable (not function)
- * that holds the stack canary value. GCC/clang code reads this
- * variable and puts its value on the stack at function entry, then
- * checks it at function exit.
- * 
- * On Linux x86_64, glibc uses %fs:0x28 (TLS) for the canary instead
- * of a global variable. But macOS binaries reference __stack_chk_guard
- * as a regular symbol, so we need to provide it.
- * 
- * We initialize it with a random-ish value and also sync it from
- * glibc's TLS canary at startup.
- */
+ *
+ * On macOS, __stack_chk_guard is a global variable that holds the stack
+ * canary. We sync it from glibc's TLS canary (%fs:0x28) at startup for
+ * proper randomization. */
+uintptr_t __stack_chk_guard = 0;
 
-/* Initialize with a non-zero canary value. The exact value doesn't
- * matter much for functionality — it just needs to be consistent
- * between function entry and exit. */
-uintptr_t __stack_chk_guard = 0x1234567890ABCDEFu;
+uintptr_t _STACK_CHK_GUARD = 0;
 
-/* Also provide _STACK_CHK_GUARD (some macOS code references this variant) */
-uintptr_t _STACK_CHK_GUARD = 0x1234567890ABCDEFu;
+/* Sync canary from glibc's TLS at constructor time */
+__attribute__((constructor))
+static void init_stack_chk_guard(void) {
+    uintptr_t canary;
+    __asm__ volatile("movq %%fs:0x28, %0" : "=r"(canary));
+    if (canary == 0) canary = 0x1234567890ABCDEFu;  /* fallback */
+    __stack_chk_guard = canary;
+    _STACK_CHK_GUARD = canary;
+}
 
 void __stack_chk_fail(void) {
-    fprintf(stderr, "macify: stack smashing detected\n");
+    /* Use write() not fprintf() — async-signal-safe */
+    const char msg[] = "macify: stack smashing detected\n";
+    (void)write(2, msg, sizeof(msg) - 1);
     abort();
 }
 
