@@ -44,14 +44,19 @@ static void macify_init_stdio(void) {
 
     /* Allocate a dedicated signal stack (256KB) so our crash handler can
      * run even if the main stack overflows. Without this, a stack overflow
-     * kills the process silently (signal handler can't push a frame). */
-    static char sigstack[256 * 1024] __attribute__((aligned(4096)));
-    stack_t ss;
-    ss.ss_sp = sigstack;
-    ss.ss_size = sizeof(sigstack);
-    ss.ss_flags = 0;
-    /* Use raw syscall to bypass our own sigaltstack override */
-    syscall(131, &ss, NULL);  /* 131 = sigaltstack */
+     * kills the process silently (signal handler can't push a frame).
+     * Use mmap instead of a static array to ensure the stack is always
+     * mapped (static arrays in shared libs might not be mapped in some cases). */
+    char *sigstack = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (sigstack != MAP_FAILED) {
+        stack_t ss;
+        ss.ss_sp = sigstack;
+        ss.ss_size = 256 * 1024;
+        ss.ss_flags = 0;
+        /* Use raw syscall to bypass our own sigaltstack override */
+        syscall(131, &ss, NULL);  /* 131 = sigaltstack */
+    }
 
     /* Install our crash handler via raw rt_sigaction syscall (13).
      * Use SA_ONSTACK so the handler runs on the alternate signal stack.
@@ -74,6 +79,10 @@ static void macify_init_stdio(void) {
     if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGABRT failed: %ld\n",r); write(2,b,n); }
     r = syscall(13, 8,  &sa, NULL, 8);  /* SIGFPE */
     if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGFPE failed: %ld\n",r); write(2,b,n); }
+    r = syscall(13, 16, &sa, NULL, 8);  /* SIGSTKFLT */
+    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGSTKFLT failed: %ld\n",r); write(2,b,n); }
+    r = syscall(13, 12, &sa, NULL, 8);  /* SIGSYS */
+    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGSYS failed: %ld\n",r); write(2,b,n); }
 
     /* Register pthread_atfork handler to immediately exit forked children.
      * glibc's NSS subsystem calls clone() internally (bypassing our fork
@@ -133,8 +142,14 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
         int nibble = (fault_addr >> (60 - i*4)) & 0xf;
         buf[12+i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
     }
-    buf[28] = '\n';
-    write(2, buf, 29);
+    buf[28] = ' ';
+    buf[29] = 'c'; buf[30] = 'o'; buf[31] = 'd'; buf[32] = 'e'; buf[33] = '=';
+    int code = info->si_code;
+    buf[34] = '0' + (code / 100) % 10;
+    buf[35] = '0' + (code / 10) % 10;
+    buf[36] = '0' + code % 10;
+    buf[37] = '\n';
+    write(2, buf, 38);
 
     /* Helper to print a register */
     #define PRINT_REG(name, val) do { \
@@ -183,6 +198,29 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     } else {
         /* Go binary: print runtime state instead of stack dump.
          * Go 1.26 m struct: m+0x00=g0, m+0x48=gsignal, m+0xb8=curg */
+
+        /* Read gs:0x30 directly via inline asm to verify GS base is intact */
+        uint64_t gs_val = 0;
+        __asm__ volatile("movq %%gs:0x30, %0" : "=r"(gs_val));
+        write(2, "gs:0x30=", 8);
+        for (int i = 0; i < 16; i++) {
+            int nibble = (gs_val >> (60 - i*4)) & 0xf;
+            buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+        }
+        buf[16] = '\n';
+        write(2, buf, 17);
+
+        /* Also read FS base for comparison */
+        uint64_t fs_val = 0;
+        __asm__ volatile("movq %%fs:0x30, %0" : "=r"(fs_val));
+        write(2, "fs:0x30=", 8);
+        for (int i = 0; i < 16; i++) {
+            int nibble = (fs_val >> (60 - i*4)) & 0xf;
+            buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+        }
+        buf[16] = '\n';
+        write(2, buf, 17);
+
         uint64_t g = 0;
         if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL)
             g = *(volatile uint64_t *)g_tls_g_addr;
@@ -227,7 +265,93 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             }
             buf[16] = '\n';
             write(2, buf, 17);
+
+            /* Print m.locks (at m+0x108 for Go 1.24, 4 bytes int32) */
+            int32_t mlocks = *(volatile int32_t *)(m + 0x108);
+            write(2, "m.locks=", 8);
+            /* Print as signed 32-bit */
+            char lb[24];
+            int ln = 0;
+            if (mlocks < 0) { lb[ln++] = '-'; mlocks = -mlocks; }
+            char tmp[12]; int tn = 0;
+            if (mlocks == 0) tmp[tn++] = '0';
+            while (mlocks > 0) { tmp[tn++] = '0' + (mlocks % 10); mlocks /= 10; }
+            while (tn > 0) lb[ln++] = tmp[--tn];
+            lb[ln++] = '\n';
+            write(2, lb, ln);
+
+            /* Print g0.stack.lo/hi/stackguard0/stackguard1 to check stack overflow */
+            /* g.stack is at g+0x0 (lo) and g+0x8 (hi).
+             * g.stackguard0 is at g+0x10, stackguard1 at g+0x18. */
+            uint64_t stacklo = *(volatile uint64_t *)(g + 0x0);
+            uint64_t stackhi = *(volatile uint64_t *)(g + 0x8);
+            uint64_t stackguard0 = *(volatile uint64_t *)(g + 0x10);
+            uint64_t stackguard1 = *(volatile uint64_t *)(g + 0x18);
+            uint64_t cur_rsp = (uint64_t)regs[REG_RSP];
+            char sb[160];
+            int sn = snprintf(sb, sizeof(sb),
+                "g.stack: lo=0x%lx hi=0x%lx guard0=0x%lx guard1=0x%lx rsp=0x%lx (overflow=%d)\n",
+                (unsigned long)stacklo, (unsigned long)stackhi,
+                (unsigned long)stackguard0, (unsigned long)stackguard1,
+                (unsigned long)cur_rsp,
+                cur_rsp <= stackguard0);
+            write(2, sb, sn);
         }
+
+        /* Print stack around rsp to understand what the CPU was doing.
+         * For Go binaries, dump 16 qwords above and below rsp. */
+        write(2, "stack:\n", 7);
+        uint64_t sp_val = (uint64_t)regs[REG_RSP];
+        for (int s = -8; s < 24; s++) {
+            uint64_t addr = sp_val + (int64_t)s * 8;
+            /* Skip if address looks invalid */
+            if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
+            uint64_t val = *(volatile uint64_t *)addr;
+            /* sp+N marker */
+            char marker[8];
+            if (s < 0) {
+                marker[0]='s';marker[1]='p';marker[2]='-';
+                marker[3] = (-s) < 10 ? '0'+(-s) : 'a'+(-s)-10;
+                marker[4]=':';marker[5]=' ';
+            } else if (s == 0) {
+                marker[0]='s';marker[1]='p';marker[2]='+';marker[3]='0';
+                marker[4]=':';marker[5]=' ';
+            } else {
+                int ss = s;
+                marker[0]='s';marker[1]='p';marker[2]='+';
+                marker[3] = (ss/10) ? '0'+(ss/10) : '0';
+                marker[4] = '0'+(ss%10);
+                marker[5]=':';marker[6]=' ';
+            }
+            write(2, marker, 6);
+            /* addr */
+            for (int i = 0; i < 16; i++) {
+                int nibble = (addr >> (60 - i*4)) & 0xf;
+                buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+            }
+            buf[16] = ':';
+            buf[17] = ' ';
+            write(2, buf, 18);
+            /* value */
+            for (int i = 0; i < 16; i++) {
+                int nibble = (val >> (60 - i*4)) & 0xf;
+                buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
+            }
+            buf[16] = '\n';
+            write(2, buf, 17);
+        }
+    }
+
+    /* Dump /proc/self/maps to identify library addresses */
+    write(2, "maps:\n", 6);
+    int maps_fd = open("/proc/self/maps", 0);  /* O_RDONLY = 0 */
+    if (maps_fd >= 0) {
+        char mbuf[4096];
+        ssize_t mn;
+        while ((mn = read(maps_fd, mbuf, sizeof(mbuf))) > 0) {
+            write(2, mbuf, mn);
+        }
+        close(maps_fd);
     }
 
     _exit(128 + sig);
@@ -237,6 +361,11 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
 static int macos_sig_to_linux(int macos_sig);
 
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
+    if (getenv("MACIFY_TRACE_SIGNAL")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: sigaction(sig=%d, act=%p, oldact=%p) from %p\n",
+                signum, act, oldact, __builtin_return_address(0));
+        (void)write(2, b, n);
+    }
     /* Translate macOS signal number to Linux signal number — but ONLY
      * if the caller is macOS code. macify's own code uses Linux signal
      * numbers and should not be translated. */
@@ -307,20 +436,28 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
          * Note: at this point, signum is already translated to Linux numbers.
          * Linux SIGSEGV=11, SIGBUS=7, SIGILL=4. */
         if (signum == 11 /*SIGSEGV*/ || signum == 7 /*SIGBUS*/) {
-            linux_act.sa_sigaction = macify_crash_handler;
-            linux_act.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+            /* For macOS callers: install our crash handler.
+             * For non-macOS callers (macify itself): pass through. */
+            if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+                linux_act.sa_sigaction = macify_crash_handler;
+                linux_act.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+            }
             p_linux_act = &linux_act;
         } else if (signum == SIGILL) {
-            /* NEVER let the macOS binary replace our SIGILL handler.
-             * Our SIGILL handler is critical for syscall translation
-             * (the slow path uses UD2 instructions to trigger SIGILL).
-             * If the macOS binary installs its own SIGILL handler,
-             * syscall translation breaks and the binary crashes.
+            /* Only block SIGILL installation from macOS binary callers.
+             * macify's own sigaction(SIGILL, sigill_handler, ...) must go
+             * through, otherwise syscall translation (UD2 → SIGILL) breaks.
+             *
+             * For macOS binary callers: NEVER let them replace our SIGILL
+             * handler. Our SIGILL handler is critical for syscall translation.
              * We silently ignore the sigaction call and keep our handler. */
-            if (getenv("MACIFY_SHIM_DEBUG")) {
-                fprintf(stderr, "macify: sigaction(SIGILL) - keeping our handler (syscall translation)\n");
+            if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+                if (getenv("MACIFY_SHIM_DEBUG")) {
+                    fprintf(stderr, "macify: sigaction(SIGILL) from macOS text - keeping our handler (syscall translation)\n");
+                }
+                p_linux_act = NULL;  /* don't install */
             }
-            p_linux_act = NULL;  /* don't install */
+            /* For non-macOS callers (macify itself): pass through normally */
         } else {
             /* For all other signals: ensure SA_ONSTACK is set.
              * Go's runtime requires ALL signal handlers to use SA_ONSTACK.
@@ -632,6 +769,20 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
  * for gsignal goroutine. Without it, Go crashes in systemstack. */
 int macify_sigaltstack(const void *ss, void *oss) __asm__("sigaltstack");
 int macify_sigaltstack(const void *ss, void *oss) {
+    if (getenv("MACIFY_TRACE_SIGNAL")) {
+        char b[256];
+        if (ss) {
+            const uint8_t *m = (const uint8_t *)ss;
+            void *sp = *(void *const *)m;
+            size_t sz = *(const size_t *)(m + 8);
+            int fl = *(const int *)(m + 16);
+            snprintf(b, sizeof(b), "macify: sigaltstack(ss={sp=%p size=%zu flags=0x%x}, oss=%p) from %p\n",
+                    sp, sz, fl, oss, __builtin_return_address(0));
+        } else {
+            snprintf(b, sizeof(b), "macify: sigaltstack(ss=NULL, oss=%p) from %p\n", oss, __builtin_return_address(0));
+        }
+        (void)write(2, b, strlen(b));
+    }
     stack_t linux_ss, linux_oss;
     stack_t *p_ss = NULL, *p_oss = NULL;
 
@@ -725,15 +876,17 @@ static volatile int macify_go_signal_ready = 0;
 static int go_is_ready(void) {
     if (macify_go_signal_ready) return 1;
     /* Check if Go has written to tls_g (meaning rt0_go has run)
-     * AND m.gsignal is allocated (meaning signal handler can run safely). */
+     * AND m.gsignal is allocated (meaning signal handler can run safely).
+     * Go 1.24 m struct: m+0x00=g0, m+0x48=gsignal */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
         uint64_t g = *(volatile uint64_t *)g_tls_g_addr;
         if (g != 0) {
-            /* Check m.gsignal: g.m is at g+0x30, m.gsignal is at m+0xb8 */
+            /* g.m is at g+0x30 */
             uint64_t m = *(volatile uint64_t *)(g + 0x30);
             if (m != 0) {
-                uint64_t gsignal = *(volatile uint64_t *)(m + 0xb8);
+                /* m.gsignal is at m+0x48 */
+                uint64_t gsignal = *(volatile uint64_t *)(m + 0x48);
                 if (gsignal != 0) {
                     macify_go_signal_ready = 1;
                     return 1;
@@ -745,6 +898,11 @@ static int go_is_ready(void) {
 }
 
 void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
+    if (getenv("MACIFY_TRACE_SIGNAL")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: go_signal_wrapper(sig=%d) go_ready=%d\n",
+                sig, macify_go_signal_ready);
+        (void)write(2, b, n);
+    }
     /* Restore GS base before calling Go's handler.
      * Use both wrgsbase + arch_prctl to keep CPU MSR and shadow in sync. */
     extern uint64_t g_tls_g_addr;
@@ -764,9 +922,28 @@ void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
         }
     }
     /* Go is NOT ready — defer the signal by re-blocking it.
-     * The signal will be re-delivered when Go unblocks it via sigprocmask. */
+     * The signal will be re-delivered when Go unblocks it via sigprocmask.
+     * CRITICAL: use the real glibc sigset_t (128 bytes), not the 4-byte
+     * macOS sigset. Our sigemptyset/sigaddset overrides write only 4 bytes,
+     * leaving 124 bytes uninitialized — glibc reads all 128 bytes. */
     sigset_t mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, sig);
-    sigprocmask(SIG_BLOCK, &mask, NULL);
+    /* Manually zero the entire 128-byte sigset, then set the bit */
+    memset(&mask, 0, sizeof(mask));
+    /* Use the real glibc sigaddset, not our override (which writes only 4 bytes) */
+    static int (*real_sigaddset_glibc)(sigset_t *, int) = NULL;
+    if (!real_sigaddset_glibc) real_sigaddset_glibc = dlsym(RTLD_NEXT, "sigaddset");
+    if (real_sigaddset_glibc) {
+        real_sigaddset_glibc(&mask, sig);
+    } else {
+        /* Fallback: set bit manually using glibc's bit layout (sig - 1) */
+        unsigned long *bits = (unsigned long *)&mask;
+        bits[(sig - 1) / (sizeof(unsigned long) * 8)] |= (1UL << ((sig - 1) % (sizeof(unsigned long) * 8)));
+    }
+    /* Call glibc's sigprocmask directly (bypass our override which might
+     * mistranslate when called from the shim). */
+    static int (*real_sigprocmask_glibc)(int, const sigset_t *, sigset_t *) = NULL;
+    if (!real_sigprocmask_glibc) real_sigprocmask_glibc = dlsym(RTLD_NEXT, "sigprocmask");
+    if (real_sigprocmask_glibc) {
+        real_sigprocmask_glibc(SIG_BLOCK, &mask, NULL);
+    }
 }

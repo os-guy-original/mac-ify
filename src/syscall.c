@@ -529,7 +529,7 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
 
     /* Debug: count SIGILL handler invocations */
     g_slow_path_calls++;
-    if (g_verbose && g_slow_path_calls <= 5) {
+    if (getenv("MACIFY_TRACE_SIGILL") || (g_verbose && g_slow_path_calls <= 5)) {
         fprintf(stderr, "macify: SIGILL #%lu: bsd_nr=%u (rax=0x%llx)\n",
                 g_slow_path_calls, bsd_nr, (unsigned long long)macos_nr);
     }

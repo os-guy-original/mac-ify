@@ -146,17 +146,30 @@ int pthread_cond_timedwait_relative_np(pthread_cond_t *c, pthread_mutex_t *m,
  * main thread instead of querying glibc. */
 void *macify_main_stack_base = NULL;
 size_t macify_main_stack_size = 0;
+static pthread_t macify_main_thread_id = {0};
+static int macify_main_thread_id_set = 0;
 
 void __macify_set_stack_info(void *base, size_t size) {
     macify_main_stack_base = base;
     macify_main_stack_size = size;
+    /* Record the main thread's pthread_t so we can identify it later. */
+    if (!macify_main_thread_id_set) {
+        macify_main_thread_id = pthread_self();
+        macify_main_thread_id_set = 1;
+    }
+}
+
+/* Returns 1 if the current thread is the main thread, 0 otherwise. */
+static int is_main_thread(void) {
+    if (!macify_main_thread_id_set) return 0;
+    return pthread_equal(pthread_self(), macify_main_thread_id);
 }
 
 void *pthread_get_stackaddr_np(pthread_t thread) {
     /* For the main thread, return our allocated stack top. For other
-     * threads, query glibc. We detect the main thread by checking if
-     * thread == pthread_self() AND our stack info has been set. */
-    if (macify_main_stack_base && thread == pthread_self()) {
+     * threads, query glibc. We detect the main thread by comparing
+     * thread to the recorded main thread ID. */
+    if (macify_main_stack_base && pthread_equal(thread, macify_main_thread_id)) {
         return (char *)macify_main_stack_base + macify_main_stack_size;
     }
     pthread_attr_t attr;
@@ -169,7 +182,11 @@ void *pthread_get_stackaddr_np(pthread_t thread) {
 }
 
 size_t pthread_get_stacksize_np(pthread_t thread) {
-    if (macify_main_stack_base && thread == pthread_self()) {
+    if (macify_main_stack_base && pthread_equal(thread, macify_main_thread_id)) {
+        if (getenv("MACIFY_TRACE_PTHREAD")) {
+            char b[160]; int n = snprintf(b, sizeof(b), "macify: pthread_get_stacksize_np(thread=%p main=%p) -> %zu (main thread)\n", thread, macify_main_thread_id, macify_main_stack_size);
+            (void)write(2, b, n);
+        }
         return macify_main_stack_size;
     }
     pthread_attr_t attr;
@@ -177,6 +194,10 @@ size_t pthread_get_stacksize_np(pthread_t thread) {
     pthread_getattr_np(thread, &attr);
     pthread_attr_getstacksize(&attr, &stacksize);
     pthread_attr_destroy(&attr);
+    if (getenv("MACIFY_TRACE_PTHREAD")) {
+        char b[160]; int n = snprintf(b, sizeof(b), "macify: pthread_get_stacksize_np(thread=%p) -> %zu (non-main)\n", thread, stacksize);
+        (void)write(2, b, n);
+    }
     return stacksize;
 }
 /* Self-contained pthread TLS implementation.
@@ -695,6 +716,10 @@ int pthread_attr_init(pthread_attr_t *attr) {
     real_attr_init(glibc_attr);
     ma->sig = MACOS_PTHREAD_ATTR_SIG;
     ma->opaque = glibc_attr;
+    if (getenv("MACIFY_TRACE_PTHREAD")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_attr_init(attr=%p) -> glibc_attr=%p\n", attr, glibc_attr);
+        (void)write(2, b, n);
+    }
     return 0;
 }
 
@@ -712,12 +737,22 @@ int pthread_attr_destroy(pthread_attr_t *attr) {
 
 int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize) {
     pthread_attr_t *glibc_attr = get_glibc_attr((struct macos_pthread_attr *)attr);
-    return real_attr_setstacksize(glibc_attr, stacksize);
+    int r = real_attr_setstacksize(glibc_attr, stacksize);
+    if (getenv("MACIFY_TRACE_PTHREAD")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_attr_setstacksize(attr=%p, size=%zu)\n", attr, stacksize);
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize) {
     pthread_attr_t *glibc_attr = get_glibc_attr((struct macos_pthread_attr *)(uintptr_t)attr);
-    return real_attr_getstacksize(glibc_attr, stacksize);
+    int r = real_attr_getstacksize(glibc_attr, stacksize);
+    if (getenv("MACIFY_TRACE_PTHREAD")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_attr_getstacksize(attr=%p) -> size=%zu\n", attr, stacksize ? *stacksize : 0);
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 int pthread_attr_setguardsize(pthread_attr_t *attr, size_t guardsize) {
@@ -787,19 +822,67 @@ static void *thread_start_wrapper(void *p) {
         sigaltstack(&ss, NULL);
     }
 
-    /* For Go binaries: set GS base on this new thread.
-     * Use both wrgsbase + arch_prctl to keep CPU MSR and shadow in sync. */
+    /* For Go binaries: set up a PER-THREAD TLS area for the g pointer.
+     *
+     * Go's runtime stores the current g pointer at gs:0x30 (TLS). On macOS,
+     * the OS provides per-thread TLS via gs:0x30. On Linux, our setup_gs_base
+     * sets GS base so that gs:0x30 returns &tls_g (a global).
+     *
+     * The problem: tls_g is a GLOBAL. When a new thread's crosscall1 writes
+     * the new g pointer to gs:0x30, it OVERWRITES the global, which also
+     * affects the main thread. This causes race conditions on m0.locks.
+     *
+     * Fix: allocate a per-thread TLS area (just 8 bytes for the g pointer).
+     * Set the new thread's GS base so that gs:0x30 points to this per-thread
+     * area. Now crosscall1 writes the new g pointer to the per-thread area,
+     * not the global. The main thread's gs:0x30 still returns the global,
+     * which has the main thread's g0. */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
-        uint64_t gs_base = g_tls_g_addr - 0x30;
-        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
-        syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+        /* Allocate a per-thread 0x100-byte TLS area. Go accesses gs:0x30 to
+         * read/write the current g pointer. We put the per-thread g pointer
+         * slot at offset 0x30 within this area (so gs_base = area, gs:0x30 = area[0x30]).
+         * Other gs: offsets within 0..0xff are also valid (zeroed). */
+        char *tls_area = mmap(NULL, 0x100, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (tls_area != MAP_FAILED) {
+            /* Zero the area */
+            memset(tls_area, 0, 0x100);
+            /* Set GS base = tls_area. Then gs:0x30 = *(tls_area + 0x30) = 0 (initially).
+             * Go's crosscall1 will write the new g pointer to gs:0x30 (= tls_area+0x30). */
+            uint64_t gs_base = (uint64_t)(uintptr_t)tls_area;
+            __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+            syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
+            if (getenv("MACIFY_TRACE_PTHREAD")) {
+                /* Verify GS base was set */
+                uint64_t verify = 0;
+                syscall(158, 0x1004, (uint64_t)&verify);  /* ARCH_GET_GS */
+                uint64_t gs_val = 0;
+                __asm__ volatile("movq %%gs:0x30, %0" : "=r"(gs_val));
+                char b[256];
+                int n = snprintf(b, sizeof(b),
+                    "macify: thread_start_wrapper: set gs_base=0x%lx tls_area=%p arch_verify=0x%lx gs:0x30=0x%lx (expected 0)\n",
+                    (unsigned long)gs_base, tls_area, (unsigned long)verify, (unsigned long)gs_val);
+                (void)write(2, b, n);
+            }
+        }
     }
+
+    /* Block SIGURG on the new thread to prevent async preemption
+     * signals from arriving before Go's runtime is ready. */
     if (g_tls_g_addr) {
         sigset_t mask;
-        sigemptyset(&mask);
-        sigaddset(&mask, 23);  /* SIGURG */
-        sigprocmask(SIG_BLOCK, &mask, NULL);
+        memset(&mask, 0, sizeof(mask));
+        static int (*real_sigaddset_glibc)(sigset_t *, int) = NULL;
+        if (!real_sigaddset_glibc) real_sigaddset_glibc = dlsym(RTLD_NEXT, "sigaddset");
+        if (real_sigaddset_glibc) {
+            real_sigaddset_glibc(&mask, 23);  /* SIGURG */
+        }
+        static int (*real_sigprocmask_glibc)(int, const sigset_t *, sigset_t *) = NULL;
+        if (!real_sigprocmask_glibc) real_sigprocmask_glibc = dlsym(RTLD_NEXT, "sigprocmask");
+        if (real_sigprocmask_glibc) {
+            real_sigprocmask_glibc(SIG_BLOCK, &mask, NULL);
+        }
     }
 
     return routine(arg);
@@ -813,10 +896,10 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     if (!real_pthread_create) {
         real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
     }
-    if (getenv("MACIFY_NET_DEBUG")) {
+    if (getenv("MACIFY_TRACE_PTHREAD") || getenv("MACIFY_NET_DEBUG")) {
         char b[128];
-        snprintf(b, sizeof(b), "pthread_create: start_routine=%p arg=%p\n",
-                 (void *)start_routine, arg);
+        snprintf(b, sizeof(b), "macify: pthread_create(start_routine=%p arg=%p attr=%p)\n",
+                 (void *)start_routine, arg, attr);
         (void)write(2, b, strlen(b));
     }
     pthread_attr_t *glibc_attr = NULL;

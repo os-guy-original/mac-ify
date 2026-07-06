@@ -204,6 +204,26 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * test in rt0_go passes. For non-Go binaries, a zeroed page is used. */
     setup_gs_base(entry);
 
+    /* Map the macOS "comm page" at 0x7fffffe00000.
+     * On macOS, the kernel maps a read-only page at 0x7fffffe00000 containing
+     * system info (time, CPU info, etc.). Go's runtime reads from this page
+     * (e.g., at offset 0x1e to check the macOS version).
+     * On Linux, this page doesn't exist, so Go crashes with SIGSEGV.
+     * We map a zeroed page at this address. Go's checks (like cmp ax, 0x0d)
+     * will see 0 and take the appropriate branch. */
+    void *comm_page = mmap((void *)0x7fffffe00000, 0x1000,
+                           PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                           -1, 0);
+    if (comm_page == MAP_FAILED && g_verbose) {
+        /* If mapping failed (e.g., address in use), try without NOREPLACE */
+        comm_page = mmap((void *)0x7fffffe00000, 0x1000,
+                         PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                         -1, 0);
+    }
+    if (g_verbose) {
+        fprintf(stderr, "macify: comm page at 0x7fffffe00000 = %p\n", comm_page);
+    }
+
     /* For Go binaries: block only SIGURG (async preemption signal).
      * On kernel 5.10, we blocked ALL signals to prevent GS base clobbering
      * during signal delivery. But on kernel 7.0+, GS base survives signal
