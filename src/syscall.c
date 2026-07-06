@@ -1166,18 +1166,18 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
         memcpy(&t2[18], &t2_jmp_back, 4);
         memcpy(base + t2_off, t2, 22);
 
-        /* Patch 14 bytes: test + je + jmp + nop*4
-         * je to trampoline1 (NULL path)
-         * jmp to trampoline2 (non-NULL path) */
-        int8_t je_offset = (int8_t)(t1_off - (i + 5));
-        int32_t jmp_offset = (int32_t)(t2_off - (i + 10));
+        /* Patch 14 bytes: test + je(near) + jmp + nop
+         * Use near je (0F 84) because trampoline may be far away.
+         * test rax, rax (3) + je near (6) + jmp (5) = 14 bytes. Perfect! */
+        int32_t je_offset = (int32_t)(t1_off - (i + 3 + 6));  /* from end of je */
+        int32_t jmp_offset = (int32_t)(t2_off - (i + 14));    /* from end of jmp */
 
         uint8_t patch[14];
         patch[0] = 0x48; patch[1] = 0x85; patch[2] = 0xC0;  /* test rax, rax */
-        patch[3] = 0x74; patch[4] = (uint8_t)je_offset;      /* je to trampoline1 */
-        patch[5] = 0xE9;                                      /* jmp to trampoline2 */
-        memcpy(&patch[6], &jmp_offset, 4);
-        patch[10] = 0x90; patch[11] = 0x90; patch[12] = 0x90; patch[13] = 0x90;
+        patch[3] = 0x0F; patch[4] = 0x84;                    /* je near (4-byte offset) */
+        memcpy(&patch[5], &je_offset, 4);
+        patch[9] = 0xE9;                                      /* jmp to trampoline2 */
+        memcpy(&patch[10], &jmp_offset, 4);
         memcpy(base + i, patch, sizeof(patch));
 
         if (g_verbose) {
