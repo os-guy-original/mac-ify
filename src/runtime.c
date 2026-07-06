@@ -171,11 +171,21 @@ static void setup_gs_base(uint64_t entry_rip) {
          * shadow. This is slower but reliable. */
         uint64_t gs_base = tls_g_addr - 0x30;
 
-        /* Set GS base using BOTH wrgsbase AND arch_prctl.
-         * wrgsbase sets the CPU MSR immediately (fast).
-         * arch_prctl syncs the kernel shadow (needed for context switch).
-         * Both must be called with the same value. */
-        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+        /* Set GS base using ONLY arch_prctl (not wrgsbase).
+         *
+         * On kernel 5.10, wrgsbase is unsafe because the kernel's signal
+         * delivery code doesn't properly save/restore the FSGSBASE-set GS
+         * base. When a signal arrives, the kernel may clobber the CPU GS
+         * base, causing gs:0x30 to return garbage. This leads to SIGSEGV
+         * with SI_KERNEL when the signal handler tries to access gs:0x30.
+         *
+         * arch_prctl(ARCH_SET_GS) goes through the kernel, which properly
+         * tracks the GS base in the kernel shadow. The kernel saves and
+         * restores it correctly during signal delivery and context switches.
+         *
+         * This is slower (syscall vs. instruction) but reliable.
+         * On kernel 5.15+, wrgsbase would be safe, but we use arch_prctl
+         * for compatibility with all kernel versions. */
         syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
 
         if (g_verbose) {
@@ -224,17 +234,11 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         fprintf(stderr, "macify: comm page at 0x7fffffe00000 = %p\n", comm_page);
     }
 
-    /* For Go binaries: block only SIGURG (async preemption signal).
-     * On kernel 5.10, we blocked ALL signals to prevent GS base clobbering
-     * during signal delivery. But on kernel 7.0+, GS base survives signal
-     * delivery, so we only need to block SIGURG to prevent the preemption
-     * signal from arriving before m.gsignal is allocated.
-     * Blocking ALL signals causes Go's scheduler to deadlock (no SIGVTALRM
-     * for timer-based preemption), which triggers morestack on g0. */
+    /* For Go binaries: block only SIGURG (async preemption signal). */
     if (g_tls_g_addr) {
         sigset_t go_mask;
         sigemptyset(&go_mask);
-        sigaddset(&go_mask, 23);  /* SIGURG (Linux) = macOS SIGURG (16) */
+        sigaddset(&go_mask, 23);  /* SIGURG (Linux) */
         sigprocmask(SIG_BLOCK, &go_mask, NULL);
         if (g_verbose) {
             fprintf(stderr, "macify: Go binary — blocking SIGURG\n");

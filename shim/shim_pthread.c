@@ -515,7 +515,16 @@ static void convert_macos_rwlock(pthread_rwlock_t *rw) {
 int pthread_mutex_lock(pthread_mutex_t *m) {
     LAZY_INIT();
     convert_macos_mutex(m);
-    return real_mutex_lock(m);
+    if (getenv("MACIFY_TRACE_MUTEX")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_mutex_lock(%p) sig=0x%x\n", m, *(unsigned*)m);
+        (void)write(2, b, n);
+    }
+    int r = real_mutex_lock(m);
+    if (getenv("MACIFY_TRACE_MUTEX")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_mutex_lock(%p) -> %d\n", m, r);
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 int pthread_mutex_trylock(pthread_mutex_t *m) {
@@ -527,6 +536,10 @@ int pthread_mutex_trylock(pthread_mutex_t *m) {
 int pthread_mutex_unlock(pthread_mutex_t *m) {
     LAZY_INIT();
     convert_macos_mutex(m);
+    if (getenv("MACIFY_TRACE_MUTEX")) {
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_mutex_unlock(%p) sig=0x%x\n", m, *(unsigned*)m);
+        (void)write(2, b, n);
+    }
     return real_mutex_unlock(m);
 }
 
@@ -811,7 +824,15 @@ static void *thread_start_wrapper(void *p) {
     free(p);
 
     /* Set up a signal stack for this thread (for SA_ONSTACK signal delivery).
-     * Without this, SIGSEGV/SIGBUS on this thread kills the process. */
+     * Without this, SIGSEGV/SIGBUS on this thread kills the process.
+     *
+     * CRITICAL: Use the RAW sigaltstack syscall (131), NOT the sigaltstack()
+     * function. Our shim's sigaltstack() override translates macOS stack_t
+     * layout to Linux layout, but we're passing a Linux-format stack_t here
+     * (since this code is compiled as Linux code). Calling the override would
+     * read the wrong fields (ss_size and ss_flags are at different offsets),
+     * resulting in a signal stack with size=0 — which causes signal delivery
+     * to fail with SIGSEGV (SI_KERNEL). */
     char *thread_sigstack = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (thread_sigstack != MAP_FAILED) {
@@ -819,7 +840,8 @@ static void *thread_start_wrapper(void *p) {
         ss.ss_sp = thread_sigstack;
         ss.ss_size = 256 * 1024;
         ss.ss_flags = 0;
-        sigaltstack(&ss, NULL);
+        /* Use raw syscall to bypass our own sigaltstack override */
+        syscall(131, &ss, NULL);  /* 131 = SYS_sigaltstack */
     }
 
     /* For Go binaries: set up a PER-THREAD TLS area for the g pointer.
@@ -851,7 +873,8 @@ static void *thread_start_wrapper(void *p) {
             /* Set GS base = tls_area. Then gs:0x30 = *(tls_area + 0x30) = 0 (initially).
              * Go's crosscall1 will write the new g pointer to gs:0x30 (= tls_area+0x30). */
             uint64_t gs_base = (uint64_t)(uintptr_t)tls_area;
-            __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
+            /* Use ONLY arch_prctl (not wrgsbase) — on kernel 5.10, wrgsbase
+             * is unsafe during signal delivery. */
             syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
             if (getenv("MACIFY_TRACE_PTHREAD")) {
                 /* Verify GS base was set */

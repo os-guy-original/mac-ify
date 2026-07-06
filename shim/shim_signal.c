@@ -46,6 +46,12 @@ static void macify_init_stdio(void) {
      * run even if the main stack overflows. Without this, a stack overflow
      * kills the process silently (signal handler can't push a frame). */
     static char sigstack[256 * 1024] __attribute__((aligned(4096)));
+    /* Pre-fault all pages of the signal stack to ensure they're mapped.
+     * Without this, the first signal delivery might fail if the kernel
+     * can't handle the page fault during signal frame setup. */
+    for (size_t i = 0; i < sizeof(sigstack); i += 4096) {
+        sigstack[i] = 0;
+    }
     stack_t ss;
     ss.ss_sp = sigstack;
     ss.ss_size = sizeof(sigstack);
@@ -55,16 +61,49 @@ static void macify_init_stdio(void) {
 
     /* Install our crash handler via raw rt_sigaction syscall (13).
      * Use SA_ONSTACK so the handler runs on the alternate signal stack.
-     * SA_SIGINFO(4) | SA_NODEFER(0x40000000) | SA_ONSTACK(0x8000000) */
+     *
+     * The kernel's struct sigaction (x86-64) layout is:
+     *   offset 0:  sa_handler/sa_sigaction (8 bytes)
+     *   offset 8:  sa_flags (8 bytes)
+     *   offset 16: sa_restorer (8 bytes)  ← CRITICAL: must be set!
+     *   offset 24: sa_mask (variable, sigsetsize bytes)
+     *
+     * SA_RESTORER (0x01000000) must be set in sa_flags, and sa_restorer
+     * must point to a valid restorer function. Without this, the kernel
+     * cannot set up the signal return trampoline, and signal delivery
+     * may fail with SIGSEGV (SI_KERNEL). */
     struct k_sigaction {
         void (*handler)(int, siginfo_t *, void *);
         unsigned long flags;
+        void (*restorer)(void);
         unsigned long mask[16];
     };
     struct k_sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.handler = macify_crash_handler;
-    sa.flags = 0x08040004;  /* SA_SIGINFO | SA_NODEFER | SA_ONSTACK */
+    sa.flags = 0x09000004;  /* SA_SIGINFO | SA_ONSTACK | SA_RESTORER */
+    /* Set sa_restorer to glibc's __restore_rt function.
+     * We find it by looking up the restorer used by glibc's sigaction. */
+    {
+        struct sigaction probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.sa_sigaction = (void *)macify_crash_handler;
+        probe.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&probe.sa_mask);
+        /* Call glibc's sigaction to let it set sa_restorer, then read it back */
+        static int (*real_sa)(int, const struct sigaction *, struct sigaction *) = NULL;
+        if (!real_sa) real_sa = dlsym(RTLD_NEXT, "sigaction");
+        if (real_sa) {
+            struct sigaction old;
+            real_sa(SIGUSR1, &probe, &old);  /* probe with SIGUSR1 (harmless) */
+            /* Now probe has sa_restorer set by glibc */
+            sa.restorer = probe.sa_restorer;
+            /* Restore old SIGUSR1 handler */
+            real_sa(SIGUSR1, &old, NULL);
+        }
+    }
+    /* Block ALL signals during crash handler */
+    memset(sa.mask, 0xff, sizeof(sa.mask));
     long r;
     r = syscall(13, 11, &sa, NULL, 8);  /* SIGSEGV */
     if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGSEGV failed: %ld\n",r); write(2,b,n); }
@@ -122,6 +161,18 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
 
     ucontext_t *uc = (ucontext_t *)uctx;
     greg_t *regs = uc->uc_mcontext.gregs;
+
+    /* Check signal stack validity */
+    stack_t cur_ss;
+    memset(&cur_ss, 0, sizeof(cur_ss));
+    syscall(131, NULL, &cur_ss);  /* sigaltstack(NULL, &cur_ss) */
+    char ss_buf[128];
+    int ss_n = snprintf(ss_buf, sizeof(ss_buf),
+        "sigaltstack: sp=%p size=%zu flags=0x%x (ONSTACK=%d DISABLE=%d)\n",
+        cur_ss.ss_sp, cur_ss.ss_size, cur_ss.ss_flags,
+        (cur_ss.ss_flags & 1) ? 1 : 0,   /* SS_ONSTACK */
+        (cur_ss.ss_flags & 2) ? 1 : 0);  /* SS_DISABLE */
+    write(2, ss_buf, ss_n);
 
     char buf[128];
 
@@ -275,6 +326,39 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             lb[ln++] = '\n';
             write(2, lb, ln);
 
+            /* Print key m offsets in a single write to avoid being interrupted */
+            {
+                char mbuf[256];
+                int mn = 0;
+                uint64_t m48 = *(volatile uint64_t *)(m + 0x48);
+                uint64_t m50 = *(volatile uint64_t *)(m + 0x50);
+                uint64_t m58 = *(volatile uint64_t *)(m + 0x58);
+                uint64_t m60 = *(volatile uint64_t *)(m + 0x60);
+                mn = snprintf(mbuf, sizeof(mbuf),
+                    "m+48=0x%lx m+50=0x%lx m+58=0x%lx m+60=0x%lx\n",
+                    (unsigned long)m48, (unsigned long)m50,
+                    (unsigned long)m58, (unsigned long)m60);
+                write(2, mbuf, mn);
+
+                /* Check which offset looks like gsignal (should be a valid g pointer
+                 * with stack.lo/hi at g+0/g+8) */
+                uint64_t candidates[] = {m48, m50, m58, m60};
+                int offsets[] = {0x48, 0x50, 0x58, 0x60};
+                for (int i = 0; i < 4; i++) {
+                    uint64_t gsig = candidates[i];
+                    if (gsig > 0x10000 && gsig < 0x7fffffffffffUL) {
+                        uint64_t slo = *(volatile uint64_t *)(gsig + 0x0);
+                        uint64_t shi = *(volatile uint64_t *)(gsig + 0x8);
+                        mn = snprintf(mbuf, sizeof(mbuf),
+                            "  m+0x%02x as gsignal: g=%p stack.lo=0x%lx hi=0x%lx (size=%ld)\n",
+                            offsets[i], (void*)gsig,
+                            (unsigned long)slo, (unsigned long)shi,
+                            (long)(shi - slo));
+                        write(2, mbuf, mn);
+                    }
+                }
+            }
+
             /* Print g0.stack.lo/hi/stackguard0/stackguard1 to check stack overflow */
             /* g.stack is at g+0x0 (lo) and g+0x8 (hi).
              * g.stackguard0 is at g+0x10, stackguard1 at g+0x18. */
@@ -283,7 +367,7 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             uint64_t stackguard0 = *(volatile uint64_t *)(g + 0x10);
             uint64_t stackguard1 = *(volatile uint64_t *)(g + 0x18);
             uint64_t cur_rsp = (uint64_t)regs[REG_RSP];
-            char sb[160];
+            char sb[256];
             int sn = snprintf(sb, sizeof(sb),
                 "g.stack: lo=0x%lx hi=0x%lx guard0=0x%lx guard1=0x%lx rsp=0x%lx (overflow=%d)\n",
                 (unsigned long)stacklo, (unsigned long)stackhi,
@@ -291,6 +375,20 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
                 (unsigned long)cur_rsp,
                 cur_rsp <= stackguard0);
             write(2, sb, sn);
+
+            /* Print gsignal.stack info — if gsignal's stack is invalid,
+             * signal delivery will fail with SI_KERNEL SIGSEGV */
+            if (gsignal > 0x10000 && gsignal < 0x7fffffffffffUL) {
+                uint64_t gs_stacklo = *(volatile uint64_t *)(gsignal + 0x0);
+                uint64_t gs_stackhi = *(volatile uint64_t *)(gsignal + 0x8);
+                uint64_t gs_guard0 = *(volatile uint64_t *)(gsignal + 0x10);
+                sn = snprintf(sb, sizeof(sb),
+                    "gsignal.stack: lo=0x%lx hi=0x%lx guard0=0x%lx (size=%ld)\n",
+                    (unsigned long)gs_stacklo, (unsigned long)gs_stackhi,
+                    (unsigned long)gs_guard0,
+                    (long)(gs_stackhi - gs_stacklo));
+                write(2, sb, sn);
+            }
         }
 
         /* Print stack around rsp to understand what the CPU was doing.
@@ -410,7 +508,31 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         struct macos_sigaction *macos_act = (struct macos_sigaction *)act;
         memset(&linux_act, 0, sizeof(linux_act));
         linux_act.sa_handler = macos_act->handler;
-        linux_act.sa_flags = macos_act->flags;
+
+        /* Translate macOS sa_flags to Linux sa_flags.
+         * macOS and Linux use COMPLETELY DIFFERENT bit values for SA_* flags!
+         * macOS: SA_ONSTACK=0x0001, SA_RESTART=0x0002, SA_SIGINFO=0x0040
+         * Linux: SA_ONSTACK=0x08000000, SA_RESTART=0x10000000, SA_SIGINFO=0x00000004
+         * Without this translation, SA_ONSTACK and SA_SIGINFO are NOT set on Linux,
+         * causing signal handlers to run on the wrong stack without siginfo. */
+        uint32_t macos_flags = macos_act->flags;
+        uint32_t linux_flags = 0;
+        if (macos_flags & 0x0001) linux_flags |= 0x08000000;  /* SA_ONSTACK */
+        if (macos_flags & 0x0002) linux_flags |= 0x10000000;  /* SA_RESTART */
+        if (macos_flags & 0x0004) linux_flags |= 0x80000000;  /* SA_RESETHAND */
+        if (macos_flags & 0x0008) linux_flags |= 0x00000001;  /* SA_NOCLDSTOP */
+        if (macos_flags & 0x0010) linux_flags |= 0x40000000;  /* SA_NODEFER */
+        if (macos_flags & 0x0020) linux_flags |= 0x00000002;  /* SA_NOCLDWAIT */
+        if (macos_flags & 0x0040) linux_flags |= 0x00000004;  /* SA_SIGINFO */
+        if (macos_flags & 0x0080) linux_flags |= 0x01000000;  /* SA_RESTORER (not used on macOS, but just in case) */
+        linux_act.sa_flags = linux_flags;
+
+        if (getenv("MACIFY_TRACE_SIGNAL")) {
+            char b[128]; int n = snprintf(b, sizeof(b),
+                "macify: sigaction handler=%p flags=0x%x->0x%x for sig=%d\n",
+                macos_act->handler, macos_flags, linux_flags, signum);
+            (void)write(2, b, n);
+        }
         sigemptyset(&linux_act.sa_mask);
         /* Translate the 4-byte macOS sigset mask to 128-byte Linux sigset,
          * translating signal numbers (macOS SIGURG=16 → Linux SIGURG=23, etc.) */
@@ -454,20 +576,13 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
             }
             /* For non-macOS callers (macify itself): pass through normally */
         } else {
-            /* For all other signals: ensure SA_ONSTACK is set.
-             * Go's runtime requires ALL signal handlers to use SA_ONSTACK.
-             * For Go binaries, we install a wrapper that defers signal
-             * delivery until gsignal is ready. */
+            /* For all other signals: pass through Go's handler directly
+             * with SA_ONSTACK. Don't wrap with macify_go_signal_wrapper
+             * to test if the wrapper is causing the SI_KERNEL crash. */
             extern uint64_t g_tls_g_addr;
             if (g_tls_g_addr) {
-                /* Go binary: install signal deferral wrapper */
-                extern void macify_go_signal_wrapper(int, siginfo_t *, void *);
-                extern void *macify_saved_go_handlers[];
-                if (signum >= 0 && signum < 32) {
-                    macify_saved_go_handlers[signum] = (void *)macos_act->handler;
-                }
-                linux_act.sa_sigaction = macify_go_signal_wrapper;
-                linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+                /* Go binary: pass through Go's handler with SA_ONSTACK */
+                linux_act.sa_flags |= SA_ONSTACK;
             } else {
                 /* Non-Go: just add SA_ONSTACK and pass through */
                 linux_act.sa_flags |= SA_ONSTACK;
@@ -835,12 +950,18 @@ int macify_sigaltstack(const void *ss, void *oss) {
 
 /* macify_get_shim_symbol — return our shim's override for a given symbol.
  * Used by dl.c's dlsym override to ensure Go (and other binaries) get our
- * translated sigaction/sigaltstack/signal instead of glibc's. */
+ * translated functions instead of glibc's.
+ *
+ * CRITICAL: Go's runtime uses dlsym to look up C functions. If it gets
+ * glibc's pthread_mutex_lock directly, it bypasses our macOS mutex
+ * conversion, causing crashes (macOS mutex signature 0x32AAABA7 is
+ * misinterpreted by glibc as "already locked").
+ *
+ * We must return our shim's override for ALL functions that translate
+ * between macOS and Linux data layouts. */
 void *macify_get_shim_symbol(const char *symbol) {
+    /* Signal-related functions */
     if (strcmp(symbol, "sigaction") == 0) {
-        /* Return the address of our sigaction override.
-         * Use inline assembly to get the symbol address without
-         * conflicting with system header declarations. */
         extern int sigaction(int, const struct sigaction *, struct sigaction *);
         return (void *)sigaction;
     }
@@ -850,6 +971,95 @@ void *macify_get_shim_symbol(const char *symbol) {
     if (strcmp(symbol, "signal") == 0) {
         return (void *)macify_signal;
     }
+
+    /* Pthread mutex/cond functions — macOS objects have different layout */
+    if (strcmp(symbol, "pthread_mutex_lock") == 0) {
+        extern int pthread_mutex_lock(pthread_mutex_t *);
+        return (void *)pthread_mutex_lock;
+    }
+    if (strcmp(symbol, "pthread_mutex_trylock") == 0) {
+        extern int pthread_mutex_trylock(pthread_mutex_t *);
+        return (void *)pthread_mutex_trylock;
+    }
+    if (strcmp(symbol, "pthread_mutex_unlock") == 0) {
+        extern int pthread_mutex_unlock(pthread_mutex_t *);
+        return (void *)pthread_mutex_unlock;
+    }
+    if (strcmp(symbol, "pthread_mutex_init") == 0) {
+        extern int pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
+        return (void *)pthread_mutex_init;
+    }
+    if (strcmp(symbol, "pthread_mutex_destroy") == 0) {
+        extern int pthread_mutex_destroy(pthread_mutex_t *);
+        return (void *)pthread_mutex_destroy;
+    }
+    if (strcmp(symbol, "pthread_cond_wait") == 0) {
+        extern int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+        return (void *)pthread_cond_wait;
+    }
+    if (strcmp(symbol, "pthread_cond_timedwait") == 0) {
+        extern int pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
+        return (void *)pthread_cond_timedwait;
+    }
+    if (strcmp(symbol, "pthread_cond_signal") == 0) {
+        extern int pthread_cond_signal(pthread_cond_t *);
+        return (void *)pthread_cond_signal;
+    }
+    if (strcmp(symbol, "pthread_cond_broadcast") == 0) {
+        extern int pthread_cond_broadcast(pthread_cond_t *);
+        return (void *)pthread_cond_broadcast;
+    }
+    if (strcmp(symbol, "pthread_cond_init") == 0) {
+        extern int pthread_cond_init(pthread_cond_t *, const pthread_condattr_t *);
+        return (void *)pthread_cond_init;
+    }
+    if (strcmp(symbol, "pthread_cond_destroy") == 0) {
+        extern int pthread_cond_destroy(pthread_cond_t *);
+        return (void *)pthread_cond_destroy;
+    }
+
+    /* Pthread signal mask */
+    if (strcmp(symbol, "pthread_sigmask") == 0) {
+        extern int macify_pthread_sigmask(int, const void *, void *) __asm__("pthread_sigmask");
+        return (void *)macify_pthread_sigmask;
+    }
+    if (strcmp(symbol, "sigprocmask") == 0) {
+        extern int macify_sigprocmask(int, const void *, void *) __asm__("sigprocmask");
+        return (void *)macify_sigprocmask;
+    }
+
+    /* sigset functions (4-byte macOS vs 128-byte Linux) */
+    if (strcmp(symbol, "sigaddset") == 0) {
+        extern int sigaddset(sigset_t *, int);
+        return (void *)sigaddset;
+    }
+    if (strcmp(symbol, "sigdelset") == 0) {
+        extern int sigdelset(sigset_t *, int);
+        return (void *)sigdelset;
+    }
+    if (strcmp(symbol, "sigemptyset") == 0) {
+        extern int sigemptyset(sigset_t *);
+        return (void *)sigemptyset;
+    }
+    if (strcmp(symbol, "sigfillset") == 0) {
+        extern int sigfillset(sigset_t *);
+        return (void *)sigfillset;
+    }
+    if (strcmp(symbol, "sigismember") == 0) {
+        extern int sigismember(const sigset_t *, int);
+        return (void *)sigismember;
+    }
+
+    /* kqueue/kevent */
+    if (strcmp(symbol, "kqueue") == 0) {
+        extern int kqueue(void);
+        return (void *)kqueue;
+    }
+    if (strcmp(symbol, "kevent") == 0) {
+        extern int kevent(int, const void *, int, void *, int, const void *);
+        return (void *)kevent;
+    }
+
     return NULL;
 }
 
@@ -899,11 +1109,11 @@ void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
         (void)write(2, b, n);
     }
     /* Restore GS base before calling Go's handler.
-     * Use both wrgsbase + arch_prctl to keep CPU MSR and shadow in sync. */
+     * Use ONLY arch_prctl (not wrgsbase) — on kernel 5.10, wrgsbase
+     * is unsafe during signal delivery. */
     extern uint64_t g_tls_g_addr;
     if (g_tls_g_addr) {
         uint64_t gs_base = g_tls_g_addr - 0x30;
-        __asm__ volatile("wrgsbase %0" :: "r"(gs_base));
         syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
     }
 

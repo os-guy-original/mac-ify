@@ -109,13 +109,14 @@ void *dlsym(void *handle, const char *symbol) {
     if (handle == MACOS_RTLD_DEFAULT || handle == MACOS_RTLD_SELF)
         handle = NULL;
 
-    /* For signal-related functions: return our shim's override, not glibc's.
-     * Go's runtime uses dlsym to look up C functions. If it gets glibc's
-     * sigaction/sigaltstack directly, it bypasses our struct/signal-number
-     * translation, causing crashes.
-     * We use a helper function to get the address without conflicting with
-     * system header declarations. */
-    if (handle == NULL || handle == (void *)MACOS_RTLD_DEFAULT) {
+    /* ALWAYS check our shim's overrides first, regardless of handle.
+     * Go's runtime uses dlsym to look up C functions (pthread_mutex_lock,
+     * sigaction, etc.). If it gets glibc's versions directly, it bypasses
+     * our macOS→Linux translation (mutex layout, signal struct layout,
+     * signal number translation), causing crashes.
+     * macify_get_shim_symbol returns NULL for symbols we don't override,
+     * so this is safe for all lookups. */
+    {
         void *shim_sym = macify_get_shim_symbol(symbol);
         if (shim_sym) return shim_sym;
     }
