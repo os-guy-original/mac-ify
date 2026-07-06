@@ -35,30 +35,79 @@ Get `rclone_macos` (a macOS Go binary) to run on Linux via the macify translatio
 
 **Fix:** Use `memset(&mask, 0, sizeof(mask))` and the real glibc `sigaddset`/`sigprocmask` via dlsym.
 
-## Current State
-- Binary gets past: rt0_go, cgo_init, runtime.check, runtime.args, runtime.osinit, runtime.schedinit, runtime.newproc, runtime.mstart
-- Binary creates new threads via pthread_create (multiple threads, each with per-thread TLS)
-- kqueue() succeeds (returns epoll fd)
-- kevent() succeeds for changelist operations (EVFILT_USER setup, adding fds)
-- kevent() with nevents > 0 returns 0 (no events)
-- Now crashing with SIGSEGV at adr=0, rip in glibc's futex wrapper (FUTEX_WAKE)
-- m.locks = 2 (positive, no lock count issue)
-- No stack overflow
-- Crash is on the main thread's g0/systemstack
-- The crash appears to be a signal delivery issue (SIGSEGV at adr=0 with rip at a non-memory-accessing instruction)
+## Current State (Latest)
+Go's runtime FULLY INITIALIZES! The binary gets through:
+- rt0_go (entry point, GS base setup)
+- cgo_init (C runtime initialization)
+- runtime.check (internal consistency checks)
+- runtime.args (argument processing)
+- runtime.osinit (OS-specific init, sysctl)
+- runtime.schedinit (scheduler initialization)
+- runtime.newproc (create main goroutine)
+- runtime.mstart (start machine/thread)
+- kqueue/kevent (network polling)
+- pthread_sigmask (signal mask setup)
+- sigaltstack (signal stack setup)
+- mlock (memory locking)
+
+The crash is now in rclone's APPLICATION CODE (Azure SDK package init),
+NOT in Go's runtime initialization. The crash is at adr=0x111 (Go's
+intentional crash after a failed check), accessing a corrupted struct
+(m pointer = 0x81, which is invalid).
+
+## Fixes Applied This Session
+
+### 1. SA_* flag translation (macOS → Linux)
+macOS and Linux use completely different bit values for SA_* flags.
+- macOS: SA_ONSTACK=0x0001, SA_SIGINFO=0x0040
+- Linux: SA_ONSTACK=0x08000000, SA_SIGINFO=0x00000004
+Without translation, signal handlers had wrong flags (no SA_ONSTACK, no SA_SIGINFO).
+
+### 2. pthread_kill signal number translation
+Go calls pthread_kill(thread, 16) for SIGURG (macOS #16), but Linux #16
+is SIGSTKFLT. Added override to translate macOS signal numbers to Linux.
+
+### 3. real_dlsym initialization
+real_dlsym was NULL because the dlsym override wasn't being called (glibc's
+dlsym found first in symbol search order). Added macify_init_real_dlsym()
+called from constructor.
+
+### 4. sigaction pass-through for non-macOS callers
+sigaction override was treating ALL callers as macOS callers, even macify's
+own code. This caused Linux-format struct sigaction to be misinterpreted as
+macOS-format, reading wrong flags/mask fields. Fixed by passing through
+directly for non-macOS callers.
+
+### 5. sigsetsize = 8 (not sizeof(sigset_t) = 128)
+Raw rt_sigaction/rt_sigprocmask syscalls passed sizeof(sigset_t)=128 as
+sigsetsize, but kernel expects 8. This caused EINVAL, making Go crash.
+
+### 6. pthread_sigmask/sigprocmask infinite recursion
+dlsym(RTLD_NEXT, "pthread_sigmask") returned our own function (via dlsym
+override), causing infinite recursion. Fixed by using raw rt_sigprocmask
+syscall (14).
+
+### 7. SA_RESTORER with custom restorer function
+Created macify_restore_rt() function that calls rt_sigreturn syscall.
+Used as sa_restorer for all signal handlers installed via raw syscall.
+
+### 8. Raw syscalls for sigaction/sigaltstack
+Replaced all real_sigaction/real_sigaltstack calls with raw syscalls
+(13 and 131) because real_dlsym(RTLD_NEXT, ...) couldn't find glibc's
+versions (glibc loaded before shim).
+
+### 9. mlock/munlock overrides
+Go's runtime calls mlock to lock signal stack pages. On Linux without
+CAP_IPC_LOCK, mlock fails, causing Go to crash. Override to return 0.
+
+### 10. wrgsbase causes crashes on kernel 5.10
+Using wrgsbase to set GS base causes rip=0 (NULL function pointer) crashes
+on kernel 5.10. Using only arch_prctl(ARCH_SET_GS) avoids the issue.
 
 ## Next Steps
-- The crash is SIGSEGV with si_code=128 (SI_KERNEL) at adr=0. This means the kernel tried to deliver a signal and failed (likely signal stack issue).
-- The crash happens on the main thread (rsp in main stack range), on g0/systemstack.
-- The rip is at glibc's futex wrapper (FUTEX_WAKE), AFTER the syscall — the SIGSEGV was delivered during/after the futex syscall.
-- Key observations:
-  1. The SIGILL handler is NEVER called — Go 1.24 on darwin uses Libc for all syscalls, not raw syscalls
-  2. sigaltstack is only called with ss=NULL (queries) — Go never sets a new signal stack
-  3. Our 256KB signal stack (static array in shim) is the active one
-  4. Increasing to 1MB mmap'd stack caused an EARLIER crash (before kqueue)
-- Possible next investigations:
-  1. Check if Go's gsignal stack allocation is failing (gsignal.stack might be NULL)
-  2. Check if the signal stack is being unmapped by something
-  3. Try implementing a real kqueue emulation using epoll (track fds, return actual events)
-  4. Check if Go's runtime calls `stackalloc` or similar that might fail
-  5. The crash might be from Go's runtime calling a Libc function that uses futex internally, and the futex address is in a region that gets unmapped
+- Investigate the data corruption (m pointer = 0x81 in Azure SDK struct)
+- Possible causes:
+  1. Memory corruption from pthread mutex/cond conversion
+  2. Incorrect mmap behavior
+  3. Signal handler corrupting the stack
+  4. Go's GC scanning a corrupted object
