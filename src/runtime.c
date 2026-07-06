@@ -172,20 +172,8 @@ static void setup_gs_base(uint64_t entry_rip) {
         uint64_t gs_base = tls_g_addr - 0x30;
 
         /* Set GS base using ONLY arch_prctl (not wrgsbase).
-         *
-         * On kernel 5.10, wrgsbase is unsafe because the kernel's signal
-         * delivery code doesn't properly save/restore the FSGSBASE-set GS
-         * base. When a signal arrives, the kernel may clobber the CPU GS
-         * base, causing gs:0x30 to return garbage. This leads to SIGSEGV
-         * with SI_KERNEL when the signal handler tries to access gs:0x30.
-         *
-         * arch_prctl(ARCH_SET_GS) goes through the kernel, which properly
-         * tracks the GS base in the kernel shadow. The kernel saves and
-         * restores it correctly during signal delivery and context switches.
-         *
-         * This is slower (syscall vs. instruction) but reliable.
-         * On kernel 5.15+, wrgsbase would be safe, but we use arch_prctl
-         * for compatibility with all kernel versions. */
+         * On kernel 5.10, wrgsbase causes rip=0 crashes (likely due to
+         * kernel not properly saving/restoring FSGSBASE during signals). */
         syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
 
         if (g_verbose) {

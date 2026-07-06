@@ -892,8 +892,7 @@ static void *thread_start_wrapper(void *p) {
             /* Set GS base = tls_area. Then gs:0x30 = *(tls_area + 0x30) = 0 (initially).
              * Go's crosscall1 will write the new g pointer to gs:0x30 (= tls_area+0x30). */
             uint64_t gs_base = (uint64_t)(uintptr_t)tls_area;
-            /* Use ONLY arch_prctl (not wrgsbase) — on kernel 5.10, wrgsbase
-             * is unsafe during signal delivery. */
+            /* Use ONLY arch_prctl (not wrgsbase) — wrgsbase causes crashes on kernel 5.10 */
             syscall(158, 0x1001, gs_base);  /* ARCH_SET_GS */
             if (getenv("MACIFY_TRACE_PTHREAD")) {
                 /* Verify GS base was set */
