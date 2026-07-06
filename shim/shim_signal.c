@@ -44,19 +44,14 @@ static void macify_init_stdio(void) {
 
     /* Allocate a dedicated signal stack (256KB) so our crash handler can
      * run even if the main stack overflows. Without this, a stack overflow
-     * kills the process silently (signal handler can't push a frame).
-     * Use mmap instead of a static array to ensure the stack is always
-     * mapped (static arrays in shared libs might not be mapped in some cases). */
-    char *sigstack = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (sigstack != MAP_FAILED) {
-        stack_t ss;
-        ss.ss_sp = sigstack;
-        ss.ss_size = 256 * 1024;
-        ss.ss_flags = 0;
-        /* Use raw syscall to bypass our own sigaltstack override */
-        syscall(131, &ss, NULL);  /* 131 = sigaltstack */
-    }
+     * kills the process silently (signal handler can't push a frame). */
+    static char sigstack[256 * 1024] __attribute__((aligned(4096)));
+    stack_t ss;
+    ss.ss_sp = sigstack;
+    ss.ss_size = sizeof(sigstack);
+    ss.ss_flags = 0;
+    /* Use raw syscall to bypass our own sigaltstack override */
+    syscall(131, &ss, NULL);  /* 131 = sigaltstack */
 
     /* Install our crash handler via raw rt_sigaction syscall (13).
      * Use SA_ONSTACK so the handler runs on the alternate signal stack.
