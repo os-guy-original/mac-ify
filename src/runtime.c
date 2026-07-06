@@ -234,12 +234,19 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         fprintf(stderr, "macify: comm page at 0x7fffffe00000 = %p\n", comm_page);
     }
 
-    /* For Go binaries: block only SIGURG (async preemption signal). */
+    /* For Go binaries: block only SIGURG (async preemption signal).
+     * CRITICAL: Use memset + raw syscall, NOT sigemptyset/sigaddset/sigprocmask.
+     * Our shim's sigemptyset/sigaddset overrides write only 4 bytes, but glibc's
+     * sigset_t is 128 bytes. Using them leaves 124 bytes uninitialized, causing
+     * random signals to be blocked/unblocked. */
     if (g_tls_g_addr) {
         sigset_t go_mask;
-        sigemptyset(&go_mask);
-        sigaddset(&go_mask, 23);  /* SIGURG (Linux) */
-        sigprocmask(SIG_BLOCK, &go_mask, NULL);
+        memset(&go_mask, 0, sizeof(go_mask));
+        /* Set bit for SIGURG (signal 23, bit 22 in sigset) */
+        unsigned long *bits = (unsigned long *)&go_mask;
+        bits[22 / (sizeof(unsigned long) * 8)] |= (1UL << (22 % (sizeof(unsigned long) * 8)));
+        /* Use raw syscall to bypass our shim's sigprocmask override */
+        syscall(14, 0 /*SIG_BLOCK*/, &go_mask, NULL, sizeof(go_mask));
         if (g_verbose) {
             fprintf(stderr, "macify: Go binary — blocking SIGURG\n");
         }

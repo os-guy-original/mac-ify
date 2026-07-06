@@ -24,12 +24,35 @@ int is_forked_child(void) {
     return getpid() != g_original_pid;
 }
 
+/* Cached glibc signal restorer function — needed for SA_RESTORER flag.
+ * Set in macify_init_stdio constructor. */
+void (*macify_sa_restorer)(void) = NULL;
+
 /* Constructor to initialize the stdio pointers */
 __attribute__((constructor))
 static void macify_init_stdio(void) {
     __stderrp = stderr;
     __stdinp = stdin;
     __stdoutp = stdout;
+
+    /* Cache glibc's signal restorer function for use in sigaction override.
+     * SA_RESTORER is REQUIRED on modern Linux kernels — without it, signal
+     * delivery fails with SIGSEGV (SI_KERNEL).
+     * CRITICAL: Use real_dlsym (not dlsym) because our dlsym override
+     * would return our shim's sigaction instead of glibc's. */
+    static int (*real_sa)(int, const struct sigaction *, struct sigaction *) = NULL;
+    if (!real_sa && real_dlsym) real_sa = real_dlsym(RTLD_NEXT, "sigaction");
+    if (real_sa) {
+        struct sigaction probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.sa_handler = SIG_DFL;
+        probe.sa_flags = SA_SIGINFO;
+        sigemptyset(&probe.sa_mask);
+        struct sigaction old;
+        real_sa(SIGUSR1, &probe, &old);
+        macify_sa_restorer = probe.sa_restorer;
+        real_sa(SIGUSR1, &old, NULL);
+    }
 
     /* Print shim load address for debugging */
     if (getenv("MACIFY_SHIM_DEBUG")) {
@@ -113,10 +136,6 @@ static void macify_init_stdio(void) {
     if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGABRT failed: %ld\n",r); write(2,b,n); }
     r = syscall(13, 8,  &sa, NULL, 8);  /* SIGFPE */
     if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGFPE failed: %ld\n",r); write(2,b,n); }
-    r = syscall(13, 16, &sa, NULL, 8);  /* SIGSTKFLT */
-    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGSTKFLT failed: %ld\n",r); write(2,b,n); }
-    r = syscall(13, 12, &sa, NULL, 8);  /* SIGSYS */
-    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGSYS failed: %ld\n",r); write(2,b,n); }
 
     /* Register pthread_atfork handler to immediately exit forked children.
      * glibc's NSS subsystem calls clone() internally (bypassing our fork
@@ -497,7 +516,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     }
 
     if (!real_sigaction) {
-        real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+        real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
     }
     struct sigaction linux_act;
     struct sigaction linux_oldact;
@@ -577,8 +596,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
             /* For non-macOS callers (macify itself): pass through normally */
         } else {
             /* For all other signals: pass through Go's handler directly
-             * with SA_ONSTACK. Don't wrap with macify_go_signal_wrapper
-             * to test if the wrapper is causing the SI_KERNEL crash. */
+             * with SA_ONSTACK and SA_RESTORER. */
             extern uint64_t g_tls_g_addr;
             if (g_tls_g_addr) {
                 /* Go binary: pass through Go's handler with SA_ONSTACK */
@@ -586,6 +604,13 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
             } else {
                 /* Non-Go: just add SA_ONSTACK and pass through */
                 linux_act.sa_flags |= SA_ONSTACK;
+            }
+            /* CRITICAL: Add SA_RESTORER and set sa_restorer.
+             * Without SA_RESTORER, signal delivery fails on modern Linux
+             * kernels with SIGSEGV (SI_KERNEL). */
+            if (macify_sa_restorer) {
+                linux_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
+                linux_act.sa_restorer = macify_sa_restorer;
             }
             p_linux_act = &linux_act;
         }
@@ -616,7 +641,7 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
     if (signum == SIGSEGV || signum == SIGBUS) {
         /* Install our crash handler via real sigaction */
         if (!real_sigaction) {
-            real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+            real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
         }
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
@@ -633,7 +658,7 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
     /* For other signals: convert signal() to sigaction() with SA_ONSTACK.
      * Go requires all signal handlers to use SA_ONSTACK. */
     if (!real_sigaction) {
-        real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+        real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
     }
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -693,6 +718,11 @@ int sigismember(const sigset_t *set, int signum) {
 /* macOS → Linux signal number translation.
  * Signals 1-6 are the same. From 7 onward they diverge.
  * Returns 0 if the macOS signal has no Linux equivalent. */
+/* Export this for use in other shim files (e.g., pthread_kill in shim_pthread.c) */
+int macos_sig_to_linux_signal(int macos_sig) {
+    return macos_sig_to_linux(macos_sig);
+}
+
 static int macos_sig_to_linux(int macos_sig) {
     static const int xlate[32] = {
         [0]  = 0,  [1] = 1,  [2] = 2,  [3] = 3,  [4] = 4,  [5] = 5,  [6] = 6,
@@ -1027,6 +1057,10 @@ void *macify_get_shim_symbol(const char *symbol) {
         extern int macify_sigprocmask(int, const void *, void *) __asm__("sigprocmask");
         return (void *)macify_sigprocmask;
     }
+    if (strcmp(symbol, "pthread_kill") == 0) {
+        extern int macify_pthread_kill(pthread_t, int) __asm__("pthread_kill");
+        return (void *)macify_pthread_kill;
+    }
 
     /* sigset functions (4-byte macOS vs 128-byte Linux) */
     if (strcmp(symbol, "sigaddset") == 0) {
@@ -1075,6 +1109,7 @@ void *macify_get_shim_symbol(const char *symbol) {
 
 /* Saved Go signal handlers (indexed by Linux signal number). */
 void *macify_saved_go_handlers[32] = {0};
+
 static volatile int macify_go_signal_ready = 0;
 
 /* Called by the wrapper to check if Go is ready for signals. */

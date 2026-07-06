@@ -100,6 +100,25 @@ int macify_pthread_setname_np(const char *name) {
     return 0;
 }
 
+/* pthread_kill — translate macOS signal numbers to Linux.
+ * Go's runtime calls pthread_kill(thread, SIGURG) for async preemption.
+ * On macOS, SIGURG=16. On Linux, SIGURG=23. Without translation,
+ * Go sends signal 16 (SIGSTKFLT on Linux) instead of 23 (SIGURG),
+ * killing the process. */
+int macify_pthread_kill(pthread_t thread, int sig) __asm__("pthread_kill");
+int macify_pthread_kill(pthread_t thread, int sig) {
+    /* Translate macOS signal number to Linux */
+    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+        extern int macos_sig_to_linux_signal(int);
+        int linux_sig = macos_sig_to_linux_signal(sig);
+        if (linux_sig > 0) sig = linux_sig;
+    }
+    static int (*real_pthread_kill)(pthread_t, int) = NULL;
+    if (!real_pthread_kill) real_pthread_kill = dlsym(RTLD_NEXT, "pthread_kill");
+    if (real_pthread_kill) return real_pthread_kill(thread, sig);
+    return -1;
+}
+
 /* pthread_getname_np — macOS signature is `int pthread_getname_np(pthread_t thread, char *name, size_t len)`.
  * This matches Linux's signature, so we can pass through. But glibc's
  * pthread_getname_np returns 0 on success, while macOS returns 0 too.
@@ -892,20 +911,16 @@ static void *thread_start_wrapper(void *p) {
     }
 
     /* Block SIGURG on the new thread to prevent async preemption
-     * signals from arriving before Go's runtime is ready. */
+     * signals from arriving before Go's runtime is ready.
+     * CRITICAL: Use raw syscall, NOT sigprocmask override (which expects
+     * macOS sigset format). Also use memset (not sigemptyset) because our
+     * sigemptyset override writes only 4 bytes. */
     if (g_tls_g_addr) {
         sigset_t mask;
         memset(&mask, 0, sizeof(mask));
-        static int (*real_sigaddset_glibc)(sigset_t *, int) = NULL;
-        if (!real_sigaddset_glibc) real_sigaddset_glibc = dlsym(RTLD_NEXT, "sigaddset");
-        if (real_sigaddset_glibc) {
-            real_sigaddset_glibc(&mask, 23);  /* SIGURG */
-        }
-        static int (*real_sigprocmask_glibc)(int, const sigset_t *, sigset_t *) = NULL;
-        if (!real_sigprocmask_glibc) real_sigprocmask_glibc = dlsym(RTLD_NEXT, "sigprocmask");
-        if (real_sigprocmask_glibc) {
-            real_sigprocmask_glibc(SIG_BLOCK, &mask, NULL);
-        }
+        unsigned long *bits = (unsigned long *)&mask;
+        bits[22 / (sizeof(unsigned long) * 8)] |= (1UL << (22 % (sizeof(unsigned long) * 8)));
+        syscall(14, 0 /*SIG_BLOCK*/, &mask, NULL, sizeof(mask));
     }
 
     return routine(arg);
