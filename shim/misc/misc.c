@@ -1144,3 +1144,24 @@ void *SecCertificateCopyData(void *cert) { (void)cert; return NULL; }
 void *SecTrustCopyCertificateChain(void *trust) { (void)trust; return NULL; }
 int SecTrustSetVerifyDate(void *trust, void *date) { (void)trust; (void)date; return 0; }
 
+
+/* mlock/munlock — Go's runtime calls mlock to lock signal stack pages.
+ * On Linux, mlock requires CAP_IPC_LOCK or RLIMIT_MEMLOCK. If it fails,
+ * Go crashes with "mov [0xf1], 0xf1" (intentional crash).
+ * Override to always return 0 (success) — locking is not critical for
+ * signal stack functionality. */
+int mlock(const void *addr, size_t len) {
+    (void)addr; (void)len;
+    return 0;
+}
+int munlock(const void *addr, size_t len) {
+    (void)addr; (void)len;
+    return 0;
+}
+int mlockall(int flags) {
+    (void)flags;
+    return 0;
+}
+int munlockall(void) {
+    return 0;
+}

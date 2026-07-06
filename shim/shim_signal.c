@@ -528,9 +528,9 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
                 modified_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
                 modified_act.sa_restorer = macify_sa_restorer;
             }
-            return syscall(13, signum, &modified_act, oldact, sizeof(sigset_t));
+            return syscall(13, signum, &modified_act, oldact, 8);
         }
-        return syscall(13, signum, NULL, oldact, sizeof(sigset_t));
+        return syscall(13, signum, NULL, oldact, 8);
     }
 
     /* macOS caller: translate signal number and struct layout */
@@ -681,7 +681,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
      * real_sigaction might be NULL (glibc loaded before shim, so
      * real_dlsym(RTLD_NEXT, "sigaction") returns NULL).
      * The linux_act already has SA_RESTORER and sa_restorer set. */
-    int result = syscall(13, signum, p_linux_act, p_linux_oldact, sizeof(sigset_t));
+    int result = syscall(13, signum, p_linux_act, p_linux_oldact, 8);
 
     if (oldact && result == 0) {
         struct macos_sigaction *macos_old = (struct macos_sigaction *)oldact;
@@ -711,7 +711,7 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
             sa.sa_restorer = macify_sa_restorer;
         }
         sigemptyset(&sa.sa_mask);
-        syscall(13, signum, &sa, NULL, sizeof(sigset_t));
+        syscall(13, signum, &sa, NULL, 8);
         return SIG_DFL;
     }
     if (signum == SIGILL) {
@@ -729,7 +729,7 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
         sa.sa_restorer = macify_sa_restorer;
     }
     sigemptyset(&sa.sa_mask);
-    syscall(13, signum, &sa, NULL, sizeof(sigset_t));
+    syscall(13, signum, &sa, NULL, 8);
     return SIG_DFL;
 }
 
@@ -878,9 +878,10 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
     /* If the caller is NOT macOS text, pass through to glibc.
      * glibc internally calls pthread_sigmask with 128-byte sigsets. */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        static int (*real_pthread_sigmask)(int, const sigset_t *, sigset_t *) = NULL;
-        if (!real_pthread_sigmask) real_pthread_sigmask = dlsym(RTLD_NEXT, "pthread_sigmask");
-        return real_pthread_sigmask(how, (const sigset_t *)set, (sigset_t *)oldset);
+        /* Non-macOS caller: use raw rt_sigprocmask syscall.
+         * CRITICAL: Can't use dlsym(RTLD_NEXT, "pthread_sigmask") because our
+         * dlsym override returns our own function, causing infinite recursion. */
+        return syscall(14, how, set, oldset, 8);
     }
 
     /* Translate macOS sigset how values to Linux:
@@ -913,9 +914,8 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
         p_linux_oldset = &linux_oldset;
     }
 
-    static int (*real_pthread_sigmask)(int, const sigset_t *, sigset_t *) = NULL;
-    if (!real_pthread_sigmask) real_pthread_sigmask = dlsym(RTLD_NEXT, "pthread_sigmask");
-    int result = real_pthread_sigmask(linux_how, p_linux_set, p_linux_oldset);
+    /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
+    int result = syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
     if (oldset && result == 0) {
         linux_to_macos_sigset(&linux_oldset, oldset);
@@ -927,9 +927,8 @@ int macify_sigprocmask(int how, const void *set, void *oldset) __asm__("sigprocm
 int macify_sigprocmask(int how, const void *set, void *oldset) {
     /* If the caller is NOT macOS text, pass through to glibc. */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        static int (*real_sigprocmask)(int, const sigset_t *, sigset_t *) = NULL;
-        if (!real_sigprocmask) real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
-        return real_sigprocmask(how, (const sigset_t *)set, (sigset_t *)oldset);
+        /* Non-macOS caller: use raw rt_sigprocmask syscall */
+        return syscall(14, how, set, oldset, 8);
     }
 
     /* Translate macOS how values to Linux */
@@ -953,9 +952,8 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
         p_linux_oldset = &linux_oldset;
     }
 
-    static int (*real_sigprocmask)(int, const sigset_t *, sigset_t *) = NULL;
-    if (!real_sigprocmask) real_sigprocmask = dlsym(RTLD_NEXT, "sigprocmask");
-    int result = real_sigprocmask(linux_how, p_linux_set, p_linux_oldset);
+    /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
+    int result = syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
     if (oldset && result == 0) {
         linux_to_macos_sigset(&linux_oldset, oldset);
@@ -1155,6 +1153,24 @@ void *macify_get_shim_symbol(const char *symbol) {
     if (strcmp(symbol, "kevent") == 0) {
         extern int kevent(int, const void *, int, void *, int, const void *);
         return (void *)kevent;
+    }
+
+    /* mlock/munlock — Go locks signal stack pages, may fail without CAP_IPC_LOCK */
+    if (strcmp(symbol, "mlock") == 0) {
+        extern int mlock(const void *, size_t);
+        return (void *)mlock;
+    }
+    if (strcmp(symbol, "munlock") == 0) {
+        extern int munlock(const void *, size_t);
+        return (void *)munlock;
+    }
+    if (strcmp(symbol, "mlockall") == 0) {
+        extern int mlockall(int);
+        return (void *)mlockall;
+    }
+    if (strcmp(symbol, "munlockall") == 0) {
+        extern int munlockall(void);
+        return (void *)munlockall;
     }
 
     return NULL;

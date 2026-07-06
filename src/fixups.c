@@ -563,7 +563,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                         if (addr) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
                             if (getenv("MACIFY_TRACE_FIXUPS")) {
-                                fprintf(stderr, "macify: fixup sym=%s -> %p\n", sym, addr);
+                                fprintf(stderr, "macify: fixup sym=%s -> %p (GOT=%p)\n", sym, addr, (void*)chain_ptr);
                             }
                             if (strcmp(sym, "malloc_size") == 0) {
                                 fprintf(stderr, "macify: chained fixup malloc_size at chain_ptr=%p (page+0x%lx) -> %p\n",
