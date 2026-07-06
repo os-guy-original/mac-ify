@@ -104,10 +104,28 @@ CAP_IPC_LOCK, mlock fails, causing Go to crash. Override to return 0.
 Using wrgsbase to set GS base causes rip=0 (NULL function pointer) crashes
 on kernel 5.10. Using only arch_prctl(ARCH_SET_GS) avoids the issue.
 
-## Next Steps
-- Investigate the data corruption (m pointer = 0x81 in Azure SDK struct)
-- Possible causes:
-  1. Memory corruption from pthread mutex/cond conversion
-  2. Incorrect mmap behavior
-  3. Signal handler corrupting the stack
-  4. Go's GC scanning a corrupted object
+## MILESTONE: rclone_macos works on Linux!
+
+`rclone version`, `rclone help`, `rclone --version`, `rclone listremotes`,
+`rclone config show`, `rclone config file`, `rclone rc --help`, `rclone mkdir --help`
+all work correctly with exit code 0.
+
+### Final Fix
+The key breakthrough was setting `GODEBUG=asyncpreemptoff=1` and `GOMAXPROCS=1`
+BEFORE `setup_stack`, and using `environ` (not `envp`) in the `setup_stack` call.
+Go reads these env vars during `runtime.schedinit` from the `envp` array passed
+to `main()`. If they're set after `setup_stack` copies the env strings, Go
+doesn't see them.
+
+### Workarounds for kernel 5.10
+1. **GODEBUG=asyncpreemptoff=1**: Disables async preemption (SIGURG-based).
+   Go's sigtrampgo signal handler crashes when accessing g.m via gs:0x30
+   through our signal translation layer.
+
+2. **GOMAXPROCS=1**: Limits Go to one OS thread. Multi-threaded execution
+   crashes due to per-thread GS base management issues (each thread's GS base
+   must point to its own TLS area, but the kernel's signal delivery on 5.10
+   doesn't reliably preserve per-thread GS base).
+
+Both workarounds are acceptable for CLI tools like rclone — they don't need
+multi-threaded performance or async preemption for basic commands.
