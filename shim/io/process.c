@@ -80,7 +80,13 @@ ssize_t macify_read(int fd, void *buf, size_t count) {
         int pr = poll(&pfd, 1, 0);
         if (pr == 0) return 0; /* No data — pipe has no writer */
     }
-    return real_read(fd, buf, count);
+    ssize_t r = real_read(fd, buf, count);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: read(%d, %zu) = %zd\n", fd, count, r);
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 ssize_t macify_write(int fd, const void *buf, size_t count) __asm__("write");
