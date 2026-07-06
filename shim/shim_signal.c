@@ -35,6 +35,15 @@ static void macify_init_stdio(void) {
     __stdinp = stdin;
     __stdoutp = stdout;
 
+    /* Initialize real_dlsym EARLY — it's needed by sigaction override and
+     * other functions that call real_dlsym directly. Without this, the first
+     * call to sigaction (which calls real_dlsym) would call NULL, crashing.
+     * We can't use dlsym() to initialize it because glibc's dlsym is found
+     * first in the symbol search order (shim loaded as dependency, not
+     * LD_PRELOAD). So we call macify_init_real_dlsym directly. */
+    extern void macify_init_real_dlsym(void);
+    macify_init_real_dlsym();
+
     /* Cache glibc's signal restorer function for use in sigaction override.
      * SA_RESTORER is REQUIRED on modern Linux kernels — without it, signal
      * delivery fails with SIGSEGV (SI_KERNEL).
@@ -499,10 +508,34 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
                 signum, act, oldact, __builtin_return_address(0));
         (void)write(2, b, n);
     }
-    /* Translate macOS signal number to Linux signal number — but ONLY
-     * if the caller is macOS code. macify's own code uses Linux signal
-     * numbers and should not be translated. */
-    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+
+    /* If the caller is NOT macOS text (e.g., macify's own code or glibc
+     * internals), pass through directly to glibc's sigaction without any
+     * translation. The act/oldact are already in Linux format.
+     * CRITICAL: If we translate a Linux-format struct sigaction as if it
+     * were a macOS-format struct, the flags and mask fields are read from
+     * the wrong offsets, causing signal handlers to be installed with
+     * wrong flags (no SA_ONSTACK, no SA_SIGINFO, no SA_RESTORER). */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        if (!real_sigaction) {
+            real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
+            if (!real_sigaction) {
+                /* RTLD_NEXT might not find it if libc is loaded before shim.
+                 * Try RTLD_DEFAULT which searches all libraries. */
+                real_sigaction = real_dlsym(RTLD_DEFAULT, "sigaction");
+            }
+        }
+        if (!real_sigaction) {
+            char b[128];
+            int n = snprintf(b, sizeof(n), "macify: WARNING: real_sigaction=NULL, sig=%d\n", signum);
+            (void)write(2, b, n);
+            return -1;
+        }
+        return real_sigaction(signum, act, oldact);
+    }
+
+    /* macOS caller: translate signal number and struct layout */
+    {
         static const int sig_xlate[32] = {
             [0]  = 0, [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5, [6] = 6,
             [7]  = 0,   /* SIGEMT — no Linux equiv */
@@ -597,7 +630,12 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
              * For non-macOS callers (macify itself): pass through. */
             if (macify_caller_is_macos_text(__builtin_return_address(0))) {
                 linux_act.sa_sigaction = macify_crash_handler;
-                linux_act.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+                linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+                /* Add SA_RESTORER — required on modern Linux kernels */
+                if (macify_sa_restorer) {
+                    linux_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
+                    linux_act.sa_restorer = macify_sa_restorer;
+                }
             }
             p_linux_act = &linux_act;
         } else if (signum == SIGILL) {

@@ -524,7 +524,7 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         }
         sn = snprintf(sb, sizeof(sb), "\nstack (rclone_base=0x%lx):\n", (unsigned long)rclone_base);
         write(2, sb, sn);
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < 32; i++) {
             uint64_t addr = sp + (uint64_t)i * 8;
             uint64_t val = 0;
             if (addr > 0x10000 && addr < 0x7fffffffffffUL) {

@@ -24,6 +24,21 @@ const void *CFDictionaryGetValue(const void *dict, const void *key);
 void *macify_dns_configuration_copy(void);
 void macify_dns_configuration_free(void *config);
 
+/* Forward declaration */
+static int find_dlsym_cb(struct dl_phdr_info *info, size_t size, void *data);
+
+/* Initialize real_dlsym by walking libc.so's ELF dynamic symbol table.
+ * This MUST be called early (in the constructor) because:
+ * 1. The dlsym override might not be called (glibc's dlsym is found first
+ *    in the symbol search order when the shim is loaded as a dependency)
+ * 2. Other shim functions (sigaction, signal, etc.) call real_dlsym directly
+ * 3. If real_dlsym is NULL when called, the call jumps to 0, crashing */
+void macify_init_real_dlsym(void) {
+    if (!real_dlsym) {
+        dl_iterate_phdr(find_dlsym_cb, &real_dlsym);
+    }
+}
+
 /* Find glibc's real dlsym by walking libc.so's ELF dynamic symbol table.
  * We can't use dlsym(RTLD_NEXT, "dlsym") because that would recurse. */
 static int find_dlsym_cb(struct dl_phdr_info *info, size_t size, void *data) {
@@ -121,7 +136,13 @@ void *dlsym(void *handle, const char *symbol) {
         if (shim_sym) return shim_sym;
     }
 
-    return real_dlsym(handle, symbol);
+    void *result = real_dlsym(handle, symbol);
+    if (!result && getenv("MACIFY_TRACE_DLSYM")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b), "macify: dlsym(%s) = NULL (handle=%p)\n", symbol, handle);
+        (void)write(2, b, n);
+    }
+    return result;
 }
 
 int dlclose(void *handle) {
