@@ -2,14 +2,31 @@
 #include "syscall_internal.h"
 
 /* Buffers for sigprocmask syscall translation (macOS 4-byte ↔ Linux 8-byte sigset_t).
- * File-scope so they can be accessed both pre- and post-syscall. */
-static unsigned char linux_set_sigprocmask[8];
-static unsigned char linux_oset_sigprocmask[8];
+ * Thread-local to avoid races when signals are delivered concurrently on
+ * multiple threads. */
+static __thread unsigned char linux_set_sigprocmask[8];
+static __thread unsigned char linux_oset_sigprocmask[8];
 
 /* Buffers for sigaltstack syscall translation (macOS/Linux stack_t field order differs). */
 #include <signal.h>
-static stack_t linux_ss_sigaltstack;
-static stack_t linux_oss_sigaltstack;
+static __thread stack_t linux_ss_sigaltstack;
+static __thread stack_t linux_oss_sigaltstack;
+
+/* Pre-resolved shim symbols — looked up once at init, NOT inside the
+ * signal handler (dlsym is not async-signal-safe). */
+static void *(*macify_go_signal_wrapper_ptr)(int, siginfo_t *, void *) = NULL;
+static void **macify_saved_go_handlers_ptr = NULL;
+static int shim_symbols_resolved = 0;
+
+/* Called from main.c after shim is loaded — pre-resolves symbols
+ * so the SIGILL handler doesn't need to call dlsym. */
+void sigill_handler_pre_resolve(void) {
+    if (!shim_symbols_resolved) {
+        macify_go_signal_wrapper_ptr = dlsym(RTLD_DEFAULT, "macify_go_signal_wrapper");
+        macify_saved_go_handlers_ptr = dlsym(RTLD_DEFAULT, "macify_saved_go_handlers");
+        shim_symbols_resolved = 1;
+    }
+}
 
 void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     (void)sig; (void)info;
@@ -153,21 +170,13 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
              * of Go's handler directly. This prevents signals from being
              * delivered before m.gsignal is allocated. */
             if (g_tls_g_addr) {
-                /* Look up the wrapper and handler array from the shim */
-                static void *(*p_wrapper)(void);
-                static void **p_handlers;
-                static int looked_up = 0;
-                if (!looked_up) {
-                    p_wrapper = dlsym(RTLD_DEFAULT, "macify_go_signal_wrapper");
-                    p_handlers = dlsym(RTLD_DEFAULT, "macify_saved_go_handlers");
-                    looked_up = 1;
-                }
-                if (p_wrapper && p_handlers) {
+                /* Use pre-resolved shim symbols (no dlsym in signal handler) */
+                if (macify_go_signal_wrapper_ptr && macify_saved_go_handlers_ptr) {
                     int linux_sig_for_handler = translate_kill_signal((int)a1);
                     if (linux_sig_for_handler > 0 && linux_sig_for_handler < 32) {
-                        p_handlers[linux_sig_for_handler] = go_handler;
+                        macify_saved_go_handlers_ptr[linux_sig_for_handler] = go_handler;
                     }
-                    linux_sa.handler = p_wrapper;
+                    linux_sa.handler = macify_go_signal_wrapper_ptr;
                     linux_sa.flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
                 } else {
                     /* Fallback: install Go's handler directly */

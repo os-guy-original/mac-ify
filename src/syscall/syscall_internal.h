@@ -41,3 +41,4 @@ extern unsigned long g_slow_path_sites;
 
 #endif /* SYSCALL_INTERNAL_H */
 #define BACKWARD_SCAN_BYTES 32
+void sigill_handler_pre_resolve(void);

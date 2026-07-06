@@ -512,6 +512,10 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: image header set to %#lx\n",
                         (unsigned long)header);
             }
+            /* Pre-resolve shim symbols for the SIGILL handler.
+             * This avoids calling dlsym() inside the signal handler
+             * (dlsym is not async-signal-safe). */
+            sigill_handler_pre_resolve();
             /* Force OpenSSL init globals to success ONLY when explicitly
              * requested via MACIFY_FORCE_SSL=1 env var. The old code
              * auto-detected curl/wget by path substring, but the hardcoded
