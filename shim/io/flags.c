@@ -138,6 +138,8 @@ int open(const char *pathname, int flags, ...) {
         va_end(ap);
     }
     int fd = real_open(pathname, linux_flags, mode);
+    if (fd >= 0) errno = 0;
+    
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256];
         int n = snprintf(b, sizeof(b), "macify: open(\"%s\", 0x%x->0x%x) = %d\n",
@@ -175,6 +177,8 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     static int (*real_openat)(int, const char *, int, ...) = NULL;
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
     int fd = real_openat(linux_dirfd, pathname, linux_flags, mode);
+    if (fd >= 0) errno = 0;
+    
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256];
         int n = snprintf(b, sizeof(b), "macify: openat(%d->%d, \"%s\", 0x%x->0x%x) = %d\n",

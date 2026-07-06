@@ -158,7 +158,7 @@ int macify_stat(const char *path, struct macos_stat *buf) {
         return real_stat(path, (struct stat *)buf);
     struct stat ls;
     int ret = real_stat(path, &ls);
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
             "macify: stat(\"%s\") = %d mode=0x%x size=%lld\n",
@@ -177,7 +177,7 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
         return real_lstat(path, (struct stat *)buf);
     struct stat ls;
     int ret = real_lstat(path, &ls);
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
             "macify: lstat(\"%s\") = %d mode=0x%x size=%lld\n",
@@ -195,7 +195,7 @@ int macify_fstat(int fd, struct macos_stat *buf) {
         return real_fstat(fd, (struct stat *)buf);
     struct stat ls;
     int ret = real_fstat(fd, &ls);
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
             "macify: fstat(%d) = %d mode=0x%x size=%lld\n",
