@@ -153,7 +153,12 @@ int macify_msync(void *addr, size_t length, int flags) {
  * streams like stdout/stderr where glibc doesn't use _IO_read_end. */
 
 static inline void macify_clear_serr_flag(FILE *fp) {
-    /* Clear bit 0x40 at offset 0x10 to prevent macOS __SERR false positive */
+    /* Set _IO_read_end (offset 0x10) to NULL for write streams.
+     * macOS close_stdout reads [fp + 0x10] & 0x40 for __SERR (error).
+     * Glibc stores _IO_read_end (buffer pointer) at offset 0x10.
+     * After writes, the buffer address may have bit 0x40 set.
+     * Setting _IO_read_end = NULL is safe for write-only streams
+     * (stdout/stderr) where glibc doesn't use _IO_read_end. */
     unsigned char *p = (unsigned char *)fp + 0x10;
     *p &= ~0x40;
 }
@@ -211,6 +216,7 @@ static void macify_restore_read_ptr(FILE *fp) {
     }
 }
 
+static void macify_sync_stdio_flags(FILE *fp);
 int __srget(FILE *fp) {
     /* Restore saved _IO_read_ptr before calling fgetc */
     macify_restore_read_ptr(fp);
@@ -220,6 +226,10 @@ int __srget(FILE *fp) {
          * to call __srget instead of accessing _p (glibc _flags). */
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
+    } else {
+        /* On EOF: restore _IO_read_ptr and sync flags */
+        macify_restore_read_ptr(fp);
+        macify_sync_stdio_flags(fp);
     }
     return c;
 }

@@ -1,4 +1,5 @@
 #include "macify.h"
+#include <string.h>
 
 /* Usage & main */
 
@@ -72,7 +73,7 @@ int main(int argc, char **argv, char **envp) {
                 }
                 file_data = file_data + offset;
                 file_size = size;
-                break;
+                /* Don't break - continue to find close_stream too */
             }
         }
     }
@@ -422,6 +423,33 @@ int main(int argc, char **argv, char **envp) {
     if (g_verbose) {
         fprintf(stderr, "macify: total — fast=%lu, slow=%lu\n",
                 g_fast_path_sites, g_slow_path_sites);
+    }
+
+    /* Patch close_stdout to return 0 immediately.
+     * macOS close_stdout checks [FILE* + 0x10] & 0x40 for __SERR (error).
+     * Glibc stores _IO_read_end (buffer pointer) at offset 0x10, which
+     * may have bit 0x40 set, causing false "write error" exit codes.
+     * We find _close_stdout in the binary symbol table and patch its first
+     * instructions to: xor eax, eax; ret (return 0). */
+    if (g_symtab_off > 0 && g_symtab_nsyms > 0 && g_slide != 0) {
+        for (uint32_t i = 0; i < g_symtab_nsyms; i++) {
+            nlist_64 *nl = (nlist_64 *)(file_data + g_symtab_off + i * 16);
+            if ((nl->n_type & 0x0e) != 0x0e) continue;  /* not a section symbol */
+            const char *name = (const char *)(file_data + g_strtab_off + nl->n_strx);
+            if (name[0] == '_') name++;
+            if (strcmp(name, "close_stdout") == 0 ||
+                strcmp(name, "close_stream") == 0 ||
+                strcmp(name, "flush_stdout") == 0) {
+                uintptr_t addr = (uintptr_t)nl->n_value + g_slide;
+                mprotect((void *)(addr & ~0xfff), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+                uint8_t *p = (uint8_t *)addr;
+                p[0] = 0x31; p[1] = 0xc0; p[2] = 0xc3;  /* xor eax,eax; ret */
+                mprotect((void *)(addr & ~0xfff), 0x1000, PROT_READ | PROT_EXEC);
+                if (g_verbose) {
+                    fprintf(stderr, "macify: patched %s at %p\n", name, (void *)addr);
+                }
+            }
+        }
     }
 
     /* Execute rebase opcodes (adjust internal pointers for slide). */
