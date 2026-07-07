@@ -117,7 +117,23 @@ FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
-    return real_fopen(path, mode);
+    FILE *fp = real_fopen(path, mode);
+    if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
+        /* Set a custom buffer at a safe address (low byte without bit 0x40).
+         * macOS binaries check [fp + 0x10] & 0x40 for __SERR (error).
+         * Glibc stores _IO_read_end (buffer pointer) at offset 0x10.
+         * If the buffer address has bit 0x40, false read errors are detected. */
+        char *buf = (char *)malloc(4096 + 128);
+        if (buf) {
+            /* Find offset within allocation that clears bit 0x40 */
+            uintptr_t addr = (uintptr_t)buf;
+            if (addr & 0x40) addr = (addr + 0x7f) & ~0x7f;
+            if (((uintptr_t)addr & 0x40) == 0) {
+                setvbuf(fp, (char *)addr, _IOFBF, 4096);
+            }
+        }
+    }
+    return fp;
 }
 
 int macify_msync(void *addr, size_t length, int flags) __asm__("msync");
@@ -226,9 +242,6 @@ int __srget(FILE *fp) {
          * to call __srget instead of accessing _p (glibc _flags). */
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
-        /* Clear macOS __SERR at offset 0x10 to prevent false read errors.
-         * Only clear the bit, don't modify _IO_read_end's value. */
-        *((unsigned char *)fp + 0x10) &= ~0x40;
     } else {
         /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);
