@@ -242,7 +242,7 @@ int __srget(FILE *fp) {
         /* Save _IO_read_ptr, then set _r = -1 to force next getc
          * to call __srget instead of accessing _p (glibc _flags). */
         macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = -1;
+        *(int *)((char *)fp + 8) = 0;  /* set _r = 0, --_r = -1 < 0 → __srget */
     } else {
         /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);
@@ -290,7 +290,7 @@ int putc_unlocked(int ch, FILE *fp) {
 int getc_unlocked(FILE *fp) {
     int c = fgetc(fp);
     if (c != EOF) {
-        *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+        *(int *)((char *)fp + 8) = 0;  /* set _r = 0, --_r = -1 < 0 → __srget */  /* _r = -1 */
     }
     return c;
 }
@@ -564,8 +564,7 @@ int macify_fputs(const char *s, FILE *stream) {
     return r;
 }
 
-/* fdopen — pass-through. Safe buffer is set by fopen shim.
- * fdopen buffer changes break sort's internal file management. */
+/* fdopen — pass-through. Safe buffer is set by fopen shim. */
 FILE *macify_fdopen(int fd, const char *mode) __asm__("fdopen");
 FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
