@@ -195,12 +195,54 @@ char *libintl_setlocale(int category, const char *locale) {
  * tree uses nl_langinfo(CODESET) to check if the terminal supports UTF-8.
  * If it returns "ANSI_X3.4-1968" (ASCII), tree escapes non-ASCII filenames
  * as octal. We delegate to glibc's nl_langinfo.
- * macOS nl_item constants: CODESET=14, same as Linux. */
+ * IMPORTANT: macOS nl_item constants are different from glibc's.
+ * macOS uses small integers (0-50), glibc uses large values (65536+)
+ * with category bits in high bytes. Without translation, glibc segfaults
+ * on macOS values (e.g., ls -l calling nl_langinfo(ABMON_1+month) crashes). */
 #include <langinfo.h>
+
+/* Translate macOS nl_item to glibc nl_item.
+ * macOS layout (verified by disassembling ls_macos which pre-fetches
+ * nl_langinfo(33..44) for months Jan..Dec — so macOS ABMON_1=33, not 32):
+ *   CODESET=0, D_T_FMT=1, D_FMT=2, T_FMT=3, AM_STR=4, PM_STR=5,
+ *   DAY_1..7=6..12, ABDAY_1..7=13..19, MON_1..12=21..32,
+ *   ABMON_1..12=33..44, ERA=45, ERA_D_FMT=46, ERA_D_T_FMT=47,
+ *   ERA_T_FMT=48, ALT_DIGITS=49, RADIXCHAR=50, THOUSEP=51,
+ *   YESEXPR=52, NOEXPR=53, CRNCYSTR=54, D_MD_ORDER=55 */
+static int macos_to_linux_nl_item(int macos_item) {
+    switch (macos_item) {
+        case 0:  return CODESET;            /* CODESET */
+        case 1:  return D_T_FMT;
+        case 2:  return D_FMT;
+        case 3:  return T_FMT;
+        case 4:  return AM_STR;
+        case 5:  return PM_STR;
+        case 50: return RADIXCHAR;
+        case 51: return THOUSEP;
+        case 52: return YESEXPR;
+        case 53: return NOEXPR;
+        case 54: return CRNCYSTR;
+    }
+    if (macos_item >= 6 && macos_item <= 12)
+        return DAY_1 + (macos_item - 6);
+    if (macos_item >= 13 && macos_item <= 19)
+        return ABDAY_1 + (macos_item - 13);
+    if (macos_item >= 21 && macos_item <= 32)
+        return MON_1 + (macos_item - 21);
+    if (macos_item >= 33 && macos_item <= 44)
+        return ABMON_1 + (macos_item - 33);
+    /* Unknown — return CODESET as safe fallback */
+    return CODESET;
+}
+
 char *nl_langinfo(int item) {
     static char *(*real_nl_langinfo)(int) = NULL;
     if (!real_nl_langinfo) real_nl_langinfo = dlsym(RTLD_NEXT, "nl_langinfo");
     if (!real_nl_langinfo) return "ANSI_X3.4-1968";  /* ASCII fallback */
+    /* If item is in macOS range (small int), translate to glibc value. */
+    if (item >= 0 && item < 100) {
+        item = macos_to_linux_nl_item(item);
+    }
     return real_nl_langinfo(item);
 }
 

@@ -106,26 +106,35 @@ int macify_strerror_r(int errnum, char *buf, size_t buflen) {
 
 /* ── stat / lstat / fstat ────────────────────────────────────── */
 
+/* macOS x86_64 struct stat (with _DARWIN_C_SOURCE / 64-bit ino_t).
+ * Field order and padding MUST match the macOS ABI exactly.
+ * Verified empirically by disassembling ls_macos: it reads st_mode at
+ * offset 4, st_ino at offset 8 — so the layout is:
+ *   st_dev(4) st_mode(2) st_nlink(2) st_ino(8) st_uid(4) st_gid(4)
+ *   st_rdev(4) _pad(4) st_atim(16) st_mtim(16) st_ctim(16)
+ *   st_birthtim(16) st_size(8) st_blocks(8) st_blksize(4)
+ *   st_flags(4) st_gen(4) st_lspare(4) st_qspare[2](16)
+ * Total: 144 bytes. */
 struct macos_stat {
-    int32_t       st_dev;
-    uint16_t      st_mode;
-    uint16_t      st_nlink;
-    uint64_t      st_ino;
-    uint32_t      st_uid;
-    uint32_t      st_gid;
-    int32_t       st_rdev;
-    int32_t       _pad1;
-    struct timespec st_atim;
-    struct timespec st_mtim;
-    struct timespec st_ctim;
-    struct timespec st_birthtim;
-    int64_t       st_size;
-    int64_t       st_blocks;
-    int32_t       st_blksize;
-    uint32_t      st_flags;
-    uint32_t      st_gen;
-    int32_t       st_lspare;
-    int64_t       st_qspare[2];
+    int32_t       st_dev;        /* offset 0  */
+    uint16_t      st_mode;       /* offset 4  */
+    uint16_t      st_nlink;      /* offset 6  */
+    uint64_t      st_ino;        /* offset 8  */
+    uint32_t      st_uid;        /* offset 16 */
+    uint32_t      st_gid;        /* offset 20 */
+    int32_t       st_rdev;       /* offset 24 */
+    int32_t       _pad0;         /* offset 28 (alignment padding) */
+    struct timespec st_atim;     /* offset 32 */
+    struct timespec st_mtim;     /* offset 48 */
+    struct timespec st_ctim;     /* offset 64 */
+    struct timespec st_birthtim; /* offset 80 */
+    int64_t       st_size;       /* offset 96 */
+    int64_t       st_blocks;     /* offset 104 */
+    int32_t       st_blksize;    /* offset 112 */
+    uint32_t      st_flags;      /* offset 116 */
+    uint32_t      st_gen;        /* offset 120 */
+    int32_t       st_lspare;     /* offset 124 */
+    int64_t       st_qspare[2];  /* offset 128 */
 };
 
 static void translate_stat(const struct stat *ls, struct macos_stat *ms) {
@@ -211,6 +220,8 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (!real_fstatat) real_fstatat = dlsym(RTLD_NEXT, "fstatat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstatat(dirfd, pathname, (struct stat *)buf, flags);
+    /* macOS AT_FDCWD = -2, Linux AT_FDCWD = -100 */
+    if (dirfd == -2) dirfd = -100;
     int linux_flags = 0;
     if (flags & 0x0200) linux_flags |= 0x0100;
     if (flags & 0x0400) linux_flags |= 0x0400;
@@ -220,6 +231,23 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     int ret = real_fstatat(dirfd, pathname, &ls, linux_flags);
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
+}
+
+/* ── faccessat ───────────────────────────────────────────────── */
+/* macOS AT_FDCWD = -2, Linux AT_FDCWD = -100.
+ * macOS AT_EACCESS = 0x0010, Linux AT_EACCESS = 0x0200.
+ * Without translation, glibc's faccessat returns EINVAL for AT_FDCWD=-2,
+ * which breaks sort/coreutils' file readability check. */
+int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) __asm__("faccessat");
+int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) {
+    static int (*real_faccessat)(int, const char *, int, int) = NULL;
+    if (!real_faccessat) real_faccessat = dlsym(RTLD_NEXT, "faccessat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_faccessat(dirfd, pathname, mode, flags);
+    if (dirfd == -2) dirfd = -100;  /* AT_FDCWD */
+    int linux_flags = 0;
+    if (flags & 0x0010) linux_flags |= 0x0200;  /* AT_EACCESS */
+    return real_faccessat(dirfd, pathname, mode, linux_flags);
 }
 
 /* ── passwd ──────────────────────────────────────────────────── */

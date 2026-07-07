@@ -135,3 +135,207 @@ int macify_msync(void *addr, size_t length, int flags) {
     }
     return r;
 }
+
+/* ── macOS stdio internal functions ────────────────────────────
+ *
+ * CRITICAL: macOS FILE* layout differs from glibc's. macOS binaries
+ * read FILE* fields at macOS offsets, which correspond to different
+ * fields in glibc's FILE*. The most problematic access is at offset
+ * 0x10: macOS reads this as `_flags` (short) and checks bit 0x40
+ * (__SERR, error flag). Glibc has `_IO_read_end` (char pointer) at
+ * offset 0x10. After writing to a stream, glibc sets _IO_read_end to
+ * the buffer address, whose low byte may have bit 0x40 set — causing
+ * macOS code to falsely detect a write error.
+ *
+ * Fix: After each stdio write, clear bit 0x40 of the byte at offset
+ * 0x10 of the glibc FILE*. This slightly modifies _IO_read_end (by at
+ * most clearing bit 6 of its low byte), which is safe for write-only
+ * streams like stdout/stderr where glibc doesn't use _IO_read_end. */
+
+static inline void macify_clear_serr_flag(FILE *fp) {
+    /* Clear bit 0x40 at offset 0x10 to prevent macOS __SERR false positive */
+    unsigned char *p = (unsigned char *)fp + 0x10;
+    *p &= ~0x40;
+}
+
+/* __srget — read one character from FILE* (macOS internal).
+ * Called by macOS's getc/fgetc macro when the buffer is empty. */
+int __srget(FILE *fp) {
+    return fgetc(fp);
+}
+
+/* __swbuf — write one character to FILE* (macOS internal).
+ * Called by macOS's putc macro when the buffer is full.
+ * Returns the character on success, EOF on error. */
+int __swbuf(int ch, FILE *fp) {
+    int r = fputc(ch, fp);
+    if (r != EOF) macify_clear_serr_flag(fp);
+    return r;
+}
+
+/* putc_unlocked — write char to FILE* without locking.
+ * On macOS this is a macro that accesses FILE* fields directly.
+ * We provide it as a function to avoid field-offset corruption. */
+int putc_unlocked(int ch, FILE *fp) {
+    int r = fputc(ch, fp);
+    if (r != EOF) macify_clear_serr_flag(fp);
+    return r;
+}
+
+/* getc_unlocked — read char from FILE* without locking. */
+int getc_unlocked(FILE *fp) {
+    return fgetc(fp);
+}
+
+/* putchar_unlocked, getchar_unlocked — variants using stdout/stdin */
+int putchar_unlocked(int ch) {
+    int r = fputc(ch, stdout);
+    if (r != EOF) macify_clear_serr_flag(stdout);
+    return r;
+}
+
+int getchar_unlocked(void) {
+    return fgetc(stdin);
+}
+
+/* ── fread/fgetc shims — translate glibc EOF to macOS __SEOF ───
+ *
+ * macOS binaries check for EOF/error by reading [FILE* + 0x10] as a short:
+ *   bit 0x20 = __SEOF (end of file)
+ *   bit 0x40 = __SERR (error)
+ *
+ * Glibc has _IO_read_end (char pointer) at offset 0x10, not _flags.
+ * After fread returns 0 (EOF), glibc sets _IO_EOF_SEEN in _flags (offset 0),
+ * but macOS code doesn't check offset 0 — it checks offset 0x10.
+ *
+ * Fix: After fread/fgetc returns EOF, set bit 0x20 at offset 0x10 so macOS
+ * code detects EOF. This is safe because at EOF, the buffer is empty
+ * (_IO_read_ptr == _IO_read_end), so modifying _IO_read_end doesn't lose data.
+ * The next underflow call resets _IO_read_end anyway.
+ *
+ * Also clear bit 0x40 (error) to prevent false error detection. */
+
+/* Glibc _flags bits */
+#define GLIBC_IO_EOF_SEEN  0x10
+#define GLIBC_IO_ERR_SEEN  0x20
+
+/* macOS _flags bits (at offset 0x10) */
+#define MACOS_SEOF  0x20
+#define MACOS_SERR  0x40
+
+static inline void macify_sync_stdio_flags(FILE *fp) {
+    unsigned int glibc_flags = *(unsigned int *)((char *)fp + 0);
+    unsigned char *macos_flags = (unsigned char *)fp + 0x10;
+    /* Clear macOS error/EOF bits */
+    *macos_flags &= ~(MACOS_SEOF | MACOS_SERR);
+    /* Set macOS EOF if glibc has EOF */
+    if (glibc_flags & GLIBC_IO_EOF_SEEN) {
+        *macos_flags |= MACOS_SEOF;
+    }
+    /* Set macOS error if glibc has error */
+    if (glibc_flags & GLIBC_IO_ERR_SEEN) {
+        *macos_flags |= MACOS_SERR;
+    }
+}
+
+size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fread");
+size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
+    if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
+    size_t r = real_fread(ptr, size, nmemb, stream);
+    if (getenv("MACIFY_TRACE_FREAD")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b), "macify: fread(%p, %zu, %zu, %p) = %zu\n",
+                ptr, size, nmemb, (void*)stream, r);
+        (void)write(2, b, n);
+    }
+    if (r == 0) {
+        /* EOF or error — buffer is empty, safe to sync flags */
+        macify_sync_stdio_flags(stream);
+    } else {
+        /* Data was read. Clear macOS error flag (bit 0x40) at offset 0x10
+         * to prevent false error detection. This modifies _IO_read_end's
+         * low byte by at most 0x40, but since we're NOT changing
+         * _IO_read_ptr, glibc will re-read the "lost" bytes on the next
+         * underflow. The key insight: sort only checks [fp+0x10] for
+         * errors AFTER fread returns, and we clear the error bit here. */
+        unsigned char *p10 = (unsigned char *)stream + 0x10;
+        *p10 &= ~MACOS_SERR;
+    }
+    return r;
+}
+int macify_fgetc(FILE *stream) __asm__("fgetc");
+int macify_fgetc(FILE *stream) {
+    static int (*real_fgetc)(FILE *) = NULL;
+    if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
+    int r = real_fgetc(stream);
+    if (r == EOF) {
+        macify_sync_stdio_flags(stream);
+    }
+    return r;
+}
+
+/* fseeko — glibc clears _IO_EOF_SEEN on seek. We must also clear
+ * macOS __SEOF at offset 0x10 so sort doesn't think we're still at EOF. */
+int macify_fseeko(FILE *stream, long off, int whence) __asm__("fseeko");
+int macify_fseeko(FILE *stream, long off, int whence) {
+    static int (*real_fseeko)(FILE *, long, int) = NULL;
+    if (!real_fseeko) real_fseeko = dlsym(RTLD_NEXT, "fseeko");
+    int r = real_fseeko(stream, off, whence);
+    if (r == 0) {
+        /* Seek succeeded — clear macOS EOF/error flags at offset 0x10.
+         * After seek, buffer is empty, so modifying _IO_read_end is safe. */
+        unsigned char *macos_flags = (unsigned char *)stream + 0x10;
+        *macos_flags &= ~(MACOS_SEOF | MACOS_SERR);
+    }
+    return r;
+}
+
+/* clearerr — clear both glibc's flags and macOS's flags at offset 0x10 */
+void macify_clearerr(FILE *stream) __asm__("clearerr");
+void macify_clearerr(FILE *stream) {
+    static void (*real_clearerr)(FILE *) = NULL;
+    if (!real_clearerr) real_clearerr = dlsym(RTLD_NEXT, "clearerr");
+    real_clearerr(stream);
+    unsigned char *macos_flags = (unsigned char *)stream + 0x10;
+    *macos_flags &= ~(MACOS_SEOF | MACOS_SERR);
+}
+
+/* ── fclose/fflush shims — protect _IO_read_end from macOS _flags writes ──
+ *
+ * sort's _rpl_fflush writes to [fp + 0x10] as if it's macOS _flags (short).
+ * On glibc, offset 0x10 = _IO_read_end (char pointer). The write corrupts
+ * the pointer, causing fclose to fail with EINVAL.
+ *
+ * Fix: Before calling glibc's fclose, restore _IO_read_end by setting
+ * _IO_read_ptr = _IO_read_end (emptying the buffer). This makes fclose
+ * not use the corrupted pointer for buffer operations. */
+
+int macify_fclose(FILE *stream) __asm__("fclose");
+int macify_fclose(FILE *stream) {
+    static int (*real_fclose)(FILE *) = NULL;
+    if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
+    /* Fix corrupted _IO_read_end by setting _IO_read_ptr = _IO_read_end.
+     * This empties the read buffer, preventing fclose from using the
+     * corrupted pointer. The file descriptor is still valid, so close()
+     * will succeed. */
+    void **read_ptr = (void **)((char *)stream + 8);
+    void **read_end = (void **)((char *)stream + 0x10);
+    *read_ptr = *read_end;
+    return real_fclose(stream);
+}
+
+/* fflush — sort's _rpl_fflush writes to [fp+0x10] before calling fflush.
+ * By the time our fflush runs, _IO_read_end is corrupted. We fix it
+ * by setting _IO_read_ptr = _IO_read_end (emptying buffer). */
+int macify_fflush(FILE *stream) __asm__("fflush");
+int macify_fflush(FILE *stream) {
+    static int (*real_fflush)(FILE *) = NULL;
+    if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
+    if (stream) {
+        void **read_ptr = (void **)((char *)stream + 8);
+        void **read_end = (void **)((char *)stream + 0x10);
+        *read_ptr = *read_end;
+    }
+    return real_fflush(stream);
+}
