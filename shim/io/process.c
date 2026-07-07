@@ -226,6 +226,9 @@ int __srget(FILE *fp) {
          * to call __srget instead of accessing _p (glibc _flags). */
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
+        /* Clear macOS __SERR at offset 0x10 to prevent false read errors.
+         * Only clear the bit, don't modify _IO_read_end's value. */
+        *((unsigned char *)fp + 0x10) &= ~0x40;
     } else {
         /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);

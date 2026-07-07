@@ -90,7 +90,7 @@ run_if_exists uniq_macos       "uniq"       "$MACIFY tests/real/uniq_macos /tmp/
 run_if_exists rev_macos        "rev"        "$MACIFY tests/real/rev_macos < /tmp/ftest/nums.txt" 0
 run_if_exists seq_macos        "seq 1 5"    "$MACIFY tests/real/seq_macos 1 5" 0 "1|2|3|4|5"
 run_if_exists echo_macos       "echo"       "$MACIFY tests/real/echo_macos hello" 0 "hello"
-run_if_exists printf_macos     "printf"     "$MACIFY tests/real/printf_macos '%d' 42" 0 "42"
+run_if_exists printf_macos     "printf"     "$MACIFY tests/real/printf_macos '%d\n' 42" 0 "42"
 run_if_exists basename_macos   "basename"   "$MACIFY tests/real/basename_macos /tmp/ftest/a.txt" 0 "a.txt"
 run_if_exists dirname_macos    "dirname"    "$MACIFY tests/real/dirname_macos /tmp/ftest/a.txt" 0 "/tmp/ftest"
 run_if_exists env_macos        "env"        "$MACIFY tests/real/env_macos PATH=/test" 0 "PATH=/test"
