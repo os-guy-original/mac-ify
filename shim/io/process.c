@@ -357,6 +357,8 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
+    /* Restore saved _IO_read_ptr before calling fread (like __srget) */
+    macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
     if (getenv("MACIFY_TRACE_FREAD")) {
         char b[256];
@@ -366,14 +368,14 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     }
     if (r == 0) {
         /* EOF or error — buffer is empty, safe to sync flags */
+        macify_restore_read_ptr(stream);
         macify_sync_stdio_flags(stream);
     } else {
-        /* Data was read. Clear macOS error flag (bit 0x40) at offset 0x10
-         * to prevent false error detection. This modifies _IO_read_end's
-         * low byte by at most 0x40, but since we're NOT changing
-         * _IO_read_ptr, glibc will re-read the "lost" bytes on the next
-         * underflow. The key insight: sort only checks [fp+0x10] for
-         * errors AFTER fread returns, and we clear the error bit here. */
+        /* Data was read. Save _IO_read_ptr and set _r = -1 to prevent
+         * inlined getc from dereferencing _p (glibc _flags) → SIGSEGV.
+         * Also clear macOS error flag (bit 0x40) at offset 0x10. */
+        macify_save_read_ptr(stream);
+        *(int *)((char *)stream + 8) = -1;
         unsigned char *p10 = (unsigned char *)stream + 0x10;
         *p10 &= ~MACOS_SERR;
     }
@@ -383,8 +385,16 @@ int macify_fgetc(FILE *stream) __asm__("fgetc");
 int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
+    /* Restore saved _IO_read_ptr before calling fgetc (like __srget) */
+    macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
-    if (r == EOF) {
+    if (r != EOF) {
+        /* Save _IO_read_ptr and set _r = -1 to prevent inlined getc
+         * from dereferencing _p (glibc _flags = 0xfbad2084) → SIGSEGV. */
+        macify_save_read_ptr(stream);
+        *(int *)((char *)stream + 8) = -1;
+    } else {
+        macify_restore_read_ptr(stream);
         macify_sync_stdio_flags(stream);
     }
     return r;

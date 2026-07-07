@@ -39,6 +39,25 @@ static void macify_init_stdio(void) {
     __stdinp = stdin;
     __stdoutp = stdout;
 
+    /* Map a zeroed page at 0xfbad2000 so that dereferencing glibc's _flags
+     * (0xfbad2084 etc.) as a pointer returns 0 instead of SIGSEGV.
+     *
+     * macOS code's inlined getc/putc macros read _p (offset 0 of FILE*) as
+     * an 8-byte pointer. On glibc, offset 0 is _flags (0xfbad2084). When
+     * _IO_read_ptr (offset 8) is NULL, _p = 0x00000000fbad2084 = 0xfbad2084.
+     * Dereferencing this crashes. By mapping 0xfbad2000-0xfbad2fff, the
+     * dereference returns 0 (NUL byte) and _p++ stays within the page.
+     *
+     * This is a SAFETY NET — the __srget/fgetc/fread shims set _r = -1 to
+     * prevent inlined getc from dereferencing _p. But if there's a window
+     * where _r is positive (e.g., after fgetc but before _r is set), the
+     * mmap prevents the crash. */
+    {
+        void *p = mmap((void *)0xfbad2000, 0x1000, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        (void)p;  /* if mapping fails, the SIGSEGV recovery handler is the fallback */
+    }
+
     /* Allocate stdout's buffer at a controlled address where the low byte
      * does NOT have bit 0x40 set. macOS binaries check [stdout + 0x10] & 0x40
      * for __SERR (error flag). Glibc stores _IO_read_end (buffer pointer) at

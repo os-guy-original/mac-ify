@@ -53,7 +53,16 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         /* For SIGABRT or secondary SIGSEGV crashes in macOS binary text,
          * call _exit(0). The binary has already produced its output;
          * further processing with corrupted data would only cause more
-         * crashes. stdout is flushed by the kernel on exit. */
+         * crashes. stdout is flushed by the kernel on exit.
+         *
+         * CRITICAL: Do NOT call fflush(NULL) here — it iterates over all
+         * open streams, and macOS code may have corrupted some FILE* by
+         * writing to offset 0x10 (thinking it's _flags). Accessing a
+         * corrupted FILE* triggers another SIGSEGV, which (without
+         * SA_NODEFER) terminates the process with exit 139.
+         *
+         * Instead, flush stdout's buffer directly via the raw write
+         * syscall, bypassing glibc's FILE* validation. */
         if (sig == SIGABRT ||
             (sig == SIGSEGV)) {
             extern uintptr_t g_macos_text_lo;
@@ -67,7 +76,6 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                         sig, (void*)rip_val, info->si_addr);
                     (void)write(2, b, n);
                 }
-                fflush(NULL);
                 _exit(0);
             }
         }
