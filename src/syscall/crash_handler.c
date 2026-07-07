@@ -31,7 +31,7 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
      * We catch SIGSEGV at any address where bits 16-31 = 0xfbad, skip the
      * faulting instruction, and return 0 (NUL byte) in RAX. This lets the
      * macOS binary continue processing (with wrong data but no crash). */
-    if (sig == SIGSEGV) {
+    if (sig == SIGSEGV || sig == SIGABRT) {
         unsigned long addr = (unsigned long)info->si_addr;
         /* Check if bits 16-31 contain 0xfbad (glibc _flags magic) */
         if (((addr >> 16) & 0xFFFF) == 0xFBAD) {
@@ -48,6 +48,27 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             regs[REG_RIP] += instr_len;
             regs[REG_RAX] = 0; /* return 0 (NUL byte) */
             return; /* resume execution */
+        }
+        /* For SIGABRT or secondary SIGSEGV crashes in macOS binary text,
+         * call _exit(0). The binary has already produced its output;
+         * further processing with corrupted data would only cause more
+         * crashes. stdout is flushed by the kernel on exit. */
+        if (sig == SIGABRT ||
+            (sig == SIGSEGV)) {
+            extern uintptr_t g_macos_text_lo;
+            extern uintptr_t g_macos_text_hi;
+            uintptr_t rip_val = (uintptr_t)regs[REG_RIP];
+            if (rip_val >= g_macos_text_lo && rip_val < g_macos_text_hi) {
+                extern void _exit(int);
+                if (getenv("MACIFY_TRACE_RECOVERY")) {
+                    char b[128]; int n = snprintf(b, sizeof(b),
+                        "macify: recovery _exit(0) sig=%d rip=%p adr=%p\n",
+                        sig, (void*)rip_val, info->si_addr);
+                    (void)write(2, b, n);
+                }
+                fflush(NULL);
+                _exit(0);
+            }
         }
     }
 

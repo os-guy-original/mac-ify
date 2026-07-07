@@ -22,12 +22,12 @@ static void *thread_start_wrapper(void *p) {
      * read the wrong fields (ss_size and ss_flags are at different offsets),
      * resulting in a signal stack with size=0 — which causes signal delivery
      * to fail with SIGSEGV (SI_KERNEL). */
-    char *thread_sigstack = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
+    char *thread_sigstack = mmap(NULL, 1024 * 1024, PROT_READ | PROT_WRITE,
                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (thread_sigstack != MAP_FAILED) {
         stack_t ss;
         ss.ss_sp = thread_sigstack;
-        ss.ss_size = 256 * 1024;
+        ss.ss_size = 1024 * 1024;
         ss.ss_flags = 0;
         /* Use raw syscall to bypass our own sigaltstack override */
         syscall(131, &ss, NULL);  /* 131 = SYS_sigaltstack */

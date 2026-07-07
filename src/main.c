@@ -112,7 +112,7 @@ int main(int argc, char **argv, char **envp) {
      * Go panics with "non-Go code set up signal handler without
      * SA_ONSTACK flag". */
     /* Allocate a signal stack (required for SA_ONSTACK to work). */
-    static char sigstack[256 * 1024] __attribute__((aligned(4096)));
+    static char sigstack[1024 * 1024] __attribute__((aligned(4096)));
     stack_t ss;
     ss.ss_sp = sigstack;
     ss.ss_size = sizeof(sigstack);
@@ -686,6 +686,23 @@ int main(int argc, char **argv, char **envp) {
                                                * gets the full crash dump too */
         }
         if (g_verbose) { const char m[] = "CHAINED FIXUPS DONE\n"; write(2, m, sizeof(m)-1); }
+    /* Verify SIGSEGV handler is still installed */
+    {
+        struct sigaction check_sa;
+        sigaction(SIGSEGV, NULL, &check_sa);
+        if (check_sa.sa_sigaction != crash_handler) {
+            char b[128]; int n = snprintf(b, sizeof(b), "macify: WARNING: SIGSEGV handler was overridden to %p!\n", (void*)check_sa.sa_sigaction);
+            (void)write(2, b, n);
+            /* Re-install our handler */
+            struct sigaction reinstall_sa;
+            memset(&reinstall_sa, 0, sizeof(reinstall_sa));
+            reinstall_sa.sa_sigaction = crash_handler;
+            reinstall_sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+            sigemptyset(&reinstall_sa.sa_mask);
+            sigaction(SIGSEGV, &reinstall_sa, NULL);
+            sigaction(SIGABRT, &reinstall_sa, NULL);
+        }
+    }
         /* Clear errno before entering the macOS binary. Our shim's
          * constructor code (sigaction, dladdr, etc.) may set errno,
          * and macOS binaries expect errno to be 0 at program start. */

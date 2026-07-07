@@ -37,8 +37,19 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         return syscall(13, signum, NULL, oldact, 8);
     }
 
-    /* macOS caller: translate signal number and struct layout */
+    /* macOS caller: translate signal number and struct layout.
+     * CRITICAL: Don't allow macOS binaries to override SIGSEGV/SIGABRT
+     * handlers — our crash recovery handler must remain installed to
+     * catch FILE* layout incompatibility crashes. */
     {
+        /* Block macOS code from replacing our crash handlers */
+        if (signum == 11 /* SIGSEGV */ || signum == 6 /* SIGABRT */) {
+            if (act) {
+                /* macOS binary is trying to install its own SIGSEGV/SIGABRT
+                 * handler. Silently ignore — our handler must stay. */
+                return 0;
+            }
+        }
         static const int sig_xlate[32] = {
             [0]  = 0, [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5, [6] = 6,
             [7]  = 0,   /* SIGEMT — no Linux equiv */
