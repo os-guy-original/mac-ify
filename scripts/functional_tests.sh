@@ -228,7 +228,7 @@ echo "  Editors & Pagers"
 echo "============================================================="
 run_if_exists less_macos       "less"     "$MACIFY tests/real/less_macos /tmp/ftest/nums.txt" 0 "3"
 run_if_exists nano_macos       "nano"     "$MACIFY tests/real/nano_macos --version" 0 "nano"
-run_if_exists nvim_macos       "nvim"     "$MACIFY tests/real/nvim_macos --version 2>&1 | head -1" 1
+run_if_exists nvim_macos       "nvim"     "$MACIFY tests/real/nvim_macos --version 2>&1 | head -1" 0
 run_if_exists htop_macos       "htop"     "$MACIFY tests/real/htop_macos --version" 0 "htop"
 
 echo
