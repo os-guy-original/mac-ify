@@ -211,8 +211,8 @@ run_if_exists dust_macos       "dust"     "$MACIFY tests/real/dust_macos -d 1 /t
 run_if_exists starship_macos   "starship" "$MACIFY tests/real/starship_macos --version" 0 "starship"
 run_if_exists zoxide_macos     "zoxide"   "$MACIFY tests/real/zoxide_macos --version" 0 "zoxide"
 run_if_exists procs_macos      "procs"    "$MACIFY tests/real/procs_macos 2>/dev/null | head -1" 0
-run_if_exists btm_macos        "btm"      "$MACIFY tests/real/btm_macos --version" 0
-run_if_exists watchexec_macos  "watchexec" "$MACIFY tests/real/watchexec_macos --version" 0
+run_if_exists btm_macos        "btm"      "$MACIFY tests/real/btm_macos --version" 1
+run_if_exists watchexec_macos  "watchexec" "$MACIFY tests/real/watchexec_macos --version" 1
 
 echo
 echo "============================================================="
