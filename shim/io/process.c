@@ -114,6 +114,12 @@ ssize_t macify_readv(int fd, const struct iovec *iov, int iovcnt) {
     return real_readv(fd, iov, iovcnt);
 }
 
+/* ── _IO_read_ptr save/restore (forward declarations) ──────────
+ * These are defined later but needed by fopen/fdopen to save the
+ * original _IO_read_ptr before corrupting it with _r = -1. */
+static void macify_save_read_ptr(FILE *fp);
+static void macify_restore_read_ptr(FILE *fp);
+
 FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
@@ -133,6 +139,16 @@ FILE *macify_fopen(const char *path, const char *mode) {
                 setvbuf(fp, (char *)addr, _IOFBF, 4096);
             }
         }
+        /* CRITICAL: setvbuf sets _IO_read_ptr (offset 8) to the buffer base
+         * address. macOS's inlined getc macro reads _r from offset 8 (low 4
+         * bytes of _IO_read_ptr). If _r > 0, getc reads *_p (offset 0 =
+         * glibc _flags = 0xfbad2084) as a pointer → crash.
+         * Save _IO_read_ptr, then set _r = -1 to force the first getc to
+         * call __srget. __srget will restore _IO_read_ptr before calling
+         * fgetc, so glibc sees a valid pointer. For fread-based binaries,
+         * the restore also fixes _IO_read_ptr before glibc uses it. */
+        macify_save_read_ptr(fp);
+        *(int *)((char *)fp + 8) = -1;
     }
     return fp;
 }
@@ -235,9 +251,16 @@ static void macify_restore_read_ptr(FILE *fp) {
 
 static void macify_sync_stdio_flags(FILE *fp);
 int __srget(FILE *fp) {
+    /* Call real glibc fgetc directly (NOT our macify_fgetc shim).
+     * If we call macify_fgetc, it does its own save/restore/write-(-1),
+     * which conflicts with ours: macify_fgetc writes -1 to offset 8,
+     * then we save the CORRUPTED _IO_read_ptr. On the next call, we
+     * restore the corrupted value, causing glibc to crash. */
+    static int (*real_fgetc)(FILE *) = NULL;
+    if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
     /* Restore saved _IO_read_ptr before calling fgetc */
     macify_restore_read_ptr(fp);
-    int c = fgetc(fp);
+    int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (c != EOF) {
         /* Save _IO_read_ptr, then set _r = -1 to force next getc
          * to call __srget instead of accessing _p (glibc _flags). */
@@ -263,7 +286,11 @@ int __srget(FILE *fp) {
  *
  * Fix: After fputc, set _w = -1 to force next putc to call __swbuf. */
 int __swbuf(int ch, FILE *fp) {
-    int r = fputc(ch, fp);
+    /* Call real glibc fputc directly (NOT our macify_fputc shim) to
+     * avoid double write-(-1) corruption. See __srget for details. */
+    static int (*real_fputc)(int, FILE *) = NULL;
+    if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
+    int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
         macify_clear_serr_flag(fp);
         /* Set _w = -1 (offset 0x0c = high 4 bytes of _IO_read_ptr) */
@@ -274,9 +301,14 @@ int __swbuf(int ch, FILE *fp) {
 
 /* putc_unlocked — macOS inlines this as a macro accessing FILE* fields.
  * We provide it as a function. After writing, set _w = -1 to prevent
- * the inlined macro from accessing _p (glibc _flags) on the next call. */
+ * the inlined macro from accessing _p (glibc _flags) on the next call.
+ * CRITICAL: Call real glibc fputc directly to avoid double write-(-1)
+ * corruption from our macify_fputc shim. See __srget for details. */
 int putc_unlocked(int ch, FILE *fp) {
-    int r = fputc(ch, fp);
+    static int (*real_fputc)(int, FILE *) = NULL;
+    if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
+    macify_restore_read_ptr(fp);
+    int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
         macify_clear_serr_flag(fp);
         *(int *)((char *)fp + 0x0c) = -1;  /* _w = -1 */
@@ -286,29 +318,52 @@ int putc_unlocked(int ch, FILE *fp) {
 
 /* getc_unlocked — macOS inlines this as a macro accessing FILE* fields.
  * After reading, set _r = -1 to prevent the inlined macro from
- * accessing _p (glibc _flags) on the next call. */
+ * accessing _p (glibc _flags) on the next call.
+ * CRITICAL: Call real glibc fgetc directly to avoid double save/restore
+ * corruption from our macify_fgetc shim. See __srget for details. */
 int getc_unlocked(FILE *fp) {
-    int c = fgetc(fp);
+    static int (*real_fgetc)(FILE *) = NULL;
+    if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
+    macify_restore_read_ptr(fp);
+    int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (c != EOF) {
+        macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+    } else {
+        macify_restore_read_ptr(fp);
+        macify_sync_stdio_flags(fp);
     }
     return c;
 }
 
-/* putchar_unlocked, getchar_unlocked — variants using stdout/stdin */
+/* putchar_unlocked, getchar_unlocked — variants using stdout/stdin.
+ * CRITICAL: Call real glibc fputc/fgetc directly to avoid double
+ * write-(-1) corruption from our shims. See __srget for details. */
 int putchar_unlocked(int ch) {
-    int r = fputc(ch, stdout);
+    static int (*real_fputc)(int, FILE *) = NULL;
+    if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
+    extern FILE *__stdoutp;
+    macify_restore_read_ptr(__stdoutp);
+    int r = real_fputc ? real_fputc(ch, __stdoutp) : EOF;
     if (r != EOF) {
-        macify_clear_serr_flag(stdout);
-        *(int *)((char *)stdout + 0x0c) = -1;  /* _w = -1 */
+        macify_clear_serr_flag(__stdoutp);
+        *(int *)((char *)__stdoutp + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
 }
 
 int getchar_unlocked(void) {
-    int c = fgetc(stdin);
+    static int (*real_fgetc)(FILE *) = NULL;
+    if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
+    extern FILE *__stdinp;
+    macify_restore_read_ptr(__stdinp);
+    int c = real_fgetc ? real_fgetc(__stdinp) : EOF;
     if (c != EOF) {
-        *(int *)((char *)stdin + 8) = -1;  /* _r = -1 */
+        macify_save_read_ptr(__stdinp);
+        *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
+    } else {
+        macify_restore_read_ptr(__stdinp);
+        macify_sync_stdio_flags(__stdinp);
     }
     return c;
 }
@@ -579,5 +634,11 @@ FILE *macify_fdopen(int fd, const char *mode) __asm__("fdopen");
 FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
-    return real_fdopen(fd, mode);
+    FILE *fp = real_fdopen(fd, mode);
+    if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
+        /* Save _IO_read_ptr and set _r = -1 (see fopen for details). */
+        macify_save_read_ptr(fp);
+        *(int *)((char *)fp + 8) = -1;
+    }
+    return fp;
 }
