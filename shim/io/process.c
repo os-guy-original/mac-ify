@@ -242,7 +242,7 @@ int __srget(FILE *fp) {
         /* Save _IO_read_ptr, then set _r = -1 to force next getc
          * to call __srget instead of accessing _p (glibc _flags). */
         macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = 0;  /* set _r = 0, --_r = -1 < 0 → __srget */
+        *(int *)((char *)fp + 8) = -1;
     } else {
         /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);
@@ -290,7 +290,7 @@ int putc_unlocked(int ch, FILE *fp) {
 int getc_unlocked(FILE *fp) {
     int c = fgetc(fp);
     if (c != EOF) {
-        *(int *)((char *)fp + 8) = 0;  /* set _r = 0, --_r = -1 < 0 → __srget */  /* _r = -1 */
+        *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
     }
     return c;
 }
