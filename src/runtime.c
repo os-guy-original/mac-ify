@@ -259,22 +259,96 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         }
     }
 
-    /* Re-install crash handlers before calling main. */
+    /* Re-install crash handlers before calling main.
+     * CRITICAL: Do NOT use SA_ONSTACK for non-Go binaries. SA_ONSTACK makes
+     * the kernel run the handler on the sigaltstack. But if the macOS binary
+     * corrupted the sigaltstack (e.g., via stack overflow or mmap collision),
+     * the kernel can't push the signal frame → double fault → exit 139
+     * without entering the handler.
+     * Without SA_ONSTACK, the handler runs on the current stack (the macOS
+     * binary's 64MB stack), which is always valid. The only downside is that
+     * a stack overflow crash can't be caught, but that's not our failure mode.
+     *
+     * CRITICAL: Use the RAW rt_sigaction syscall (13), NOT glibc's sigaction().
+     * The shim overrides sigaction() and may interfere. Using the raw syscall
+     * goes directly to the kernel. */
     {
-        struct sigaction sa;
+        struct k_sigaction {
+            void (*handler)(int, siginfo_t *, void *);
+            unsigned long flags;
+            void (*restorer)(void);
+            unsigned long mask[16];
+        };
+
+        /* Local signal restorer function — calls rt_sigreturn syscall.
+         * Must be a naked function so the kernel's signal frame layout
+         * matches what rt_sigreturn expects. */
+        __attribute__((naked))
+        void local_restore_rt(void) {
+            __asm__ volatile(
+                "mov $15, %%rax\n\t"    /* SYS_rt_sigreturn = 15 */
+                "syscall\n\t"
+                :::
+            );
+        }
+
+        struct k_sigaction sa;
         memset(&sa, 0, sizeof(sa));
-        sa.sa_sigaction = crash_handler;
-        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
-        sigemptyset(&sa.sa_mask);
-        sigaction(11, &sa, NULL);
-        sigaction(6, &sa, NULL);
-        sigaction(7, &sa, NULL);
-        sigaction(8, &sa, NULL);
-        sigset_t unblock;
-        sigemptyset(&unblock);
-        sigaddset(&unblock, 11);
-        sigaddset(&unblock, 6);
-        sigprocmask(2, &unblock, NULL);
+        sa.handler = crash_handler;
+        /* SA_SIGINFO=4 | SA_NODEFER=0x40000000 | SA_RESTORER=0x01000000 */
+        extern uint64_t g_tls_g_addr;
+        if (g_tls_g_addr) {
+            sa.flags = 0x49000004;  /* +SA_ONSTACK=0x08000000 for Go */
+        } else {
+            sa.flags = 0x41000004;  /* no SA_ONSTACK for non-Go */
+        }
+        sa.restorer = local_restore_rt;
+        memset(sa.mask, 0, sizeof(sa.mask));
+        /* Raw rt_sigaction syscall: syscall(13, signum, act, oldact, sigsetsize) */
+        long r1 = syscall(13, 11, &sa, NULL, 8);  /* SIGSEGV */
+        long r2 = syscall(13, 6,  &sa, NULL, 8);  /* SIGABRT */
+        long r3 = syscall(13, 7,  &sa, NULL, 8);  /* SIGBUS */
+        long r4 = syscall(13, 8,  &sa, NULL, 8);  /* SIGFPE */
+
+        /* Unblock SIGSEGV and SIGABRT via raw rt_sigprocmask syscall */
+        unsigned long unblock_mask[16];
+        memset(unblock_mask, 0, sizeof(unblock_mask));
+        /* Signal N is bit (N-1) in the sigset. SIGSEGV=11 → bit 10, SIGABRT=6 → bit 5 */
+        unblock_mask[0] = (1UL << 10) | (1UL << 5);
+        /* rt_sigprocmask: syscall(14, how, set, oldset, sigsetsize)
+         * how=1 = SIG_UNBLOCK */
+        long r5 = syscall(14, 1, unblock_mask, NULL, 8);
+
+        if (getenv("MACIFY_VERIFY_HANDLER")) {
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "macify: raw sigaction: SEGV=%ld ABRT=%ld BUS=%ld FPE=%ld unblock=%ld\n",
+                r1, r2, r3, r4, r5);
+            (void)write(2, b, n);
+        }
+
+        /* Verify handler installation */
+        if (getenv("MACIFY_VERIFY_HANDLER")) {
+            struct sigaction check;
+            memset(&check, 0, sizeof(check));
+            sigaction(11, NULL, &check);
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "macify: post-install SIGSEGV handler=%p flags=0x%x SA_NODEFER=%d SA_ONSTACK=%d\n",
+                (void*)check.sa_sigaction, check.sa_flags,
+                (check.sa_flags & SA_NODEFER) ? 1 : 0,
+                (check.sa_flags & SA_ONSTACK) ? 1 : 0);
+            (void)write(2, b, n);
+
+            /* Check if SIGSEGV is blocked */
+            sigset_t curmask;
+            sigemptyset(&curmask);
+            sigprocmask(0, NULL, &curmask);
+            int segv_blocked = sigismember(&curmask, 11);
+            n = snprintf(b, sizeof(b),
+                "macify: SIGSEGV blocked=%d\n", segv_blocked);
+            (void)write(2, b, n);
+        }
     }
 
     /* The asm block switches to the macOS binary's stack, calls main(),

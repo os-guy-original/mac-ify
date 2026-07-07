@@ -129,7 +129,14 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
     if (ordinal_idx < 0 || ordinal_idx >= g_ndylibs) return NULL;
     loaded_dylib *dy = &g_dylibs[ordinal_idx];
 
-    void *addr = dlsym(dy->handle, sym);
+    /* For data symbols like 'environ', dlsym(libc_handle, ...) returns
+     * libc's weak definition, which may differ from the CRT's strong
+     * definition. Check RTLD_DEFAULT first to get the strong definition. */
+    void *addr = NULL;
+    if (strcmp(sym, "environ") == 0 || strcmp(sym, "__environ") == 0) {
+        addr = dlsym(RTLD_DEFAULT, sym);
+    }
+    if (!addr) addr = dlsym(dy->handle, sym);
     if (!addr && dy->libc_handle) addr = dlsym(dy->libc_handle, sym);
     if (!addr && dy->libm_handle) addr = dlsym(dy->libm_handle, sym);
 
