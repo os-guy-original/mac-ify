@@ -221,12 +221,12 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
  * SIGBUS and install our own handler. */
 sighandler_t macify_signal(int signum, sighandler_t handler) __asm__("signal");
 sighandler_t macify_signal(int signum, sighandler_t handler) {
-    if (signum == SIGSEGV || signum == SIGBUS) {
+    if (signum == SIGSEGV || signum == SIGBUS || signum == SIGABRT) {
         /* Install our crash handler via raw rt_sigaction syscall */
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = macify_crash_handler;
-        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
         if (macify_sa_restorer) {
             sa.sa_flags |= 0x01000000;  /* SA_RESTORER */
             sa.sa_restorer = macify_sa_restorer;

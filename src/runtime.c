@@ -259,6 +259,24 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         }
     }
 
+    /* Re-install crash handlers before calling main. */
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = crash_handler;
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        sigaction(11, &sa, NULL);
+        sigaction(6, &sa, NULL);
+        sigaction(7, &sa, NULL);
+        sigaction(8, &sa, NULL);
+        sigset_t unblock;
+        sigemptyset(&unblock);
+        sigaddset(&unblock, 11);
+        sigaddset(&unblock, 6);
+        sigprocmask(2, &unblock, NULL);
+    }
+
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
      * macOS binaries use printf/fwrite which buffer output internally. */
