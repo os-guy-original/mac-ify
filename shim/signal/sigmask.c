@@ -180,6 +180,12 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
 
     if (set) {
         macos_to_linux_sigset(set, &linux_set);
+        /* Never allow macOS code to block SIGSEGV/SIGABRT — our crash
+         * recovery handler must always be able to run. */
+        if (linux_how == SIG_BLOCK || linux_how == SIG_SETMASK) {
+            sigdelset(&linux_set, SIGSEGV);
+            sigdelset(&linux_set, SIGABRT);
+        }
         p_linux_set = &linux_set;
     }
     if (oldset) {
@@ -229,13 +235,13 @@ int macify_sigaltstack(const void *ss, void *oss) {
         linux_ss.ss_size = *(const size_t *)(macos_ss + 8);
         linux_ss.ss_flags = *(const int *)(macos_ss + 16);
 
-        /* If Go tries to DISABLE the signal stack (SS_DISABLE),
-         * replace with our own to keep crash handling working. */
+        /* NEVER allow disabling the signal stack — our crash handler
+         * requires SA_ONSTACK to work. */
         if (linux_ss.ss_flags & 0x1 /* SS_DISABLE */) {
-            static char fallback_ss[256 * 1024] __attribute__((aligned(4096)));
-            linux_ss.ss_sp = fallback_ss;
-            linux_ss.ss_size = sizeof(fallback_ss);
-            linux_ss.ss_flags = 0;
+            return 0;  /* pretend success but don't disable */
+        }
+
+        if (linux_ss.ss_flags & 0x1 /* SS_DISABLE */) {
         }
         p_ss = &linux_ss;
     }

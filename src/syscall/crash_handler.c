@@ -14,6 +14,7 @@
  * and register state so we can debug crashes in loaded macOS binaries.
  * Uses ONLY signal-safe functions (write, snprintf — NOT fprintf). */
 void crash_handler(int sig, siginfo_t *info, void *uctx) {
+
     static char buf[1024];
     int n __attribute__((unused));
 

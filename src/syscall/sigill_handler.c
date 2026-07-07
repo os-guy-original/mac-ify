@@ -229,6 +229,12 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
                     }
                 }
             }
+            /* Never allow blocking SIGSEGV(11) or SIGABRT(6) — our crash
+             * recovery handler must always be able to run. */
+            if (a1 == 1 /* SIG_BLOCK */ || a1 == 3 /* SIG_SETMASK */) {
+                linux_mask &= ~(1ULL << 10);  /* SIGSEGV = bit 10 */
+                linux_mask &= ~(1ULL << 5);   /* SIGABRT = bit 5 */
+            }
             *(uint64_t *)linux_set_sigprocmask = linux_mask;
             a2 = (long)linux_set_sigprocmask;
         }
@@ -250,16 +256,16 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             linux_ss_sigaltstack.ss_flags = *(int *)(macos_ss + 16);
             linux_ss_sigaltstack.ss_size = *(size_t *)(macos_ss + 8);
 
-            /* If Go tries to DISABLE the signal stack (SS_DISABLE),
-             * replace it with our own stack instead. Go disables the
-             * signal stack when it's done with signal setup, but we
-             * need it to stay active for crash handling. */
+            /* NEVER allow disabling the signal stack — our crash handler
+             * requires SA_ONSTACK to work. Replace SS_DISABLE with our own. */
             if (linux_ss_sigaltstack.ss_flags & 0x1 /* SS_DISABLE */) {
-                static char fallback_sigstack[256 * 1024] __attribute__((aligned(4096)));
+                static char fallback_sigstack[1024 * 1024] __attribute__((aligned(4096)));
                 linux_ss_sigaltstack.ss_sp = fallback_sigstack;
                 linux_ss_sigaltstack.ss_size = sizeof(fallback_sigstack);
                 linux_ss_sigaltstack.ss_flags = 0;
             }
+            /* Also block SS_ONSTACK — macOS code shouldn't set this */
+            linux_ss_sigaltstack.ss_flags &= ~0x2;
             a1 = (long)&linux_ss_sigaltstack;
         }
         if (a2) {
