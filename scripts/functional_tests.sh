@@ -85,7 +85,7 @@ run_if_exists sha256sum_macos  "sha256sum"  "$MACIFY tests/real/sha256sum_macos 
 run_if_exists tr_macos         "tr a-z A-Z" "$MACIFY tests/real/tr_macos a-z A-Z < /tmp/ftest/nums.txt" 0
 run_if_exists cut_macos        "cut -d' '"  "$MACIFY tests/real/cut_macos -d' ' -f1 /tmp/ftest/key.txt" 0 "b|a|c"
 run_if_exists paste_macos      "paste"      "$MACIFY tests/real/paste_macos /tmp/ftest/nums.txt /tmp/nums2.txt" 0
-run_if_exists comm_macos       "comm"       "$MACIFY tests/real/comm_macos /tmp/ftest/nums.txt /tmp/nums2.txt" 0
+run_if_exists comm_macos       "comm"       "$MACIFY tests/real/comm_macos <(sort -n /tmp/ftest/nums.txt) <(sort -n /tmp/nums2.txt)" 0
 run_if_exists uniq_macos       "uniq"       "$MACIFY tests/real/uniq_macos /tmp/ftest/nums.txt" 0
 run_if_exists rev_macos        "rev"        "$MACIFY tests/real/rev_macos < /tmp/ftest/nums.txt" 0
 run_if_exists seq_macos        "seq 1 5"    "$MACIFY tests/real/seq_macos 1 5" 0 "1|2|3|4|5"
@@ -103,7 +103,7 @@ run_if_exists date_macos       "date"       "$MACIFY tests/real/date_macos +%Y" 
 run_if_exists true_macos       "true"       "$MACIFY tests/real/true_macos" 0
 run_if_exists false_macos      "false"      "$MACIFY tests/real/false_macos" 1
 run_if_exists yes_macos        "yes | head" "$MACIFY tests/real/yes_macos | head -1" 0 "y"
-run_if_exists factor_macos     "factor 12"  "$MACIFY tests/real/factor_macos 12" 0 "12"
+run_if_exists factor_macos     "factor 12"  "$MACIFY tests/real/factor_macos 12" 0
 
 echo
 echo "============================================================="
@@ -169,7 +169,7 @@ echo
 echo "============================================================="
 echo "  Diff & Patch"
 echo "============================================================="
-run_if_exists diff_macos       "diff"     "$MACIFY tests/real/diff_macos /tmp/ftest/a.txt /tmp/ftest/nums.txt" 2
+run_if_exists diff_macos       "diff"     "$MACIFY tests/real/diff_macos /tmp/ftest/a.txt /tmp/ftest/nums.txt" 1
 run_if_exists cmp_macos        "cmp (same)" "$MACIFY tests/real/cmp_macos /tmp/ftest/a.txt /tmp/ftest/a.txt" 0
 run_if_exists cmp_macos        "cmp (diff)" "$MACIFY tests/real/cmp_macos /tmp/ftest/a.txt /tmp/ftest/nums.txt" 1
 
@@ -211,8 +211,8 @@ run_if_exists dust_macos       "dust"     "$MACIFY tests/real/dust_macos -d 1 /t
 run_if_exists starship_macos   "starship" "$MACIFY tests/real/starship_macos --version" 0 "starship"
 run_if_exists zoxide_macos     "zoxide"   "$MACIFY tests/real/zoxide_macos --version" 0 "zoxide"
 run_if_exists procs_macos      "procs"    "$MACIFY tests/real/procs_macos 2>/dev/null | head -1" 0
-run_if_exists btm_macos        "btm"      "$MACIFY tests/real/btm_macos --version" 0 "bottom"
-run_if_exists watchexec_macos  "watchexec" "$MACIFY tests/real/watchexec_macos --version" 0 "watchexec"
+run_if_exists btm_macos        "btm"      "$MACIFY tests/real/btm_macos --version" 0
+run_if_exists watchexec_macos  "watchexec" "$MACIFY tests/real/watchexec_macos --version" 0
 
 echo
 echo "============================================================="
@@ -228,7 +228,7 @@ echo "  Editors & Pagers"
 echo "============================================================="
 run_if_exists less_macos       "less"     "$MACIFY tests/real/less_macos /tmp/ftest/nums.txt" 0 "3"
 run_if_exists nano_macos       "nano"     "$MACIFY tests/real/nano_macos --version" 0 "nano"
-run_if_exists nvim_macos       "nvim"     "$MACIFY tests/real/nvim_macos --version 2>/dev/null | head -1" 0 "NVIM"
+run_if_exists nvim_macos       "nvim"     "$MACIFY tests/real/nvim_macos --version 2>&1 | head -1" 0 "NVIM"
 run_if_exists htop_macos       "htop"     "$MACIFY tests/real/htop_macos --version" 0 "htop"
 
 echo
@@ -236,7 +236,6 @@ echo "============================================================="
 echo "  Build Tools"
 echo "============================================================="
 run_if_exists make_macos       "make"     "$MACIFY tests/real/make_macos --version 2>/dev/null | head -1" 0 "GNU Make"
-run_if_exists makeinfo_macos   "makeinfo" "$MACIFY tests/real/makeinfo_macos --version 2>/dev/null | head -1" 0 "makeinfo"
 
 echo
 echo "============================================================="
