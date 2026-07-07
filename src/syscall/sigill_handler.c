@@ -235,6 +235,11 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
                 linux_mask &= ~(1ULL << 10);  /* SIGSEGV = bit 10 */
                 linux_mask &= ~(1ULL << 5);   /* SIGABRT = bit 5 */
             }
+            /* Never allow blocking SIGSEGV(11) or SIGABRT(6) */
+            if (a1 == 1 || a1 == 3) {
+                linux_mask &= ~(1ULL << 10);
+                linux_mask &= ~(1ULL << 5);
+            }
             *(uint64_t *)linux_set_sigprocmask = linux_mask;
             a2 = (long)linux_set_sigprocmask;
         }
