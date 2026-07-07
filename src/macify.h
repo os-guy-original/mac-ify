@@ -252,6 +252,7 @@ uint8_t *load_file(const char *path, size_t *out_size);
 
 /* syscall.c */
 void sigill_handler(int sig, siginfo_t *info, void *uctx);
+void sigill_handler_pre_resolve(void);
 void crash_handler(int sig, siginfo_t *info, void *uctx);
 void print_stats(void);
 int patch_syscalls_in_segment(loaded_segment *seg);
