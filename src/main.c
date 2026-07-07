@@ -334,6 +334,8 @@ int main(int argc, char **argv, char **envp) {
                 extra1 = dlopen("libedit.so.2", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libreadline")) {
                 extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libmagic")) {
+                extra1 = dlopen("libmagic.so.1", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libintl")) {
                 /* libintl is part of glibc on Linux — no separate library */
                 extra1 = NULL;

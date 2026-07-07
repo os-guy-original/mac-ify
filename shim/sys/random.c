@@ -102,6 +102,62 @@ int macify_fstatfs(int fd, struct macos_statfs *buf) {
     return ret;
 }
 
+/* getmntinfo — macOS function to get list of mounted filesystems.
+ *   int getmntinfo(struct statfs **mntbufp, int flags);
+ * Returns count of mounted filesystems; sets *mntbufp to an array of
+ * struct statfs. The caller does NOT free the buffer (it's static).
+ *
+ * Linux equivalent: read /proc/mounts, call statfs on each mount point. */
+
+/* $INODE64 variant — same function, different symbol name */
+int macify_getmntinfo(struct macos_statfs **mntbufp, int flags) __asm__("getmntinfo");
+int macify_getmntinfo(struct macos_statfs **mntbufp, int flags) {
+    static struct macos_statfs mntbuf[64];
+    static int mntcount = -1;
+
+    if (mntcount < 0) {
+        mntcount = 0;
+        FILE *f = fopen("/proc/mounts", "r");
+        if (!f) return 0;
+        char line[4096];
+        while (mntcount < 64 && fgets(line, sizeof(line), f)) {
+            /* /proc/mounts format: device mountpoint fstype opts dump pass */
+            char dev[256], mp[1024], fstype[64];
+            if (sscanf(line, "%255s %1023s %63s", dev, mp, fstype) >= 3) {
+                struct macos_statfs *m = &mntbuf[mntcount];
+                memset(m, 0, sizeof(*m));
+                /* Call statfs to get the real numbers */
+                struct statfs linux_st;
+                if (statfs(mp, &linux_st) == 0) {
+                    m->f_bsize = linux_st.f_bsize;
+                    m->f_iosize = linux_st.f_bsize;
+                    m->f_blocks = linux_st.f_blocks;
+                    m->f_bfree = linux_st.f_bfree;
+                    m->f_bavail = linux_st.f_bavail;
+                    m->f_files = linux_st.f_files;
+                    m->f_ffree = linux_st.f_ffree;
+                    memcpy(&m->f_fsid, &linux_st.f_fsid, sizeof(m->f_fsid));
+                    m->f_type = linux_st.f_type;
+                }
+                strncpy(m->f_fstypename, fstype, sizeof(m->f_fstypename) - 1);
+                strncpy(m->f_mntonname, mp, sizeof(m->f_mntonname) - 1);
+                strncpy(m->f_mntfromname, dev, sizeof(m->f_mntfromname) - 1);
+                mntcount++;
+            }
+        }
+        fclose(f);
+    }
+
+    if (mntbufp) *mntbufp = mntbuf;
+    return mntcount;
+}
+
+/* getmntinfo$INODE64 — same as getmntinfo (64-bit inode variant) */
+int macify_getmntinfo_inode64(struct macos_statfs **mntbufp, int flags) __asm__("getmntinfo$INODE64");
+int macify_getmntinfo_inode64(struct macos_statfs **mntbufp, int flags) {
+    return macify_getmntinfo(mntbufp, flags);
+}
+
 /* ___assert_rtn — macOS assertion function.
  *
  * macOS's assert() calls ___assert_rtn with file, line, function,
