@@ -44,7 +44,7 @@ uint64_t setup_stack(int argc, char **argv, char **envp, void **out_stack_base, 
     top &= ~0xFULL;
 
     uint8_t *str = (uint8_t *)top;
-    uint64_t *argv_ptrs = calloc((size_t)argc, sizeof(uint64_t));
+    uint64_t *argv_ptrs = (argc > 0 && argc < 1000000) ? calloc((size_t)argc, sizeof(uint64_t)) : NULL;
     uint64_t *envp_ptrs = calloc((size_t)nenv + 1, sizeof(uint64_t));
     if (!argv_ptrs || !envp_ptrs) {
         fprintf(stderr, "macify: out of memory in setup_stack\n");
@@ -141,7 +141,7 @@ static void setup_gs_base(uint64_t entry_rip) {
     uint8_t *code = (uint8_t *)entry_rip;
     uint64_t tls_g_addr = 0;
 
-    for (int i = 0; i < 0x400 - sizeof(gs_test_pattern) - 7; i++) {
+    for (unsigned int i = 0; i < 0x400 - sizeof(gs_test_pattern) - 7; i++) {
         if (memcmp(code + i, gs_test_pattern, sizeof(gs_test_pattern)) == 0) {
             /* Found the pattern. Next instruction should be: mov rax, [rip + disp32]
              * 48 8b 05 XX XX XX XX (7 bytes) */

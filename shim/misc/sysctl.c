@@ -44,7 +44,7 @@ int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
         (void)write(2, b, n);
     }
 
-    int sysctl_ret = -1;  /* will be set to actual return value */
+    int sysctl_ret = -1; (void)sysctl_ret;  /* will be set to actual return value */
 
     /* CTL_UNSPEC=0, CTL_KERN=1, CTL_HW=6, CTL_USER=8, CTL_VM=2 */
     int top = name[0];
@@ -86,7 +86,7 @@ int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
         /* KERN_PROC — process listing. htop uses sysctl(KERN_PROC_ALL) to
          * get all processes as an array of kinfo_proc structs. */
         if (id == 14) {  /* KERN_PROC */
-            int which = (namelen >= 3) ? name[2] : 0;
+            (void)0;
 
             /* TEMPORARY: return 0 processes to test if crash is from kinfo_proc data */
             if (getenv("MACIFY_NO_PROCS")) {
@@ -160,9 +160,7 @@ int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
                             char state;
                             int ppid, pgrp, session, tty_nr, tpgid;
                             unsigned long flags;
-                            unsigned long utime, stime;
-                            unsigned long vsize;
-                            long rss;
+                            (void)ppid; (void)pgrp; (void)session; (void)tty_nr; (void)tpgid;
                             if (sscanf(p, "%c %d %d %d %d %d %lu",
                                        &state, &ppid, &pgrp, &session,
                                        &tty_nr, &tpgid, &flags) >= 7) {

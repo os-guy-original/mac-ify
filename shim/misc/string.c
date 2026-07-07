@@ -17,7 +17,7 @@ void memset_pattern16(void *dst, const void *pattern, size_t len) {
 
 static void *libgcc_s_handle = NULL;
 
-static void ensure_libgcc(void) {
+static void __attribute__((unused)) ensure_libgcc(void) {
     if (!libgcc_s_handle) {
         libgcc_s_handle = dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_GLOBAL);
         if (!libgcc_s_handle) {

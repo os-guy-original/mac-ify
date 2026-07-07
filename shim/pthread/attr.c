@@ -72,7 +72,7 @@ int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize) {
     pthread_attr_t *glibc_attr = get_glibc_attr((struct macos_pthread_attr *)(uintptr_t)attr);
     int r = real_attr_getstacksize(glibc_attr, stacksize);
     if (getenv("MACIFY_TRACE_PTHREAD")) {
-        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_attr_getstacksize(attr=%p) -> size=%zu\n", attr, stacksize ? *stacksize : 0);
+        char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_attr_getstacksize(attr=%p) -> size=%zu\n", attr, *stacksize);
         (void)write(2, b, n);
     }
     return r;

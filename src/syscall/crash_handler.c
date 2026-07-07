@@ -15,12 +15,12 @@
  * Uses ONLY signal-safe functions (write, snprintf — NOT fprintf). */
 void crash_handler(int sig, siginfo_t *info, void *uctx) {
     static char buf[1024];
-    int n;
+    int n __attribute__((unused));
 
     ucontext_t *uc = (ucontext_t *)uctx;
     greg_t *regs = uc->uc_mcontext.gregs;
 
-    uint64_t rip = (uint64_t)regs[REG_RIP];
+    uint64_t rip __attribute__((unused)) = (uint64_t)regs[REG_RIP];
 
     /* Build entire crash report in one buffer to minimize write calls
      * and avoid crashes between writes. Include Go state if available. */

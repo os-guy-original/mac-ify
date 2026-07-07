@@ -142,7 +142,7 @@ int open(const char *pathname, int flags, ...) {
     /* Prefix path translation for macOS callers */
     const char *effective_path = pathname;
     char translated_path[4096];
-    if (is_macos && pathname) {
+    if (is_macos) {
         /* Check if path should be hidden */
         extern int macify_should_hide_path(const char *);
         if (macify_should_hide_path(pathname)) {
@@ -161,7 +161,7 @@ int open(const char *pathname, int flags, ...) {
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512];
         int n = snprintf(b, sizeof(b), "macify: open(\"%s\"%s, 0x%x->0x%x) = %d\n",
-                pathname ? pathname : "(null)",
+                pathname,
                 effective_path != pathname ? " [translated]" : "",
                 flags, linux_flags, fd);
         (void)write(2, b, n);
@@ -194,7 +194,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     /* Prefix path translation */
     const char *effective_path = pathname;
     char translated_path[4096];
-    if (is_macos && pathname) {
+    if (is_macos) {
         extern int macify_should_hide_path(const char *);
         if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
         extern int macify_translate_path(const char *, char *, size_t);

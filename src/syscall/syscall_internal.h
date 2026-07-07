@@ -15,7 +15,7 @@
 #define ARG_SIGACTION     0x20
 #define ARG_SIGPROCMASK   0x40
 #define ARG_FORCE_SLOW    0x80
-#define ARG_SIGALTSTACK   0x100
+#define ARG_SIGALTSTACK   0x20
 
 /* Syscall table */
 extern const int16_t bsd_to_linux[BSD_SYSCALL_MAX];

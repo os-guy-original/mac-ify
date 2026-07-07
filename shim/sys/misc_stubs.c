@@ -1,8 +1,8 @@
 #include <malloc.h>
-/* misc_stubs.c — remaining small stubs from misc.c */
+/* misc_stubs.c - remaining small stubs from misc.c */
 #include "../shim.h"
 
-/* kCFTypeArrayCallBacks — a static struct that CoreFoundation uses for
+/* kCFTypeArrayCallBacks - a static struct that CoreFoundation uses for
  * CFArray creation. We provide a zeroed struct (all NULL callbacks). */
 static const char kCFTypeArrayCallBacks_data[64] = {0};  /* 8 function pointers */
 const void *kCFTypeArrayCallBacks = kCFTypeArrayCallBacks_data;
@@ -17,7 +17,7 @@ long CFErrorGetCode(void *err) {
     return 0;
 }
 
-/* Security framework TLS stubs — curl uses these for certificate validation.
+/* Security framework TLS stubs - curl uses these for certificate validation.
  * We stub them to allow curl to fall back to no certificate verification. */
 void *SecCertificateCreateWithData(void *alloc, void *data) {
     (void)alloc; (void)data;
@@ -38,16 +38,16 @@ int SecTrustCreateWithCertificates(void *certs, void *policies, void **trust) {
 }
 int SecTrustEvaluateWithError(void *trust, void *error) {
     (void)trust; (void)error;
-    return 0;  /* success — trust everything */
+    return 0;  /* success - trust everything */
 }
 int SecTrustSetOCSPResponse(void *trust, void *response) {
     (void)trust; (void)response;
     return 0;
 }
 
-/* CoreServices framework stubs — nvim and other binaries reference these. */
+/* CoreServices framework stubs - nvim and other binaries reference these. */
 
-/* LocaleRefGetPartString — gets a locale string part (language, country, etc.)
+/* LocaleRefGetPartString - gets a locale string part (language, country, etc.)
  * Signature: OSStatus LocaleRefGetPartString(LocaleRef loc, LocalePartCode partCode,
  *              Boolean wantVerbatim, ByteCount maxStringLen, char *resultString)
  * We return "en" / "US" / "en_US" for the common parts. */
@@ -68,11 +68,11 @@ int LocaleRefGetPartString(int loc, int partCode, int wantVerbatim,
     return 0;  /* noErr */
 }
 
-/* ── Objective-C Block runtime stubs ──────────────────────────
+/* Objective-C Block runtime stubs --------------------------
  * macOS uses blocks (^{}), which are implemented via _NSConcreteGlobalBlock
  * and _NSConcreteStackBlock class objects. Binaries that use blocks (like
  * starship, written in Rust but using macOS APIs) reference these as
- * global symbols. We provide sentinel values — the actual block runtime
+ * global symbols. We provide sentinel values - the actual block runtime
  * isn't needed for most CLI tools. */
 static char ns_block_global_sentinel[64] = {0};
 static char ns_block_stack_sentinel[64] = {0};
@@ -83,7 +83,7 @@ void *_NSConcreteAutoBlock = ns_block_stack_sentinel;
 void *_NSConcreteFinalizingBlock = ns_block_stack_sentinel;
 void *_NSConcreteWeakBlockVariable = ns_block_stack_sentinel;
 
-/* ── DWARF exception frame registration ──────────────────────
+/* DWARF exception frame registration ----------------------
  * __register_frame / __deregister_frame are from libgcc, used for
  * DWARF-based exception handling. On macOS these are in libSystem.
  * On Linux, glibc provides them in libgcc_s. We provide no-op stubs
@@ -91,12 +91,12 @@ void *_NSConcreteWeakBlockVariable = ns_block_stack_sentinel;
 void __register_frame(const void *begin) { (void)begin; }
 void __deregister_frame(const void *begin) { (void)begin; }
 
-/* _dispatch_main_q — GCD (Grand Central Dispatch) main queue global.
+/* _dispatch_main_q - GCD (Grand Central Dispatch) main queue global.
  * starship and other Rust binaries reference this. We provide a sentinel. */
 static char dispatch_main_q_sentinel[64] = {0};
 void *_dispatch_main_q = dispatch_main_q_sentinel;
 
-/* mach_continuous_time — returns continuous monotonic time in nanoseconds.
+/* mach_continuous_time - returns continuous monotonic time in nanoseconds.
  * Like mach_absolute_time but doesn't reset on sleep. */
 unsigned long long mach_continuous_time(void) {
     struct timespec ts;
@@ -104,7 +104,7 @@ unsigned long long mach_continuous_time(void) {
     return (unsigned long long)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-/* notify_* — macOS notification system. Stub to no-op. */
+/* notify_* - macOS notification system. Stub to no-op. */
 int notify_register_file_descriptor(const char *name, int *fd, int flags, int *token) {
     (void)name; (void)flags;
     if (fd) *fd = -1;
@@ -116,32 +116,32 @@ int notify_cancel(int token) {
     return 0;
 }
 
-/* ___mb_cur_max_l — macOS locale-specific multibyte character max length.
+/* ___mb_cur_max_l - macOS locale-specific multibyte character max length.
  * Return 1 (single-byte locale). */
 int ___mb_cur_max_l(void *loc) {
     (void)loc;
     return 1;
 }
 
-/* ___mb_cur_max — macOS global multibyte character max length.
+/* ___mb_cur_max - macOS global multibyte character max length.
  * Used by wget's stdio macros. Return 1 (single-byte locale). */
 int ___mb_cur_max(void) {
     return 1;
 }
 
-/* __mb_cur_max — alternate symbol name (some binaries use this). */
+/* __mb_cur_max - alternate symbol name (some binaries use this). */
 int __mb_cur_max(void) {
     return 1;
 }
 
-/* getprogname — macOS function to get the program name.
+/* getprogname - macOS function to get the program name.
  * Returns __progname which we provide in shim_core.c. */
 const char *getprogname(void) {
     extern char *__progname;
     return __progname ? __progname : "macify-app";
 }
 
-/* fpurge — macOS/BSD function to discard pending data in a stream's buffer.
+/* fpurge - macOS/BSD function to discard pending data in a stream's buffer.
  * glibc has __fpurge (note the leading underscore). We map fpurge to it. */
 #include <stdio_ext.h>
 int fpurge(FILE *stream) {
@@ -149,7 +149,7 @@ int fpurge(FILE *stream) {
     return 0;
 }
 
-/* libiconv — macOS uses GNU libiconv as a separate library with `libiconv`
+/* libiconv - macOS uses GNU libiconv as a separate library with `libiconv`
  * prefixed function names. glibc has iconv built-in (without prefix).
  * We provide the libiconv_-prefixed wrappers that delegate to glibc's iconv. */
 #include <iconv.h>
@@ -165,11 +165,11 @@ size_t libiconv(iconv_t_libiconv cd, char **inbuf, size_t *inbytesleft,
     return iconv((iconv_t)cd, inbuf, inbytesleft, outbuf, outbytesleft);
 }
 
-/* libintl — macOS uses GNU gettext as a separate library with `libintl`
+/* libintl - macOS uses GNU gettext as a separate library with `libintl`
  * prefixed function names. glibc has gettext built-in (without prefix).
  * We provide stubs that delegate to glibc or return no-op results. */
 char *libintl_gettext(const char *msgid) {
-    return (char *)msgid;  /* no translation — return original */
+    return (char *)msgid;  /* no translation - return original */
 }
 char *libintl_dgettext(const char *domainname, const char *msgid) {
     (void)domainname;
@@ -185,13 +185,13 @@ char *libintl_bindtextdomain(const char *domainname, const char *dirname) {
 char *libintl_textdomain(const char *domainname) {
     return (char *)domainname;
 }
-/* libintl_setlocale — glibc has setlocale, delegate to it. */
+/* libintl_setlocale - glibc has setlocale, delegate to it. */
 #include <locale.h>
 char *libintl_setlocale(int category, const char *locale) {
     return setlocale(category, locale);
 }
 
-/* nl_langinfo — macOS function to query locale information.
+/* nl_langinfo - macOS function to query locale information.
  * tree uses nl_langinfo(CODESET) to check if the terminal supports UTF-8.
  * If it returns "ANSI_X3.4-1968" (ASCII), tree escapes non-ASCII filenames
  * as octal. We delegate to glibc's nl_langinfo.
@@ -203,7 +203,7 @@ char *libintl_setlocale(int category, const char *locale) {
 
 /* Translate macOS nl_item to glibc nl_item.
  * macOS layout (verified by disassembling ls_macos which pre-fetches
- * nl_langinfo(33..44) for months Jan..Dec — so macOS ABMON_1=33, not 32):
+ * nl_langinfo(33..44) for months Jan..Dec - so macOS ABMON_1=33, not 32):
  *   CODESET=0, D_T_FMT=1, D_FMT=2, T_FMT=3, AM_STR=4, PM_STR=5,
  *   DAY_1..7=6..12, ABDAY_1..7=13..19, MON_1..12=21..32,
  *   ABMON_1..12=33..44, ERA=45, ERA_D_FMT=46, ERA_D_T_FMT=47,
@@ -231,7 +231,7 @@ static int macos_to_linux_nl_item(int macos_item) {
         return MON_1 + (macos_item - 21);
     if (macos_item >= 33 && macos_item <= 44)
         return ABMON_1 + (macos_item - 33);
-    /* Unknown — return CODESET as safe fallback */
+    /* Unknown - return CODESET as safe fallback */
     return CODESET;
 }
 
@@ -246,7 +246,7 @@ char *nl_langinfo(int item) {
     return real_nl_langinfo(item);
 }
 
-/* px_proxy_factory_* — libproxy. Not available on this system. Stub them
+/* px_proxy_factory_* - libproxy. Not available on this system. Stub them
  * so wget can run without proxy auto-detection. wget falls back to
  * environment variables (http_proxy, https_proxy) for proxy config. */
 void *px_proxy_factory_new(void) {
@@ -265,7 +265,7 @@ void px_proxy_factory_free_proxies(char **proxies) {
     if (proxies) free(proxies);
 }
 
-/* sigsetjmp — macOS uses sigsetjmp directly. glibc has __sigsetjmp (internal)
+/* sigsetjmp - macOS uses sigsetjmp directly. glibc has __sigsetjmp (internal)
  * and sigsetjmp as a macro that calls __sigsetjmp. We need to undef the
  * macro to actually create a sigsetjmp symbol. */
 #include <setjmp.h>
@@ -276,7 +276,7 @@ int sigsetjmp(sigjmp_buf env, int savesigs) {
     return __sigsetjmp(env, savesigs);
 }
 
-/* ___darwin_check_fd_set_overflow — macOS fd_set overflow checker.
+/* ___darwin_check_fd_set_overflow - macOS fd_set overflow checker.
  * Note: macOS symbol has TWO leading underscores (__darwin_), but after
  * stripping one it becomes _darwin_ → we need to export "darwin_check_fd_set_overflow".
  * Actually the macOS symbol is ___darwin_check_fd_set_overflow (3 underscores).
@@ -288,9 +288,9 @@ int sigsetjmp(sigjmp_buf env, int savesigs) {
  *       __darwin_check_fd_set_overflow((n), (p), 1) ? __darwin_fd_set((n), (p)) : 0
  * So this function MUST return non-zero (true) when the fd is safe to set
  * (i.e. fd < FD_SETSIZE). Returning 0 (or void, which leaves eax as
- * garbage — usually 0) causes FD_SET to silently skip setting the bit,
+ * garbage - usually 0) causes FD_SET to silently skip setting the bit,
  * leaving the fd_set empty. select() then has nothing to wait on and
- * blocks until its timeout — exactly the "HTTPS hangs forever" symptom
+ * blocks until its timeout - exactly the "HTTPS hangs forever" symptom
  * seen in wget (which uses select() to wait for the TLS socket).
  *
  * The macOS implementation also emits an abort/warning when fd >=
@@ -303,19 +303,19 @@ int __darwin_check_fd_set_overflow(int fd, const void *fdset, int silent) {
     return (fd >= 0 && fd < 1024) ? 1 : 0;
 }
 
-/* __longjmp / __setjmp — macOS uses these instead of longjmp/setjmp.
+/* __longjmp / __setjmp - macOS uses these instead of longjmp/setjmp.
  * Map to glibc's longjmp/setjmp. */
 #include <setjmp.h>
 void __longjmp(jmp_buf env, int val) { longjmp(env, val); }
 int __setjmp(jmp_buf env) { return setjmp(env); }
 
-/* ___strncpy_chk — fortified strncpy */
+/* ___strncpy_chk - fortified strncpy */
 char *___strncpy_chk(char *dst, const char *src, size_t n, size_t dstlen) {
     (void)dstlen;
     return strncpy(dst, src, n);
 }
 
-/* ___cxa_atexit — C++ atexit handler. Map to atexit. */
+/* ___cxa_atexit - C++ atexit handler. Map to atexit. */
 int ___cxa_atexit(void (*fn)(void *), void *arg, void *dso) {
     (void)dso;
     /* We can't perfectly map cxa_atexit (which takes an arg) to atexit.
@@ -326,15 +326,15 @@ int ___cxa_atexit(void (*fn)(void *), void *arg, void *dso) {
     return 0;
 }
 
-/* memset_s — C11 memset with guaranteed no elision. Just call memset. */
+/* memset_s - C11 memset with guaranteed no elision. Just call memset. */
 int memset_s(void *s, size_t smax, int c, size_t n) {
     if (s && n > 0) memset(s, c, n < smax ? n : smax);
     return 0;
 }
 
-/* arc4random_buf — fill buffer with random bytes (already defined above) */
+/* arc4random_buf - fill buffer with random bytes (already defined above) */
 
-/* connectx — macOS extended connect(). We implement it by translating
+/* connectx - macOS extended connect(). We implement it by translating
  * the macOS sockaddr_endpoints to a regular connect() call. */
 struct macos_sa_endpoints {
     uint32_t sae_srclen;        /* offset 0 */
@@ -368,7 +368,7 @@ int connectx(int socket, const void *endpoints, unsigned int endpointslen,
 
 
 
-/* kqueue / kevent — macOS kernel event system. No Linux equivalent.
+/* kqueue / kevent - macOS kernel event system. No Linux equivalent.
  *
  * Go's runtime on darwin uses kqueue for network polling (netpoll).
  * If kqueue() fails, Go throws "runtime: netpollinit failed" and aborts.
@@ -377,12 +377,8 @@ int connectx(int socket, const void *endpoints, unsigned int endpointslen,
  * OpenSSL's async API uses these. We return 0 (success) from getcontext
  * and makecontext so OpenSSL's async init doesn't fail. The async API
  * won't actually work (contexts are invalid), but SSL_CTX_new succeeds
-    }
-    (void)oucp; (void)ucp;
-    return 0;
-}
-
-/* ── OpenSSL OSSL_LIB_CTX stubs ─────────────────────────────────
+ */
+/* OpenSSL OSSL_LIB_CTX stubs ---------------------------------
  * curl 8.x uses SSL_CTX_new_ex(libctx, ...) which requires an OSSL_LIB_CTX.
  * On macOS, curl is built with its own copy of OpenSSL, so OSSL_LIB_CTX
  * is an opaque struct allocated by OSSL_LIB_CTX_new(). We provide a
@@ -421,7 +417,7 @@ int OSSL_LIB_CTX_get_conf_diagnostics(void *ctx) {
     return 0;
 }
 
-/* OPENSSL_init_crypto — curl's internal OpenSSL calls this to initialize
+/* OPENSSL_init_crypto - curl's internal OpenSSL calls this to initialize
  * crypto subsystems. We wrap it to debug failures: if it returns 0
  * (failure), we print the ossl_init_*_ret_ globals to see which init
  * step failed.
@@ -451,14 +447,14 @@ int OPENSSL_init_ssl(uint64_t settings, void *opts) {
 
 /* proc_* functions are implemented in shim_mach.c with real /proc reading */
 
-/* __slbsearch — macOS's bsearch variant (secure). Map to bsearch. */
+/* __slbsearch - macOS's bsearch variant (secure). Map to bsearch. */
 
 void *__slbsearch(const void *key, const void *base, size_t nel, size_t width,
                   int (*compar)(const void *, const void *)) {
     return bsearch(key, base, nel, width, compar);
 }
 
-/* arc4random / arc4random_uniform — macOS random functions. */
+/* arc4random / arc4random_uniform - macOS random functions. */
 
 uint32_t arc4random(void) {
     return (uint32_t)random();
@@ -489,7 +485,7 @@ void arc4random_buf(void *buf, size_t nbytes) {
     }
 }
 
-/* _NSLog / _CFLog — logging stubs. */
+/* _NSLog / _CFLog - logging stubs. */
 
 void NSLog(void *format, ...) {
     (void)format;
@@ -513,10 +509,12 @@ double __cbrt(double x) { return cbrt(x); }
 double __atan2(double y, double x) { return atan2(y, x); }
 double __pow(double x, double y) { return pow(x, y); }
 
-/* __maskrune — macOS character classification.
- * 
+/* __maskrune -- macOS character classification.
+ *
  * Returns the runetype flags for character `ch` ANDed with `mask`.
  * Used by isalpha(), isdigit(), etc. on macOS.
+ */
+
 /* Functions that glibc inlines but macOS exports as dynamic symbols.
  * glibc only exports __cxa_atexit, not atexit. macOS binaries
  * reference atexit directly via the GOT.
@@ -563,7 +561,7 @@ void exit(int status) {
     if (getenv("MACIFY_SSL_DEBUG")) {
         macify_print_ret_globals();
     }
-    /* Skip atexit handlers — the macify loader calls SYS_exit_group
+    /* Skip atexit handlers - the macify loader calls SYS_exit_group
      * directly, so atexit handlers (including close_stdout) are not
      * expected to run. This prevents false "write error" from
      * close_stdout's FILE* layout incompatibility. */
@@ -593,7 +591,7 @@ int __localtime_r(const time_t *timep, struct tm *result) {
 
 
 
-/* ── macOS malloc zone API (sqlite3 uses these) ── */
+/* macOS malloc zone API (sqlite3 uses these) -- */
 
 /* IMPORTANT: this struct must match the macOS _malloc_zone_t layout exactly,
  * because native macOS binaries compute offsets into it directly (e.g. they
@@ -653,7 +651,7 @@ static struct _malloc_zone_t macify_zone = {
 void *malloc_create_zone(size_t start, unsigned flags) { (void)start; (void)flags; return &macify_zone; }
 void *malloc_default_zone(void) { return &macify_zone; }
 
-/* task_info — Mach task info. Stub. */
+/* task_info - Mach task info. Stub. */
 int task_info(uint32_t target_task, int flavor, void *task_info_out, uint32_t *count) {
     (void)target_task; (void)flavor;
     if (task_info_out && count) {
@@ -662,7 +660,7 @@ int task_info(uint32_t target_task, int flavor, void *task_info_out, uint32_t *c
     return 0;
 }
 
-/* proc_regionfilename — get the pathname for a memory region. Stub. */
+/* proc_regionfilename - get the pathname for a memory region. Stub. */
 int proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t buffersize) {
     (void)pid; (void)address;
     if (buffer && buffersize > 0) {
@@ -671,13 +669,13 @@ int proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t buffer
     return 0;
 }
 
-/* notify_is_valid_token — check if a notification token is valid. */
+/* notify_is_valid_token - check if a notification token is valid. */
 int notify_is_valid_token(int token) {
     (void)token;
     return 0;  /* invalid */
 }
 
-/* res_9_* — DNS resolver functions (BIND resolver library) */
+/* res_9_* - DNS resolver functions (BIND resolver library) */
 int res_9_ninit(void *state) { (void)state; return -1; }
 int res_9_nclose(void *state) { (void)state; return 0; }
 int res_9_nsearch(void *state, const char *dname, int *domain, void *answer, int anslen) {
@@ -704,7 +702,7 @@ void *SecTrustCopyCertificateChain(void *trust) { (void)trust; return NULL; }
 int SecTrustSetVerifyDate(void *trust, void *date) { (void)trust; (void)date; return 0; }
 
 
-/* GnuTLS stubs — wget links against macOS GnuTLS which has incompatible
+/* GnuTLS stubs - wget links against macOS GnuTLS which has incompatible
  * struct layouts with Linux GnuTLS. Provide stubs that return success
  * for init and no-op for everything else.
  * This allows wget --version and --help to work.

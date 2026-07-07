@@ -12,7 +12,7 @@
 
 static void *libgcc_s_handle = NULL;
 
-static void ensure_libgcc(void) {
+static void __attribute__((unused)) ensure_libgcc(void) {
     if (!libgcc_s_handle) {
         libgcc_s_handle = dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_GLOBAL);
         if (!libgcc_s_handle)
@@ -39,7 +39,7 @@ void dyld_stub_binder(void) {
  * optimized away — it's called with a specific stack layout.
  */
 
-__attribute__((noinline, optnone))
+__attribute__((noinline))
 void ___chkstk_darwin(unsigned long size) {
     (void)size;
     /* No-op on Linux — the kernel handles stack growth automatically. */
@@ -47,7 +47,7 @@ void ___chkstk_darwin(unsigned long size) {
 }
 
 /* Also provide __chkstk_darwin (two underscores) for completeness */
-__attribute__((noinline, optnone))
+__attribute__((noinline))
 void __chkstk_darwin(unsigned long size) {
     (void)size;
     __asm__ volatile("" ::: "memory");

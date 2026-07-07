@@ -156,7 +156,7 @@ int main(int argc, char **argv, char **envp) {
      * a non-PIE binary as if it were PIE (applying a random slide). This
      * works for test binaries that use only relative addressing, but may
      * break binaries with absolute addresses. */
-    int pie_failed = 0;
+    int pie_failed __attribute__((unused)) = 0;
     if (hdr->flags & MH_PIE) {
         uint64_t min_vmaddr = UINT64_MAX;
         uint64_t max_vmend = 0;
@@ -590,7 +590,7 @@ int main(int argc, char **argv, char **envp) {
             static const uint8_t gs_test[] = {
                 0x65, 0x48, 0xc7, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0x23, 0x01, 0x00, 0x00
             };
-            for (int i = 0; i < 0x400 - sizeof(gs_test); i++) {
+            for (unsigned int i = 0; i < 0x400 - sizeof(gs_test); i++) {
                 if (memcmp(code + i, gs_test, sizeof(gs_test)) == 0) {
                     is_go = 1;
                     break;

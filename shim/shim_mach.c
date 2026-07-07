@@ -397,7 +397,7 @@ int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize
                     unsigned long long starttime;
                     unsigned long vsize;
                     long rss;
-                    if (sscanf(p, "%c %d %d %d %d %d %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %d %d %d %d %llu %lu %ld",
+                    if (sscanf(p, "%c %d %d %d %d %d %lu %lu %lu %lu %lu %lu %lu %lu %lu %d %d %d %d %llu %lu %ld",
                                &state, &ppid, &pgrp, &session, &tty_nr, &tpgid,
                                &flags, &minflt, &cminflt, &majflt, &cmajflt,
                                &utime, &stime, &cutime, &cstime,

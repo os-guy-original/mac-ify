@@ -26,7 +26,7 @@ void *malloc_zone_realloc(void *zone, void *ptr, size_t size) {
     void *r = realloc(ptr, size);
     if (getenv("MACIFY_MALLOC_DEBUG")) {
         char b[160];
-        int n = snprintf(b, sizeof(b), "macify: malloc_zone_realloc(zone=%p, %p, %zu) -> %p\n", zone, ptr, size, r);
+        int n = snprintf(b, sizeof(b), "macify: malloc_zone_realloc(zone=%p, %p, %zu) -> %p\n", zone, (void *)1, size, r);
         (void)write(2, b, n);
     }
     return r;

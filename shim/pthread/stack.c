@@ -53,7 +53,7 @@ void *pthread_get_stackaddr_np(pthread_t thread) {
 size_t pthread_get_stacksize_np(pthread_t thread) {
     if (macify_main_stack_base && pthread_equal(thread, macify_main_thread_id)) {
         if (getenv("MACIFY_TRACE_PTHREAD")) {
-            char b[160]; int n = snprintf(b, sizeof(b), "macify: pthread_get_stacksize_np(thread=%p main=%p) -> %zu (main thread)\n", thread, macify_main_thread_id, macify_main_stack_size);
+            char b[160]; int n = snprintf(b, sizeof(b), "macify: pthread_get_stacksize_np(thread=%lu main=%lu) -> %zu (main thread)\n", (unsigned long)thread, (unsigned long)macify_main_thread_id, macify_main_stack_size);
             (void)write(2, b, n);
         }
         return macify_main_stack_size;
@@ -64,7 +64,7 @@ size_t pthread_get_stacksize_np(pthread_t thread) {
     pthread_attr_getstacksize(&attr, &stacksize);
     pthread_attr_destroy(&attr);
     if (getenv("MACIFY_TRACE_PTHREAD")) {
-        char b[160]; int n = snprintf(b, sizeof(b), "macify: pthread_get_stacksize_np(thread=%p) -> %zu (non-main)\n", thread, stacksize);
+        char b[160]; int n = snprintf(b, sizeof(b), "macify: pthread_get_stacksize_np(thread=%lu) -> %zu (non-main)\n", (unsigned long)thread, stacksize);
         (void)write(2, b, n);
     }
     return stacksize;
