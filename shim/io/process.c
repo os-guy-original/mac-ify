@@ -562,3 +562,23 @@ int macify_fputs(const char *s, FILE *stream) {
     }
     return r;
 }
+
+/* fdopen — like fopen but from an existing fd.
+ * Set safe buffer to prevent __SERR false positives. */
+FILE *macify_fdopen(int fd, const char *mode) __asm__("fdopen");
+FILE *macify_fdopen(int fd, const char *mode) {
+    static FILE *(*real_fdopen)(int, const char *) = NULL;
+    if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
+    FILE *fp = real_fdopen(fd, mode);
+    if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
+        char *buf = (char *)malloc(4096 + 128);
+        if (buf) {
+            uintptr_t addr = (uintptr_t)buf;
+            if (addr & 0x40) addr = (addr + 0x7f) & ~0x7f;
+            if (((uintptr_t)addr & 0x40) == 0) {
+                setvbuf(fp, (char *)addr, _IOFBF, 4096);
+            }
+        }
+    }
+    return fp;
+}
