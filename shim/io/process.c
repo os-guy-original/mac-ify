@@ -159,43 +159,131 @@ static inline void macify_clear_serr_flag(FILE *fp) {
 }
 
 /* __srget — read one character from FILE* (macOS internal).
- * Called by macOS's getc/fgetc macro when the buffer is empty. */
+ * Called by macOS's getc/fgetc macro when the buffer is empty.
+ *
+ * macOS getc macro: --_r >= 0 ? *_p++ : __srget(fp)
+ * _r is at FILE* offset 8 (glibc _IO_read_ptr low 4 bytes)
+ * _p is at FILE* offset 0 (glibc _flags)
+ *
+ * After fgetc returns, glibc sets _IO_read_ptr to the buffer.
+ * The low 4 bytes become a large positive number, so the next getc
+ * reads *_p (glibc _flags = 0xfbad2084) → SIGSEGV.
+ *
+ * Fix: After fgetc, save _IO_read_ptr and set _r = -1 to force the
+ * next getc to call __srget again. On the next __srget call, restore
+ * _IO_read_ptr before calling fgetc. This way glibc always sees a
+ * valid _IO_read_ptr, and the inlined getc always calls __srget. */
+
+/* Per-FILE* saved _IO_read_ptr. Uses a simple array keyed by FILE* address.
+ * Most macOS binaries use only a few FILE* streams (stdin, stdout, stderr,
+ * plus a few opened files). A small array suffices. */
+#define MACIFY_MAX_SAVED_FPS 16
+static struct {
+    FILE *fp;
+    void *saved_read_ptr;
+    int valid;
+} macify_saved_fps[MACIFY_MAX_SAVED_FPS];
+
+static void macify_save_read_ptr(FILE *fp) {
+    for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
+        if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
+            macify_saved_fps[i].saved_read_ptr = *(void **)((char *)fp + 8);
+            return;
+        }
+    }
+    /* New entry */
+    for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
+        if (!macify_saved_fps[i].valid) {
+            macify_saved_fps[i].fp = fp;
+            macify_saved_fps[i].saved_read_ptr = *(void **)((char *)fp + 8);
+            macify_saved_fps[i].valid = 1;
+            return;
+        }
+    }
+}
+
+static void macify_restore_read_ptr(FILE *fp) {
+    for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
+        if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
+            *(void **)((char *)fp + 8) = macify_saved_fps[i].saved_read_ptr;
+            return;
+        }
+    }
+}
+
 int __srget(FILE *fp) {
-    return fgetc(fp);
+    /* Restore saved _IO_read_ptr before calling fgetc */
+    macify_restore_read_ptr(fp);
+    int c = fgetc(fp);
+    if (c != EOF) {
+        /* Save _IO_read_ptr, then set _r = -1 to force next getc
+         * to call __srget instead of accessing _p (glibc _flags). */
+        macify_save_read_ptr(fp);
+        *(int *)((char *)fp + 8) = -1;
+    }
+    return c;
 }
 
 /* __swbuf — write one character to FILE* (macOS internal).
- * Called by macOS's putc macro when the buffer is full.
- * Returns the character on success, EOF on error. */
+ * Called by macOS's putc macro when the write buffer is full.
+ *
+ * macOS putc macro: --_w >= 0 ? (*_p++ = ch) : __swbuf(ch, fp)
+ * _w is at FILE* offset 0x0c (high 4 bytes of glibc's _IO_read_ptr)
+ * _p is at FILE* offset 0x00 (glibc's _flags)
+ *
+ * After fputc, glibc may set _IO_read_ptr, making _w (offset 0x0c)
+ * a large positive number. The next putc reads *_p (_flags) → crash.
+ *
+ * Fix: After fputc, set _w = -1 to force next putc to call __swbuf. */
 int __swbuf(int ch, FILE *fp) {
     int r = fputc(ch, fp);
-    if (r != EOF) macify_clear_serr_flag(fp);
+    if (r != EOF) {
+        macify_clear_serr_flag(fp);
+        /* Set _w = -1 (offset 0x0c = high 4 bytes of _IO_read_ptr) */
+        *(int *)((char *)fp + 0x0c) = -1;
+    }
     return r;
 }
 
-/* putc_unlocked — write char to FILE* without locking.
- * On macOS this is a macro that accesses FILE* fields directly.
- * We provide it as a function to avoid field-offset corruption. */
+/* putc_unlocked — macOS inlines this as a macro accessing FILE* fields.
+ * We provide it as a function. After writing, set _w = -1 to prevent
+ * the inlined macro from accessing _p (glibc _flags) on the next call. */
 int putc_unlocked(int ch, FILE *fp) {
     int r = fputc(ch, fp);
-    if (r != EOF) macify_clear_serr_flag(fp);
+    if (r != EOF) {
+        macify_clear_serr_flag(fp);
+        *(int *)((char *)fp + 0x0c) = -1;  /* _w = -1 */
+    }
     return r;
 }
 
-/* getc_unlocked — read char from FILE* without locking. */
+/* getc_unlocked — macOS inlines this as a macro accessing FILE* fields.
+ * After reading, set _r = -1 to prevent the inlined macro from
+ * accessing _p (glibc _flags) on the next call. */
 int getc_unlocked(FILE *fp) {
-    return fgetc(fp);
+    int c = fgetc(fp);
+    if (c != EOF) {
+        *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+    }
+    return c;
 }
 
 /* putchar_unlocked, getchar_unlocked — variants using stdout/stdin */
 int putchar_unlocked(int ch) {
     int r = fputc(ch, stdout);
-    if (r != EOF) macify_clear_serr_flag(stdout);
+    if (r != EOF) {
+        macify_clear_serr_flag(stdout);
+        *(int *)((char *)stdout + 0x0c) = -1;  /* _w = -1 */
+    }
     return r;
 }
 
 int getchar_unlocked(void) {
-    return fgetc(stdin);
+    int c = fgetc(stdin);
+    if (c != EOF) {
+        *(int *)((char *)stdin + 8) = -1;  /* _r = -1 */
+    }
+    return c;
 }
 
 /* ── fread/fgetc shims — translate glibc EOF to macOS __SEOF ───
