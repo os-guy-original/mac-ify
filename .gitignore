@@ -33,6 +33,9 @@ worklog.md
 # Skills (AI assistant tooling, not part of the project)
 skills/
 
+# Tool results (agent artifacts, not part of the project)
+tool-results/
+
 # Upload directory (user-uploaded files, not part of the project)
 upload/
 
