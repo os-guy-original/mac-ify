@@ -576,3 +576,254 @@ int CFStringGetFastestEncoding(const void *str) {
     (void)str;
     return 0x0600;  /* kCFStringEncodingUTF8 */
 }
+
+/* Additional CF stubs for Rust binaries */
+void CFArrayInsertValueAtIndex(void *array, long idx, const void *value) {
+    (void)array; (void)idx; (void)value;
+}
+
+static void *kCFRunLoopDefaultMode_ptr = (void *)1;
+void *kCFRunLoopDefaultMode = &kCFRunLoopDefaultMode_ptr;
+void *kCFRunLoopCommonModes = &kCFRunLoopDefaultMode_ptr;
+
+void CFArrayRemoveValueAtIndex(void *array, long idx) {
+    (void)array; (void)idx;
+}
+
+void *CFArrayCreateMutableCopy(void *allocator, long capacity, void *srcArray) {
+    (void)allocator; (void)capacity; (void)srcArray;
+    return NULL;
+}
+
+void CFArrayRemoveAllValues(void *array) {
+    (void)array;
+}
+
+void *CFSetCreateMutable(void *allocator, long capacity, const void *cb) {
+    (void)allocator; (void)capacity; (void)cb;
+    return NULL;
+}
+
+void CFSetAddValue(void *set, const void *value) {
+    (void)set; (void)value;
+}
+
+void *CFRunLoopSourceCreate(void *allocator, long order, void *context) {
+    (void)allocator; (void)order; (void)context;
+    return NULL;
+}
+
+void CFRunLoopAddSource(void *rl, void *source, void *mode) {
+    (void)rl; (void)source; (void)mode;
+}
+
+void CFRunLoopRemoveSource(void *rl, void *source, void *mode) {
+    (void)rl; (void)source; (void)mode;
+}
+
+void CFRunLoopRun(void) {}
+void CFRunLoopStop(void *rl) { (void)rl; }
+void *CFRunLoopGetCurrent(void) { return NULL; }
+void *CFRunLoopGetMain(void) { return NULL; }
+
+void CFRunLoopAddTimer(void *rl, void *timer, void *mode) {
+    (void)rl; (void)timer; (void)mode;
+}
+
+void CFRunLoopRemoveTimer(void *rl, void *timer, void *mode) {
+    (void)rl; (void)timer; (void)mode;
+}
+
+void *CFRunLoopTimerCreate(void *allocator, double fireDate, double interval, long flags, long order, void *callout, void *context) {
+    (void)allocator; (void)fireDate; (void)interval; (void)flags; (void)order; (void)callout; (void)context;
+    return NULL;
+}
+
+void CFRunLoopTimerInvalidate(void *timer) { (void)timer; }
+
+void *CFRunLoopObserverCreate(void *allocator, long activities, long repeats, long order, void *callout, void *context) {
+    (void)allocator; (void)activities; (void)repeats; (void)order; (void)callout; (void)context;
+    return NULL;
+}
+
+void CFRunLoopAddObserver(void *rl, void *observer, void *mode) {
+    (void)rl; (void)observer; (void)mode;
+}
+
+/* CFURL stubs for watchexec */
+void *CFURLCreateCopyDeletingLastPathComponent(void *alloc, void *url) {
+    (void)alloc; (void)url;
+    return NULL;
+}
+
+void *CFURLCopyAbsoluteURL(void *url) {
+    (void)url;
+    return NULL;
+}
+
+void *CFURLCopyFileSystemPath(void *url, int pathStyle) {
+    (void)url; (void)pathStyle;
+    return NULL;
+}
+
+void *CFURLCopyLastPathComponent(void *url) {
+    (void)url;
+    return NULL;
+}
+
+void *CFURLCreateCopyAppendingPathComponent(void *alloc, void *url, void *component, int isDirectory) {
+    (void)alloc; (void)url; (void)component; (void)isDirectory;
+    return NULL;
+}
+
+
+void *CFURLCreateFromFileSystemRepresentation(void *alloc, const char *buffer, long bufSize, int isDirectory) {
+    (void)alloc; (void)buffer; (void)bufSize; (void)isDirectory;
+    return NULL;
+}
+
+int CFURLGetFileSystemRepresentation(void *url, int resolveAgainstBase, char *buffer, long maxBufSize) {
+    (void)url; (void)resolveAgainstBase;
+    if (buffer && maxBufSize > 0) buffer[0] = '\0';
+    return 0;
+}
+
+int CFURLIsFileURL(void *url) {
+    (void)url;
+    return 0;
+}
+
+void *CFURLCreateWithString(void *alloc, void *string, void *baseURL) {
+    (void)alloc; (void)string; (void)baseURL;
+    return NULL;
+}
+
+int CFRunLoopIsWaiting(void *rl) {
+    (void)rl;
+    return 0;
+}
+
+void *CFBundleGetValueForInfoDictionaryKey(void *bundle, void *key) {
+    (void)bundle; (void)key;
+    return NULL;
+}
+
+void *CFURLCreateFilePathURL(void *alloc, void *url, void *pathStyle) {
+    (void)alloc; (void)url; (void)pathStyle;
+    return NULL;
+}
+
+void *CFURLCreateStringByAddingPercentEscapes(void *alloc, void *originalString, void *legalCharactersToBeEscaped, void *legalCharactersToLeaveUnescaped, void *encoding) {
+    (void)alloc; (void)originalString; (void)legalCharactersToBeEscaped; (void)legalCharactersToLeaveUnescaped; (void)encoding;
+    return NULL;
+}
+
+void *CFURLCreateStringByReplacingPercentEscapes(void *alloc, void *originalString, void *charactersToLeave) {
+    (void)alloc; (void)originalString; (void)charactersToLeave;
+    return NULL;
+}
+
+void *CFURLCreateFileReferenceURL(void *alloc, void *url, void *isStale) {
+    (void)alloc; (void)url; (void)isStale;
+    return NULL;
+}
+
+void *CFURLCreateByResolvingAliasFile(void *alloc, void *url, unsigned int options, void *isStale) {
+    (void)alloc; (void)url; (void)options; (void)isStale;
+    return NULL;
+}
+
+int CFURLStartAccessingResourcePath(void *url) {
+    (void)url;
+    return 1;
+}
+
+void CFURLStopAccessingResourcePath(void *url) {
+    (void)url;
+}
+
+void *CFURLCreateBookmarkData(void *alloc, void *url, unsigned int options, void *resourceProperties, void *relativeURL, void *error) {
+    (void)alloc; (void)url; (void)options; (void)resourceProperties; (void)relativeURL; (void)error;
+    return NULL;
+}
+
+void *CFURLCreateBookmarkDataFromFile(void *alloc, void *fileURL, void *error) {
+    (void)alloc; (void)fileURL; (void)error;
+    return NULL;
+}
+
+int CFURLWriteBookmarkDataToFile(void *bookmarkRef, void *fileURL, unsigned int options, void *error) {
+    (void)bookmarkRef; (void)fileURL; (void)options; (void)error;
+    return 0;
+}
+
+void *CFURLCreateResourcePropertyFromAbsoluteURL(void *alloc, void *url, void *key, void *error) {
+    (void)alloc; (void)url; (void)key; (void)error;
+    return NULL;
+}
+
+void *CFURLCopyResourcePropertiesForKeys(void *url, void *keys, void *error) {
+    (void)url; (void)keys; (void)error;
+    return NULL;
+}
+
+void *CFURLCopyResourcePropertyForKey(void *url, void *key, void *error) {
+    (void)url; (void)key; (void)error;
+    return NULL;
+}
+
+int CFURLSetResourcePropertyForKey(void *url, void *key, void *value, void *error) {
+    (void)url; (void)key; (void)value; (void)error;
+    return 0;
+}
+
+void *CFURLCreateResourcePropertiesFromAbsoluteURL(void *alloc, void *url, void *keys, void *error) {
+    (void)alloc; (void)url; (void)keys; (void)error;
+    return NULL;
+}
+
+void *CFURLCreateTemporaryDirectory(void *alloc, void *properties, void *error) {
+    (void)alloc; (void)properties; (void)error;
+    return NULL;
+}
+
+int CFURLIsFileReferenceURL(void *url) {
+    (void)url;
+    return 0;
+}
+
+void *CFURLCreateDirectoryAtURL(void *url, int createIntermediates, void *attributes, void *error) {
+    (void)url; (void)createIntermediates; (void)attributes; (void)error;
+    return NULL;
+}
+
+void *CFURLCreateFileAtURL(void *url, int createIntermediates, void *attributes, void *error) {
+    (void)url; (void)createIntermediates; (void)attributes; (void)error;
+    return NULL;
+}
+
+int CFURLDestroyDirectory(void *url, void *error) {
+    (void)url; (void)error;
+    return 0;
+}
+
+int CFURLDestroyFile(void *url, void *error) {
+    (void)url; (void)error;
+    return 0;
+}
+
+void *CFURLCreatePropertyFromAbsoluteURL(void *alloc, void *url, void *key, void *error) {
+    (void)alloc; (void)url; (void)key; (void)error;
+    return NULL;
+}
+int CFURLResourceIsReachable(void *url, void *error) { (void)url; (void)error; return 1; }
+void FSEventStreamCreate(void) {}
+void FSEventStreamGetDeviceBeingWatched(void) {}
+void FSEventStreamInvalidate(void) {}
+void FSEventStreamRelease(void) {}
+void FSEventStreamScheduleWithRunLoop(void) {}
+void FSEventStreamStart(void) {}
+void FSEventStreamStop(void) {}
+void FSEventsGetCurrentEventId(void) {}
+void FSEventsPurgeEventsForDeviceUpToEventId(void) {}
+void objc_setProperty_nonatomic(void) {}

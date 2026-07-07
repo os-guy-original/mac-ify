@@ -107,3 +107,23 @@ void *IOPSGetPowerSourceDescription(void *blob, void *ps) {
     (void)blob; (void)ps;
     return NULL;
 }
+
+/* Additional IOKit stubs for btm (bottom) */
+int IOConnectCallStructMethod(void *connection, unsigned int selector,
+    const void *inputStruct, size_t inputStructCnt,
+    void *outputStruct, size_t *outputStructCnt) {
+    (void)connection; (void)selector; (void)inputStruct; (void)inputStructCnt;
+    (void)outputStruct; (void)outputStructCnt;
+    return 0xe00002c2;
+}
+
+int IOServiceClose(void *service) {
+    (void)service;
+    return 0;
+}
+
+int IOServiceOpen(void *service, void *owningTask, unsigned int type, void **connection) {
+    (void)service; (void)owningTask; (void)type;
+    if (connection) *connection = NULL;
+    return 0xe00002c2;
+}
