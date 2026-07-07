@@ -1,0 +1,58 @@
+#!/bin/bash
+# macify-init — initialize or update the macify prefix
+#
+# Usage: macify-init [--prefix <dir>]
+#
+# Like Wine's `wineboot` or `wineprefixcreate`, this creates the
+# ~/.macify/ prefix directory with a full macOS filesystem structure.
+# Safe to run multiple times — existing files are preserved.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Parse options
+PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
+while [[ "$1" == --* ]]; do
+    case "$1" in
+        --prefix)
+            PREFIX="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: macify-init [--prefix <dir>]"
+            echo ""
+            echo "Creates the macify prefix at ~/.macify/ (or specified dir)"
+            echo "with a full macOS filesystem structure."
+            exit 0
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+echo "macify-init: creating prefix at $PREFIX"
+
+# Set MACIFY_PREFIX so the loader uses our custom prefix
+export MACIFY_PREFIX="$PREFIX"
+
+# Run a harmless macOS binary to trigger prefix initialization.
+# The loader calls macify_init_prefix() before main().
+MACIFY_BIN="$PROJECT_DIR/build/macify"
+LD_LIBRARY_PATH="$PROJECT_DIR/build" "$MACIFY_BIN" "$PROJECT_DIR/tests/real/echo_macos" "macify prefix initialized" 2>/dev/null || true
+
+# Verify prefix was created
+if [ -f "$PREFIX/.macify_prefix" ]; then
+    echo "macify-init: prefix created successfully at $PREFIX"
+    echo "macify-init: structure:"
+    (cd "$PREFIX" && find . -maxdepth 3 -type d | sort | sed 's/^/  /')
+    echo "macify-init: key files:"
+    echo "  $(ls $PREFIX/System/Library/CoreServices/SystemVersion.plist 2>/dev/null && echo OK || echo MISSING) SystemVersion.plist"
+    echo "  $(ls $PREFIX/etc/passwd 2>/dev/null && echo OK || echo MISSING) etc/passwd"
+    echo "  $(ls $PREFIX/etc/group 2>/dev/null && echo OK || echo MISSING) etc/group"
+else
+    echo "macify-init: ERROR - prefix creation failed!"
+    exit 1
+fi

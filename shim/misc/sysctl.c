@@ -313,6 +313,91 @@ int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
         return 0;
     }
 
+    /* macOS OS identification sysctl values.
+     * These make macOS binaries think they're running on macOS 14.5. */
+    if (strcmp(name, "kern.ostype") == 0) {
+        const char *val = "Darwin";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "kern.osrelease") == 0) {
+        /* Darwin 23 = macOS 14.x */
+        const char *val = "23.5.0";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "kern.osversion") == 0) {
+        const char *val = "23F79";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "kern.osproductversion") == 0) {
+        const char *val = "14.5";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "kern.hostname") == 0) {
+        char hostname[256] = {0};
+        gethostname(hostname, sizeof(hostname) - 1);
+        if (oldp && oldlenp) {
+            size_t len = strlen(hostname) + 1;
+            if (*oldlenp >= len) memcpy(oldp, hostname, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "hw.machine") == 0) {
+        const char *val = "x86_64";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "hw.model") == 0) {
+        const char *val = "MacPro6,1";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+    if (strcmp(name, "kern.bootargs") == 0) {
+        /* Empty boot args */
+        if (oldp && oldlenp) {
+            *(char *)oldp = '\0';
+            *oldlenp = 1;
+        }
+        return 0;
+    }
+    if (strcmp(name, "kern.uuid") == 0) {
+        const char *val = "00000000-0000-0000-0000-000000000000";
+        if (oldp && oldlenp) {
+            size_t len = strlen(val) + 1;
+            if (*oldlenp >= len) memcpy(oldp, val, len);
+            *oldlenp = len;
+        }
+        return 0;
+    }
+
     errno = ENOENT;
     return -1;
 }
@@ -323,4 +408,32 @@ int sysctlnametomib(const char *name, int *mibp, size_t *sizep) {
     (void)name; (void)mibp; (void)sizep;
     errno = ENOENT;
     return -1;
+}
+
+/* uname — report macOS-style system information.
+ * macOS binaries call uname() and expect Darwin-style output.
+ *   sysname:  "Darwin"
+ *   nodename: hostname
+ *   release:  "23.5.0" (Darwin 23 = macOS 14.x)
+ *   version:  "Darwin Kernel Version 23.5.0: ... macOS 14.5"
+ *   machine:  "x86_64" */
+int macify_uname(struct utsname *buf) __asm__("uname");
+int macify_uname(struct utsname *buf) {
+    if (!buf) { errno = EFAULT; return -1; }
+    /* Only translate for macOS callers */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static int (*real_uname)(struct utsname *) = NULL;
+        if (!real_uname) real_uname = dlsym(RTLD_NEXT, "uname");
+        return real_uname ? real_uname(buf) : -1;
+    }
+    memset(buf, 0, sizeof(*buf));
+    strncpy(buf->sysname, "Darwin", sizeof(buf->sysname) - 1);
+    char hostname[256] = {0};
+    gethostname(hostname, sizeof(hostname) - 1);
+    strncpy(buf->nodename, hostname, sizeof(buf->nodename) - 1);
+    strncpy(buf->release, "23.5.0", sizeof(buf->release) - 1);
+    strncpy(buf->version, "Darwin Kernel Version 23.5.0: macOS 14.5",
+            sizeof(buf->version) - 1);
+    strncpy(buf->machine, "x86_64", sizeof(buf->machine) - 1);
+    return 0;
 }

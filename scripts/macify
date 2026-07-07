@@ -1,0 +1,77 @@
+#!/bin/bash
+# macify — wrapper script for running macOS binaries on Linux
+#
+# Usage: macify [options] <macos_binary> [args...]
+#
+# Options:
+#   --prefix <dir>   Set prefix directory (default: ~/.macify)
+#   --verbose        Enable verbose output
+#   --version        Print version
+#
+# Like Wine's `wine` command, this runs macOS binaries through the
+# macify translator. The prefix at ~/.macify/ provides a virtual macOS
+# filesystem.
+
+set -e
+
+# Find the macify binary and shim
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MACIFY_BIN="$PROJECT_DIR/build/macify"
+SHIM_DIR="$PROJECT_DIR/build"
+
+# Parse options
+VERBOSE=""
+PREFIX=""
+while [[ "$1" == --* ]]; do
+    case "$1" in
+        --prefix)
+            PREFIX="$2"
+            shift 2
+            ;;
+        --verbose)
+            VERBOSE="1"
+            shift
+            ;;
+        --version)
+            echo "macify 1.0 (macOS binary translator)"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: macify [options] <macos_binary> [args...]"
+            echo ""
+            echo "Options:"
+            echo "  --prefix <dir>   Set prefix directory (default: ~/.macify)"
+            echo "  --verbose        Enable verbose output"
+            echo "  --version        Print version"
+            echo ""
+            echo "Like Wine's 'wine' command, this runs macOS binaries through"
+            echo "the macify translator. The prefix at ~/.macify/ provides a"
+            echo "virtual macOS filesystem."
+            exit 0
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ $# -eq 0 ]; then
+    echo "macify: no binary specified"
+    echo "Usage: macify [options] <macos_binary> [args...]"
+    exit 1
+fi
+
+# Set up environment
+export LD_LIBRARY_PATH="$SHIM_DIR:${LD_LIBRARY_PATH:-}"
+
+if [ -n "$PREFIX" ]; then
+    export MACIFY_PREFIX="$PREFIX"
+fi
+
+if [ -n "$VERBOSE" ]; then
+    export MACIFY_VERBOSE=1
+fi
+
+# Run the macOS binary
+exec "$MACIFY_BIN" "$@"

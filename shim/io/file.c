@@ -250,6 +250,88 @@ int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     return real_faccessat(dirfd, pathname, mode, linux_flags);
 }
 
+/* ── unlinkat / linkat / symlinkat / readlinkat ────────────────
+ * macOS AT_FDCWD = -2, Linux AT_FDCWD = -100.
+ * These *at functions need AT_FDCWD translation for macOS callers. */
+
+int macify_unlinkat(int dirfd, const char *pathname, int flags) __asm__("unlinkat");
+int macify_unlinkat(int dirfd, const char *pathname, int flags) {
+    static int (*real_unlinkat)(int, const char *, int) = NULL;
+    if (!real_unlinkat) real_unlinkat = dlsym(RTLD_NEXT, "unlinkat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_unlinkat(dirfd, pathname, flags);
+    if (dirfd == -2) dirfd = -100;  /* AT_FDCWD */
+    int linux_flags = 0;
+    if (flags & 0x0200) linux_flags |= 0x0100;  /* AT_REMOVEDIR */
+    return real_unlinkat(dirfd, pathname, linux_flags);
+}
+
+int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int flags) __asm__("linkat");
+int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
+    static int (*real_linkat)(int, const char *, int, const char *, int) = NULL;
+    if (!real_linkat) real_linkat = dlsym(RTLD_NEXT, "linkat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_linkat(fromfd, from, tofd, to, flags);
+    if (fromfd == -2) fromfd = -100;
+    if (tofd == -2) tofd = -100;
+    int linux_flags = 0;
+    if (flags & 0x0400) linux_flags |= 0x0200;  /* AT_SYMLINK_FOLLOW */
+    return real_linkat(fromfd, from, tofd, to, linux_flags);
+}
+
+int macify_symlinkat(const char *target, int dirfd, const char *linkpath) __asm__("symlinkat");
+int macify_symlinkat(const char *target, int dirfd, const char *linkpath) {
+    static int (*real_symlinkat)(const char *, int, const char *) = NULL;
+    if (!real_symlinkat) real_symlinkat = dlsym(RTLD_NEXT, "symlinkat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_symlinkat(target, dirfd, linkpath);
+    if (dirfd == -2) dirfd = -100;
+    return real_symlinkat(target, dirfd, linkpath);
+}
+
+ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) __asm__("readlinkat");
+ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    static ssize_t (*real_readlinkat)(int, const char *, char *, size_t) = NULL;
+    if (!real_readlinkat) real_readlinkat = dlsym(RTLD_NEXT, "readlinkat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_readlinkat(dirfd, pathname, buf, bufsiz);
+    if (dirfd == -2) dirfd = -100;
+    return real_readlinkat(dirfd, pathname, buf, bufsiz);
+}
+
+/* utimensat — set file timestamps with nanosecond precision.
+ * macOS AT_FDCWD = -2, Linux AT_FDCWD = -100.
+ * macOS AT_SYMLINK_NOFOLLOW = 0x0200, Linux = 0x0100.
+ * Without AT_FDCWD translation, glibc returns EINVAL. */
+int macify_utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags) __asm__("utimensat");
+int macify_utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags) {
+    static int (*real_utimensat)(int, const char *, const struct timespec[2], int) = NULL;
+    if (!real_utimensat) real_utimensat = dlsym(RTLD_NEXT, "utimensat");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_utimensat(dirfd, pathname, times, flags);
+    if (dirfd == -2) dirfd = -100;
+    /* macOS AT_SYMLINK_NOFOLLOW = 0x0200, Linux = 0x0100.
+     * Only translate known flags; ignore unknown macOS-specific bits. */
+    int linux_flags = 0;
+    if (flags & 0x0200) linux_flags |= 0x0100;  /* AT_SYMLINK_NOFOLLOW */
+    int r = real_utimensat(dirfd, pathname, times, linux_flags);
+    if (r < 0 && errno == EINVAL) {
+        /* If utimensat fails with EINVAL, the times array may have
+         * macOS-specific UTIME_NOW/UTIME_OMIT values. Try with NULL
+         * times (sets both to current time). */
+        r = real_utimensat(dirfd, pathname, NULL, linux_flags);
+    }
+    return r;
+}
+
+/* futimens — set file timestamps by fd. */
+int macify_futimens(int fd, const struct timespec times[2]) __asm__("futimens");
+int macify_futimens(int fd, const struct timespec times[2]) {
+    static int (*real_futimens)(int, const struct timespec[2]) = NULL;
+    if (!real_futimens) real_futimens = dlsym(RTLD_NEXT, "futimens");
+    return real_futimens(fd, times);
+}
+
 /* ── passwd ──────────────────────────────────────────────────── */
 
 /* macOS struct passwd layout (x86_64):

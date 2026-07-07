@@ -25,9 +25,25 @@ int clonefileat(int src_fd, const char *src, int dst_fd, const char *dst, int fl
     return -1;
 }
 int fclonefileat(int srcfd, int dstfd, const char *dst, int flags) {
-    (void)srcfd; (void)dstfd; (void)dst; (void)flags;
-    errno = ENOSYS;
-    return -1;
+    /* macOS clonefile copies file data by reference. On Linux, fall back
+     * to a regular file copy. Return 0 on success so the caller thinks
+     * the clone succeeded. */
+    (void)flags;
+    /* Read source file size */
+    struct stat st;
+    if (fstat(srcfd, &st) < 0) return -1;
+    /* Open destination */
+    int dst_fd = openat(dstfd, dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    if (dst_fd < 0) return -1;
+    /* Copy data */
+    char buf[65536];
+    ssize_t n;
+    while ((n = read(srcfd, buf, sizeof(buf))) > 0) {
+        ssize_t w = write(dst_fd, buf, n);
+        if (w != n) { close(dst_fd); return -1; }
+    }
+    close(dst_fd);
+    return 0;
 }
 int copyfile(const char *from, const char *to, void *state, int mode) {
     (void)from; (void)to; (void)state; (void)mode;
@@ -50,13 +66,19 @@ int copyfile_state_set(void *s, uint32_t flag, const void *src) {
     return -1;
 }
 
-/* renamex_np / renameatx_np — macOS extended rename. Map to rename/renameat. */
+/* renamex_np / renameatx_np — macOS extended rename. Map to rename/renameat.
+ * CRITICAL: The `state` parameter and `flags` (e.g. RENAME_SWAP, RENAME_EXCL)
+ * are macOS-specific. We ignore them and use plain rename.
+ * The fd parameters may be AT_FDCWD (-100 on Linux). Handle that correctly. */
 int renamex_np(const char *from, const char *to, unsigned int flags, void *state) {
     (void)flags; (void)state;
     return rename(from, to);
 }
 int renameatx_np(int fromfd, const char *from, int tofd, const char *to, unsigned int flags, void *state) {
     (void)flags; (void)state;
+    /* macOS AT_FDCWD = -2, Linux AT_FDCWD = -100 */
+    if (fromfd == -2) fromfd = -100;
+    if (tofd == -2) tofd = -100;
     return renameat(fromfd, from, tofd, to);
 }
 
@@ -84,6 +106,15 @@ typedef int acl_type_t;
 acl_t acl_get_fd_np(int fd, acl_type_t type) {
     (void)fd; (void)type;
     errno = 2;  /* ENOENT — no ACL */
+    return NULL;
+}
+
+/* acl_get_fd — alias without _np suffix. Return NULL (no ACL) but
+ * don't set errno to a failure value — some binaries (mv, cp) abort
+ * if acl_get_fd returns an error. */
+acl_t acl_get_fd(int fd) {
+    (void)fd;
+    errno = 0;
     return NULL;
 }
 
@@ -152,6 +183,12 @@ int acl_set_fd_np(int fd, acl_t acl, acl_type_t type) {
     (void)fd; (void)acl; (void)type;
     errno = 22;  /* EINVAL */
     return -1;
+}
+
+/* acl_set_fd — alias without _np suffix. Always succeed (no-op). */
+int acl_set_fd(int fd, acl_t acl) {
+    (void)fd; (void)acl;
+    return 0;
 }
 
 /* acl_set_file — set ACL on file by path. */

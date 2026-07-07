@@ -18,6 +18,26 @@ DIR *macify_fdopendir(int fd) {
     return real(fd);
 }
 
+/* opendir — translate macOS paths to prefix paths.
+ * macOS binaries call opendir("/System/Library/...") which should
+ * be translated to ~/.macify/System/Library/... */
+DIR *macify_opendir(const char *name) __asm__("opendir");
+DIR *macify_opendir(const char *name) {
+    static DIR *(*real_opendir)(const char *) = NULL;
+    if (!real_opendir) real_opendir = dlsym(RTLD_NEXT, "opendir");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_opendir(name);
+    /* Try path translation */
+    extern int macify_should_hide_path(const char *);
+    extern int macify_translate_path(const char *, char *, size_t);
+    if (macify_should_hide_path(name)) { errno = ENOENT; return NULL; }
+    char translated[PATH_MAX];
+    if (macify_translate_path(name, translated, sizeof(translated)) == 0) {
+        return real_opendir(translated);
+    }
+    return real_opendir(name);
+}
+
 DIR *opendirat(int dirfd, const char *name, int flags) {
     (void)flags;
     static int (*real_openat)(int, const char *, int, ...) = NULL;
