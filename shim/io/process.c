@@ -1,4 +1,3 @@
-#include <errno.h>
 #include <string.h>
 /* process.c — process management: fork, clone, wait4, pipe, read, write,
  * writev, readv, fopen */
@@ -236,18 +235,16 @@ static void macify_restore_read_ptr(FILE *fp) {
 
 static void macify_sync_stdio_flags(FILE *fp);
 int __srget(FILE *fp) {
-    /* Restore saved _IO_read_ptr, call fgetc, then set _IO_read_ptr = NULL.
-     * The NULL prevents the inlined getc macro from seeing _r > 0 and
-     * dereferencing _p (glibc _flags). glibc's next fgetc call sees
-     * _IO_read_ptr = NULL and calls underflow to refill the buffer.
-     * The mmap at 0xfbad2000 and SIGSEGV recovery handle any remaining
-     * _flags-derived crashes. */
+    /* Restore saved _IO_read_ptr before calling fgetc */
     macify_restore_read_ptr(fp);
     int c = fgetc(fp);
     if (c != EOF) {
+        /* Save _IO_read_ptr, then set _r = -1 to force next getc
+         * to call __srget instead of accessing _p (glibc _flags). */
         macify_save_read_ptr(fp);
-        *(void **)((char *)fp + 8) = NULL;
+        *(int *)((char *)fp + 8) = -1;
     } else {
+        /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);
         macify_sync_stdio_flags(fp);
     }
@@ -269,10 +266,8 @@ int __swbuf(int ch, FILE *fp) {
     int r = fputc(ch, fp);
     if (r != EOF) {
         macify_clear_serr_flag(fp);
-        /* Set _IO_read_ptr = NULL (all 8 bytes).
-         * macOS putc reads _w (high 4 bytes of _IO_read_ptr at offset 0x0c).
-         * NULL → _w = 0, --_w = -1 < 0 → calls __swbuf (not *_p). */
-        *(void **)((char *)fp + 8) = NULL;
+        /* Set _w = -1 (offset 0x0c = high 4 bytes of _IO_read_ptr) */
+        *(int *)((char *)fp + 0x0c) = -1;
     }
     return r;
 }
@@ -284,18 +279,18 @@ int putc_unlocked(int ch, FILE *fp) {
     int r = fputc(ch, fp);
     if (r != EOF) {
         macify_clear_serr_flag(fp);
-        *(void **)((char *)fp + 8) = NULL;
+        *(int *)((char *)fp + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
 }
 
 /* getc_unlocked — macOS inlines this as a macro accessing FILE* fields.
- * After reading, set _IO_read_ptr = NULL to prevent the inlined macro
- * from accessing _p (glibc _flags) on the next call. */
+ * After reading, set _r = -1 to prevent the inlined macro from
+ * accessing _p (glibc _flags) on the next call. */
 int getc_unlocked(FILE *fp) {
     int c = fgetc(fp);
     if (c != EOF) {
-        *(void **)((char *)fp + 8) = NULL;
+        *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
     }
     return c;
 }
@@ -305,6 +300,7 @@ int putchar_unlocked(int ch) {
     int r = fputc(ch, stdout);
     if (r != EOF) {
         macify_clear_serr_flag(stdout);
+        *(int *)((char *)stdout + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
 }
@@ -312,7 +308,7 @@ int putchar_unlocked(int ch) {
 int getchar_unlocked(void) {
     int c = fgetc(stdin);
     if (c != EOF) {
-        *(void **)((char *)stdin + 8) = NULL;
+        *(int *)((char *)stdin + 8) = -1;  /* _r = -1 */
     }
     return c;
 }
@@ -361,19 +357,25 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
-    /* Restore saved _IO_read_ptr (in case __srget set it to NULL) */
-    macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
+    if (getenv("MACIFY_TRACE_FREAD")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b), "macify: fread(%p, %zu, %zu, %p) = %zu\n",
+                ptr, size, nmemb, (void*)stream, r);
+        (void)write(2, b, n);
+    }
     if (r == 0) {
+        /* EOF or error — buffer is empty, safe to sync flags */
         macify_sync_stdio_flags(stream);
     } else {
-        /* After successful fread, set _IO_read_ptr = NULL so that
-         * any inlined getc macro calls __srget instead of accessing
-         * _p (glibc _flags). glibc's next read will call underflow. */
-        macify_save_read_ptr(stream);
-        *(void **)((char *)stream + 8) = NULL;
-        /* Clear macOS __SERR bit */
-        *((unsigned char *)stream + 0x10) &= ~MACOS_SERR;
+        /* Data was read. Clear macOS error flag (bit 0x40) at offset 0x10
+         * to prevent false error detection. This modifies _IO_read_end's
+         * low byte by at most 0x40, but since we're NOT changing
+         * _IO_read_ptr, glibc will re-read the "lost" bytes on the next
+         * underflow. The key insight: sort only checks [fp+0x10] for
+         * errors AFTER fread returns, and we clear the error bit here. */
+        unsigned char *p10 = (unsigned char *)stream + 0x10;
+        *p10 &= ~MACOS_SERR;
     }
     return r;
 }
@@ -428,53 +430,48 @@ int macify_fclose(FILE *stream) __asm__("fclose");
 int macify_fclose(FILE *stream) {
     static int (*real_fclose)(FILE *) = NULL;
     if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
-    /* Restore _IO_read_end for read streams. */
-    unsigned int flags = *(unsigned int *)((char *)stream + 0);
-    if (!(flags & 2) || (flags & 1)) {
-        void **read_ptr = (void **)((char *)stream + 8);
-        void **read_end = (void **)((char *)stream + 0x10);
-        *read_end = *read_ptr;
-    }
-    /* Clear both macOS __SERR (offset 0x10 bit 0x40) and
-     * glibc _IO_ERR_SEEN (offset 0 bit 0x20) to prevent
-     * false errors from lseek failures on pipes. */
+    /* macOS _rpl_fflush corrupts _IO_read_end (offset 0x10) by writing
+     * macOS _flags to it. Restore _IO_read_end = _IO_read_ptr (uncorrupted).
+     * For write streams, _IO_read_ptr is NULL, so _IO_read_end becomes NULL.
+     * This prevents fclose from failing due to corrupted pointer. */
+    void **read_ptr = (void **)((char *)stream + 8);
+    void **read_end = (void **)((char *)stream + 0x10);
+    *read_end = *read_ptr;
+    /* Clear macOS __SERR bit */
     *((unsigned char *)stream + 0x10) &= ~0x40;
-    *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
-    int r = real_fclose(stream);
-    /* Clear glibc _IO_ERR_SEEN AFTER fclose to prevent false errors.
-     * glibc's fclose calls lseek on pipes, which sets _IO_ERR_SEEN.
-     * sed's _rpl_fclose checks ferror() after fclose and reports errors. */
-    *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
-    if (errno == ESPIPE) errno = 0;
-    return r;
+    return real_fclose(stream);
 }
 
 int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
-    /* Restore _IO_read_end for read streams (where _rpl_fflush corrupts it).
-     * Skip write-only streams to avoid "Illegal seek" errors. */
+    /* Before real_fflush: restore _IO_read_end = _IO_read_ptr to fix
+     * corruption from macOS _rpl_fflush which writes _flags to [fp+0x10]. */
     if (stream) {
-        unsigned int flags = *(unsigned int *)((char *)stream + 0);
-        if (!(flags & 2) || (flags & 1)) {  /* not write-only, or read */
-            void **rp = (void **)((char *)stream + 8);
-            void **re = (void **)((char *)stream + 0x10);
-            *re = *rp;
-        }
+        void **rp = (void **)((char *)stream + 8);
+        void **re = (void **)((char *)stream + 0x10);
+        *re = *rp;
     }
     int r = real_fflush(stream);
-    if (r == EOF && errno == ESPIPE) {
-        r = 0;
-        errno = 0;
-    }
+    /* After real_fflush: clear macOS __SERR bit at offset 0x10 to prevent
+     * false write error detection by close_stdout. */
     if (stream) {
         *((unsigned char *)stream + 0x10) &= ~0x40;
-        *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
     } else {
         extern FILE *__stdoutp, *__stderrp;
-        if (__stdoutp) *((unsigned char *)__stdoutp + 0x10) &= ~0x40;
-        if (__stderrp) *((unsigned char *)__stderrp + 0x10) &= ~0x40;
+        if (__stdoutp) {
+            void **rp = (void **)((char *)__stdoutp + 8);
+            void **re = (void **)((char *)__stdoutp + 0x10);
+            *re = *rp;
+            *((unsigned char *)__stdoutp + 0x10) &= ~0x40;
+        }
+        if (__stderrp) {
+            void **rp = (void **)((char *)__stderrp + 8);
+            void **re = (void **)((char *)__stderrp + 0x10);
+            *re = *rp;
+            *((unsigned char *)__stderrp + 0x10) &= ~0x40;
+        }
     }
     return r;
 }
@@ -523,11 +520,8 @@ int macify_fputc(int ch, FILE *stream) {
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc(ch, stream);
     if (r != EOF) {
-        *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
         *((unsigned char *)stream + 0x10) &= ~0x40;
-        /* Only NULL _IO_read_ptr for read streams (bit 0 = _IO_READ) */
-        unsigned int flags = *(unsigned int *)((char *)stream + 0);
-        if (flags & 1) *(void **)((char *)stream + 8) = NULL;
+        *(int *)((char *)stream + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
 }
@@ -538,10 +532,7 @@ size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
     size_t r = real_fwrite(ptr, size, nmemb, stream);
     if (r > 0) {
-        *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
         *((unsigned char *)stream + 0x10) &= ~0x40;
-        unsigned int flags = *(unsigned int *)((char *)stream + 0);
-        if (flags & 1) *(void **)((char *)stream + 8) = NULL;
     }
     return r;
 }
@@ -579,32 +570,4 @@ FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
     return real_fdopen(fd, mode);
-}
-
-/* lseek — macOS _rpl_fclose calls lseek to save file position.
- * For pipes (stdin/stdout), lseek returns ESPIPE which causes
- * "Illegal seek" errors. Return 0 for non-seekable fds. */
-off_t macify_lseek(int fd, off_t offset, int whence) __asm__("lseek");
-off_t macify_lseek(int fd, off_t offset, int whence) {
-    static off_t (*real_lseek)(int, off_t, int) = NULL;
-    if (!real_lseek) real_lseek = dlsym(RTLD_NEXT, "lseek");
-    off_t r = real_lseek(fd, offset, whence);
-    if (r == (off_t)-1 && errno == ESPIPE) {
-        /* Pipe — return 0 (success) to prevent false errors */
-        errno = 0;
-        return 0;
-    }
-    return r;
-}
-
-/* ferror — clear _IO_ERR_SEEN and return 0 for stdout to prevent
- * false "couldn't close stdout" errors from pipe seek failures. */
-int macify_ferror(FILE *stream) __asm__("ferror");
-int macify_ferror(FILE *stream) {
-    static int (*real_ferror)(FILE *) = NULL;
-    if (!real_ferror) real_ferror = dlsym(RTLD_NEXT, "ferror");
-    /* Clear _IO_ERR_SEEN before checking to prevent false errors
-     * from lseek(ESPIPE) on pipes. */
-    *(unsigned int *)((char *)stream + 0) &= ~0x20;
-    return real_ferror(stream);
 }
