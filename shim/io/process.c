@@ -239,10 +239,14 @@ int __srget(FILE *fp) {
     macify_restore_read_ptr(fp);
     int c = fgetc(fp);
     if (c != EOF) {
-        /* Save _IO_read_ptr, then set _r = -1 to force next getc
-         * to call __srget instead of accessing _p (glibc _flags). */
+        /* Save _IO_read_ptr, then set it to NULL (all 8 bytes).
+         * macOS getc reads _r (low 4 bytes of _IO_read_ptr at offset 8).
+         * NULL → _r = 0, --_r = -1 < 0 → calls __srget (not *_p).
+         * glibc sees _IO_read_ptr = NULL → calls underflow on next read.
+         * This avoids the corruption from setting only _r=-1 (which left
+         * high 4 bytes intact, creating a garbage pointer for fread). */
         macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = -1;
+        *(void **)((char *)fp + 8) = NULL;  /* _IO_read_ptr = NULL */
     } else {
         /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);
@@ -266,8 +270,10 @@ int __swbuf(int ch, FILE *fp) {
     int r = fputc(ch, fp);
     if (r != EOF) {
         macify_clear_serr_flag(fp);
-        /* Set _w = -1 (offset 0x0c = high 4 bytes of _IO_read_ptr) */
-        *(int *)((char *)fp + 0x0c) = -1;
+        /* Set _IO_read_ptr = NULL (all 8 bytes).
+         * macOS putc reads _w (high 4 bytes of _IO_read_ptr at offset 0x0c).
+         * NULL → _w = 0, --_w = -1 < 0 → calls __swbuf (not *_p). */
+        *(void **)((char *)fp + 8) = NULL;
     }
     return r;
 }
@@ -279,18 +285,18 @@ int putc_unlocked(int ch, FILE *fp) {
     int r = fputc(ch, fp);
     if (r != EOF) {
         macify_clear_serr_flag(fp);
-        *(int *)((char *)fp + 0x0c) = -1;  /* _w = -1 */
+        *(void **)((char *)fp + 8) = NULL;
     }
     return r;
 }
 
 /* getc_unlocked — macOS inlines this as a macro accessing FILE* fields.
- * After reading, set _r = -1 to prevent the inlined macro from
- * accessing _p (glibc _flags) on the next call. */
+ * After reading, set _IO_read_ptr = NULL to prevent the inlined macro
+ * from accessing _p (glibc _flags) on the next call. */
 int getc_unlocked(FILE *fp) {
     int c = fgetc(fp);
     if (c != EOF) {
-        *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+        *(void **)((char *)fp + 8) = NULL;
     }
     return c;
 }
@@ -300,7 +306,7 @@ int putchar_unlocked(int ch) {
     int r = fputc(ch, stdout);
     if (r != EOF) {
         macify_clear_serr_flag(stdout);
-        *(int *)((char *)stdout + 0x0c) = -1;  /* _w = -1 */
+        *(void **)((char *)stdout + 8) = NULL;
     }
     return r;
 }
@@ -308,7 +314,7 @@ int putchar_unlocked(int ch) {
 int getchar_unlocked(void) {
     int c = fgetc(stdin);
     if (c != EOF) {
-        *(int *)((char *)stdin + 8) = -1;  /* _r = -1 */
+        *(void **)((char *)stdin + 8) = NULL;
     }
     return c;
 }
@@ -357,25 +363,19 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
+    /* Restore saved _IO_read_ptr (in case __srget set it to NULL) */
+    macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
-    if (getenv("MACIFY_TRACE_FREAD")) {
-        char b[256];
-        int n = snprintf(b, sizeof(b), "macify: fread(%p, %zu, %zu, %p) = %zu\n",
-                ptr, size, nmemb, (void*)stream, r);
-        (void)write(2, b, n);
-    }
     if (r == 0) {
-        /* EOF or error — buffer is empty, safe to sync flags */
         macify_sync_stdio_flags(stream);
     } else {
-        /* Data was read. Clear macOS error flag (bit 0x40) at offset 0x10
-         * to prevent false error detection. This modifies _IO_read_end's
-         * low byte by at most 0x40, but since we're NOT changing
-         * _IO_read_ptr, glibc will re-read the "lost" bytes on the next
-         * underflow. The key insight: sort only checks [fp+0x10] for
-         * errors AFTER fread returns, and we clear the error bit here. */
-        unsigned char *p10 = (unsigned char *)stream + 0x10;
-        *p10 &= ~MACOS_SERR;
+        /* After successful fread, set _IO_read_ptr = NULL so that
+         * any inlined getc macro calls __srget instead of accessing
+         * _p (glibc _flags). glibc's next read will call underflow. */
+        macify_save_read_ptr(stream);
+        *(void **)((char *)stream + 8) = NULL;
+        /* Clear macOS __SERR bit */
+        *((unsigned char *)stream + 0x10) &= ~MACOS_SERR;
     }
     return r;
 }
@@ -521,7 +521,7 @@ int macify_fputc(int ch, FILE *stream) {
     int r = real_fputc(ch, stream);
     if (r != EOF) {
         *((unsigned char *)stream + 0x10) &= ~0x40;
-        *(int *)((char *)stream + 0x0c) = -1;  /* _w = -1 */
+        *(void **)((char *)stream + 8) = NULL;  /* _IO_read_ptr = NULL */
     }
     return r;
 }
@@ -533,6 +533,7 @@ size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t r = real_fwrite(ptr, size, nmemb, stream);
     if (r > 0) {
         *((unsigned char *)stream + 0x10) &= ~0x40;
+        *(void **)((char *)stream + 8) = NULL;  /* _IO_read_ptr = NULL */
     }
     return r;
 }
