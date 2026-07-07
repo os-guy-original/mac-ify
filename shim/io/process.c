@@ -419,15 +419,34 @@ int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
+    /* Before real_fflush: restore _IO_read_end = _IO_read_ptr to fix
+     * corruption from macOS _rpl_fflush which writes _flags to [fp+0x10]. */
     if (stream) {
-        /* Restore _IO_read_end = _IO_read_ptr to fix corruption from
-         * macOS _rpl_fflush which writes _flags to [fp+0x10]. */
-        void **read_ptr = (void **)((char *)stream + 8);
-        void **read_end = (void **)((char *)stream + 0x10);
-        *read_end = *read_ptr;
-        *((unsigned char *)stream + 0x10) &= ~0x40;
+        void **rp = (void **)((char *)stream + 8);
+        void **re = (void **)((char *)stream + 0x10);
+        *re = *rp;
     }
-    return real_fflush(stream);
+    int r = real_fflush(stream);
+    /* After real_fflush: clear macOS __SERR bit at offset 0x10 to prevent
+     * false write error detection by close_stdout. */
+    if (stream) {
+        *((unsigned char *)stream + 0x10) &= ~0x40;
+    } else {
+        extern FILE *__stdoutp, *__stderrp;
+        if (__stdoutp) {
+            void **rp = (void **)((char *)__stdoutp + 8);
+            void **re = (void **)((char *)__stdoutp + 0x10);
+            *re = *rp;
+            *((unsigned char *)__stdoutp + 0x10) &= ~0x40;
+        }
+        if (__stderrp) {
+            void **rp = (void **)((char *)__stderrp + 8);
+            void **re = (void **)((char *)__stderrp + 0x10);
+            *re = *rp;
+            *((unsigned char *)__stderrp + 0x10) &= ~0x40;
+        }
+    }
+    return r;
 }
 
 /* setvbuf — ensure buffer address doesn't have bit 0x40 in low byte.
@@ -461,4 +480,59 @@ int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
         }
     }
     return real_setvbuf(stream, buf, mode, size);
+}
+
+/* fputc/fwrite/printf shims — clear macOS __SERR after writes.
+ * macOS close_stdout checks [stdout + 0x10] & 0x40 for errors.
+ * Glibc stores _IO_read_end (buffer pointer) at offset 0x10.
+ * After any write, the buffer pointer might have bit 0x40 set.
+ * We clear it after each write to prevent false error detection. */
+int macify_fputc(int ch, FILE *stream) __asm__("fputc");
+int macify_fputc(int ch, FILE *stream) {
+    static int (*real_fputc)(int, FILE *) = NULL;
+    if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
+    int r = real_fputc(ch, stream);
+    if (r != EOF) {
+        *((unsigned char *)stream + 0x10) &= ~0x40;
+        *(int *)((char *)stream + 0x0c) = -1;  /* _w = -1 */
+    }
+    return r;
+}
+
+size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fwrite");
+size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    static size_t (*real_fwrite)(const void *, size_t, size_t, FILE *) = NULL;
+    if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
+    size_t r = real_fwrite(ptr, size, nmemb, stream);
+    if (r > 0) {
+        *((unsigned char *)stream + 0x10) &= ~0x40;
+    }
+    return r;
+}
+
+/* printf shim — clear macOS __SERR after writes */
+int macify_printf(const char *fmt, ...) __asm__("printf");
+int macify_printf(const char *fmt, ...) {
+    static int (*real_vfprintf)(FILE *, const char *, va_list) = NULL;
+    if (!real_vfprintf) real_vfprintf = dlsym(RTLD_NEXT, "vfprintf");
+    va_list ap;
+    va_start(ap, fmt);
+    int r = real_vfprintf(stdout, fmt, ap);
+    va_end(ap);
+    if (r >= 0) {
+        *((unsigned char *)stdout + 0x10) &= ~0x40;
+    }
+    return r;
+}
+
+/* fputs shim — clear macOS __SERR after writes */
+int macify_fputs(const char *s, FILE *stream) __asm__("fputs");
+int macify_fputs(const char *s, FILE *stream) {
+    static int (*real_fputs)(const char *, FILE *) = NULL;
+    if (!real_fputs) real_fputs = dlsym(RTLD_NEXT, "fputs");
+    int r = real_fputs(s, stream);
+    if (r >= 0) {
+        *((unsigned char *)stream + 0x10) &= ~0x40;
+    }
+    return r;
 }
