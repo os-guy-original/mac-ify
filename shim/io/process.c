@@ -315,27 +315,62 @@ int macify_fclose(FILE *stream) __asm__("fclose");
 int macify_fclose(FILE *stream) {
     static int (*real_fclose)(FILE *) = NULL;
     if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
-    /* Fix corrupted _IO_read_end by setting _IO_read_ptr = _IO_read_end.
-     * This empties the read buffer, preventing fclose from using the
-     * corrupted pointer. The file descriptor is still valid, so close()
-     * will succeed. */
+    /* macOS _rpl_fflush corrupts _IO_read_end (offset 0x10) by writing
+     * macOS _flags to it. Restore _IO_read_end = _IO_read_ptr (uncorrupted).
+     * For write streams, _IO_read_ptr is NULL, so _IO_read_end becomes NULL.
+     * This prevents fclose from failing due to corrupted pointer. */
     void **read_ptr = (void **)((char *)stream + 8);
     void **read_end = (void **)((char *)stream + 0x10);
-    *read_ptr = *read_end;
+    *read_end = *read_ptr;
+    /* Clear macOS __SERR bit */
+    *((unsigned char *)stream + 0x10) &= ~0x40;
     return real_fclose(stream);
 }
 
-/* fflush — sort's _rpl_fflush writes to [fp+0x10] before calling fflush.
- * By the time our fflush runs, _IO_read_end is corrupted. We fix it
- * by setting _IO_read_ptr = _IO_read_end (emptying buffer). */
 int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
     if (stream) {
+        /* Restore _IO_read_end = _IO_read_ptr to fix corruption from
+         * macOS _rpl_fflush which writes _flags to [fp+0x10]. */
         void **read_ptr = (void **)((char *)stream + 8);
         void **read_end = (void **)((char *)stream + 0x10);
-        *read_ptr = *read_end;
+        *read_end = *read_ptr;
+        *((unsigned char *)stream + 0x10) &= ~0x40;
     }
     return real_fflush(stream);
+}
+
+/* setvbuf — ensure buffer address doesn't have bit 0x40 in low byte.
+ * macOS binaries check [stdout + 0x10] & 0x40 for __SERR (error).
+ * Glibc stores _IO_read_end (buffer pointer) at offset 0x10.
+ * If glibc allocates a buffer with bit 0x40 set, macOS code falsely
+ * detects a write error. We intercept setvbuf to allocate a safe buffer. */
+int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) __asm__("setvbuf");
+int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
+    static int (*real_setvbuf)(FILE *, char *, int, size_t) = NULL;
+    if (!real_setvbuf) real_setvbuf = dlsym(RTLD_NEXT, "setvbuf");
+    
+    /* If buf is NULL (glibc allocates), provide our own buffer */
+    if (!buf && size > 0) {
+        /* Allocate a buffer without bit 0x40 in the low byte */
+        char *our_buf = malloc(size + 128);
+        if (our_buf) {
+            /* Find an offset within the allocation that clears bit 0x40 */
+            uintptr_t addr = (uintptr_t)our_buf;
+            if (addr & 0x40) {
+                /* Round up to next 0x80 boundary to clear bit 0x40 */
+                addr = (addr + 0x7f) & ~0x7f;
+            }
+            buf = (char *)addr;
+            /* Ensure buf is still within our allocation */
+            if (buf + size > our_buf + size + 128) {
+                free(our_buf);
+                our_buf = NULL;
+                buf = NULL;
+            }
+        }
+    }
+    return real_setvbuf(stream, buf, mode, size);
 }

@@ -525,6 +525,20 @@ extern int __cxa_atexit(void (*func)(void *), void *arg, void *dso_handle);
 
 static void atexit_wrapper(void *arg) {
     void (*func)(void) = (void (*)(void))arg;
+    /* Clear macOS __SERR bit at stdout offset 0x10 before calling
+     * atexit handlers (e.g., close_stdout). This prevents false
+     * "write error" reports caused by glibc's _IO_read_end pointer
+     * having bit 0x40 set in its low byte. */
+    extern FILE *__stdoutp;
+    if (__stdoutp) {
+        unsigned char *p = (unsigned char *)__stdoutp + 0x10;
+        if (getenv("MACIFY_TRACE_ATEXIT")) {
+            char b[128];
+            int n = snprintf(b, sizeof(b), "macify: atexit_wrapper clearing bit 0x40 at %p+0x10 (was 0x%02x)\n", __stdoutp, *p);
+            (void)write(2, b, n);
+        }
+        *p &= ~0x40;
+    }
     func();
 }
 
@@ -549,11 +563,12 @@ void exit(int status) {
     if (getenv("MACIFY_SSL_DEBUG")) {
         macify_print_ret_globals();
     }
-    /* Run glibc's atexit chain via __cxa_finalize(NULL) (which runs
-     * all handlers registered with __cxa_atexit, including ours).
-     * This is what glibc's exit() does internally. */
-    extern void __cxa_finalize(void *);
-    __cxa_finalize(NULL);
+    /* Skip atexit handlers — the macify loader calls SYS_exit_group
+     * directly, so atexit handlers (including close_stdout) are not
+     * expected to run. This prevents false "write error" from
+     * close_stdout's FILE* layout incompatibility. */
+    /* extern void __cxa_finalize(void *); */
+    /* __cxa_finalize(NULL); */
     fflush(NULL);  /* Flush all stdio streams */
     _exit(status);
 }

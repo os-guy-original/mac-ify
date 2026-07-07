@@ -39,6 +39,38 @@ static void macify_init_stdio(void) {
     __stdinp = stdin;
     __stdoutp = stdout;
 
+    /* Ensure stdout's buffer address doesn't have bit 0x40 in its low byte.
+     * macOS binaries check [stdout + 0x10] & 0x40 for __SERR (error flag).
+     * Glibc stores _IO_read_end (buffer pointer) at offset 0x10. If the
+     * buffer address has bit 0x40 set, macOS code falsely detects a write
+     * error. By forcing a buffer write early, we can check and fix the
+     * pointer. */
+    {
+        /* Force buffer allocation by writing nothing (just trigger setup) */
+        char *buf = (char *)malloc(4096);
+        if (buf) {
+            /* Check if the buffer address has bit 0x40 set */
+            if (((uintptr_t)buf & 0x40) == 0) {
+                /* Safe to use — set as stdout's buffer */
+                setvbuf(stdout, buf, _IOLBF, 4096);
+            } else {
+                /* Bit 0x40 is set — free and try again with a different size */
+                free(buf);
+                /* Allocate with a small offset to change the address */
+                char *buf2 = (char *)malloc(4096 + 128);
+                if (buf2) {
+                    /* Use an offset that clears bit 0x40 */
+                    char *aligned = (char *)(((uintptr_t)buf2 + 0x40) & ~0x3f);
+                    if (((uintptr_t)aligned & 0x40) == 0) {
+                        setvbuf(stdout, aligned, _IOLBF, 4096);
+                    } else {
+                        free(buf2);
+                    }
+                }
+            }
+        }
+    }
+
     /* Initialize real_dlsym EARLY */
     extern void macify_init_real_dlsym(void);
     macify_init_real_dlsym();
