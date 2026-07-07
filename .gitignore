@@ -44,3 +44,4 @@ upload/
 *.bak
 core
 core.*
+.env

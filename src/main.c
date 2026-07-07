@@ -407,6 +407,9 @@ int main(int argc, char **argv, char **envp) {
         for (int i = 0; i < g_nsegments; i++) {
             if (strcmp(g_segments[i].name, "__TEXT") == 0) {
                 g_entry_rip = g_segments[i].vmaddr + main_entryoff;
+                /* Save text range for SIGSEGV recovery in crash_handler. */
+                g_macos_text_lo = g_segments[i].vmaddr;
+                g_macos_text_hi = g_segments[i].vmaddr + g_segments[i].vmsize;
                 break;
             }
         }

@@ -235,20 +235,31 @@ static void macify_restore_read_ptr(FILE *fp) {
 
 static void macify_sync_stdio_flags(FILE *fp);
 int __srget(FILE *fp) {
-    /* Restore saved _IO_read_ptr before calling fgetc */
+    /* Use read() directly instead of fgetc() to avoid glibc modifying
+     * _IO_read_ptr. This prevents the inlined getc macro from seeing
+     * a non-NULL _IO_read_ptr (which would make _r > 0 and cause it
+     * to dereference _p = glibc _flags = 0xfbadXXXX).
+     *
+     * With read(), glibc's buffer is never filled, so _IO_read_ptr
+     * stays NULL. The getc macro always sees _r = 0, --_r = -1,
+     * and calls __srget. We bypass glibc entirely and read from
+     * the fd directly. */
+    int fd = *(int *)((char *)fp + 0x70);  /* glibc _fileno offset */
+    if (fd >= 0) {
+        unsigned char ch;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) return (int)ch;
+        /* EOF or error */
+        macify_sync_stdio_flags(fp);
+        return EOF;
+    }
+    /* Fallback to fgetc if fd is invalid */
     macify_restore_read_ptr(fp);
     int c = fgetc(fp);
     if (c != EOF) {
-        /* Save _IO_read_ptr, then set it to NULL (all 8 bytes).
-         * macOS getc reads _r (low 4 bytes of _IO_read_ptr at offset 8).
-         * NULL → _r = 0, --_r = -1 < 0 → calls __srget (not *_p).
-         * glibc sees _IO_read_ptr = NULL → calls underflow on next read.
-         * This avoids the corruption from setting only _r=-1 (which left
-         * high 4 bytes intact, creating a garbage pointer for fread). */
         macify_save_read_ptr(fp);
-        *(void **)((char *)fp + 8) = NULL;  /* _IO_read_ptr = NULL */
+        *(void **)((char *)fp + 8) = NULL;
     } else {
-        /* On EOF: restore _IO_read_ptr and sync flags */
         macify_restore_read_ptr(fp);
         macify_sync_stdio_flags(fp);
     }

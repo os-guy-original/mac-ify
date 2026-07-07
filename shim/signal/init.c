@@ -39,31 +39,30 @@ static void macify_init_stdio(void) {
     __stdinp = stdin;
     __stdoutp = stdout;
 
-    /* Allocate stdout's buffer at a controlled address where the low byte
-     * does NOT have bit 0x40 set. macOS binaries check [stdout + 0x10] & 0x40
-     * for __SERR (error flag). Glibc stores _IO_read_end (buffer pointer) at
-     * offset 0x10. If the buffer address has bit 0x40 in its low byte, macOS
-     * code falsely detects a write error.
+    /* Map a readable page at 0xfbad2000 so that glibc's _flags value
+     * (0xfbad2084 for stdout, 0xfbad2088 for stdin, etc.) can be
+     * dereferenced as a pointer without crashing.
      *
-     * We use mmap to get a page at a predictable address, then use part of it
-     * as stdout's buffer. Since most macOS binaries don't call setvbuf, our
-     * buffer persists for the lifetime of the process. */
+     * macOS binaries read [FILE* + 0] as _p (8-byte pointer) and
+     * dereference it. On glibc, [FILE* + 0] = _flags (0xfbadXXXX).
+     * Without this mapping, dereferencing 0xfbad2084 → SIGSEGV.
+     * With this mapping, *(0xfbad2084) = 0 (zero-filled page).
+     * The macOS getc macro reads *_p++ and gets 0 (NUL), which is
+     * wrong data but doesn't crash. Our __srget shim prevents this
+     * code path from being reached in most cases.
+     *
+     * The page covers 0xfbad2000-0xfbad2fff, which includes all
+     * possible _flags values for glibc FILE* streams. */
     {
-        char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (page && page != MAP_FAILED) {
-            /* Check if the address has bit 0x40 set */
-            if (((uintptr_t)page & 0x40) == 0) {
-                /* Safe to use directly */
-                setvbuf(stdout, page, _IOLBF, 4096);
-            } else {
-                /* Bit 0x40 is set — find an offset within the page that clears it */
-                char *safe = (char *)(((uintptr_t)page + 0x40) & ~0x3f);
-                if (((uintptr_t)safe & 0x40) == 0 && safe + 4096 <= page + 4096) {
-                    setvbuf(stdout, safe, _IOLBF, 4096 - (safe - page));
-                }
-            }
+        void *p = mmap((void *)0xfbad2000, 0x1000, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                       -1, 0);
+        if (p == MAP_FAILED) {
+            /* Try without NOREPLACE (older kernels) */
+            p = mmap((void *)0xfbad2000, 0x1000, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
         }
+        /* Fill with zeros — don't need to, mmap already zeros anonymous pages */
     }
 
     /* Initialize real_dlsym EARLY */

@@ -215,6 +215,10 @@ extern int g_nsections;
 extern loaded_dylib g_dylibs[MAX_DYLIBS];
 extern int g_ndylibs;
 
+/* Text range of the loaded macOS binary, for SIGSEGV recovery. */
+extern uintptr_t g_macos_text_lo;
+extern uintptr_t g_macos_text_hi;
+
 extern uint64_t g_entry_rip;
 extern int64_t  g_slide;
 extern bool     g_verbose;

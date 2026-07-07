@@ -18,6 +18,10 @@ loaded_segment g_segments[MAX_SEGMENTS];
 int g_nsegments = 0;
 uint64_t g_entry_rip = 0;
 
+/* Text range of loaded macOS binary for SIGSEGV recovery. */
+uintptr_t g_macos_text_lo = 0;
+uintptr_t g_macos_text_hi = 0;
+
 /* tls_g address for Go binaries (0 for non-Go). */
 uint64_t g_tls_g_addr = 0;
 

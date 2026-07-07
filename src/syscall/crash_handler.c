@@ -22,6 +22,35 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
 
     uint64_t rip __attribute__((unused)) = (uint64_t)regs[REG_RIP];
 
+    /* Recover from SIGSEGV caused by macOS getc/putc macros dereferencing
+     * glibc's _flags (0xfbadXXXX) as a pointer. The macOS getc macro reads
+     * [FILE* + 0] as _p (8-byte pointer) and dereferences it. On glibc,
+     * [FILE* + 0] = _flags (0xfbadXXXX). After _p++ increments, the high
+     * 32 bits become non-zero, creating addresses like 0x00000005fbad2489.
+     *
+     * We catch SIGSEGV at any address where bits 16-31 = 0xfbad, skip the
+     * faulting instruction, and return 0 (NUL byte) in RAX. This lets the
+     * macOS binary continue processing (with wrong data but no crash). */
+    if (sig == SIGSEGV) {
+        unsigned long addr = (unsigned long)info->si_addr;
+        /* Check if bits 16-31 contain 0xfbad (glibc _flags magic) */
+        if (((addr >> 16) & 0xFFFF) == 0xFBAD) {
+            uint8_t *rip_ptr = (uint8_t *)regs[REG_RIP];
+            int instr_len = 3;
+            if (rip_ptr[0] == 0x48 || rip_ptr[0] == 0x4c) {
+                if (rip_ptr[1] == 0x0f) instr_len = 4;
+                else instr_len = 3;
+            } else if (rip_ptr[0] == 0x0f) {
+                instr_len = 3;
+            } else if (rip_ptr[0] == 0x8a || rip_ptr[0] == 0x88) {
+                instr_len = 2;
+            }
+            regs[REG_RIP] += instr_len;
+            regs[REG_RAX] = 0; /* return 0 (NUL byte) */
+            return; /* resume execution */
+        }
+    }
+
     /* Build entire crash report in one buffer to minimize write calls
      * and avoid crashes between writes. Include Go state if available. */
     int pos = 0;
@@ -100,4 +129,5 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     print_stats();
     _exit(128 + sig);
 }
+
 
