@@ -65,6 +65,7 @@ static void macify_init_stdio(void) {
         /* Fill with zeros — don't need to, mmap already zeros anonymous pages */
     }
 
+
     /* Initialize real_dlsym EARLY */
     extern void macify_init_real_dlsym(void);
     macify_init_real_dlsym();

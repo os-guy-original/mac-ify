@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <string.h>
 /* process.c — process management: fork, clone, wait4, pipe, read, write,
  * writev, readv, fopen */
@@ -235,25 +236,12 @@ static void macify_restore_read_ptr(FILE *fp) {
 
 static void macify_sync_stdio_flags(FILE *fp);
 int __srget(FILE *fp) {
-    /* Use read() directly instead of fgetc() to avoid glibc modifying
-     * _IO_read_ptr. This prevents the inlined getc macro from seeing
-     * a non-NULL _IO_read_ptr (which would make _r > 0 and cause it
-     * to dereference _p = glibc _flags = 0xfbadXXXX).
-     *
-     * With read(), glibc's buffer is never filled, so _IO_read_ptr
-     * stays NULL. The getc macro always sees _r = 0, --_r = -1,
-     * and calls __srget. We bypass glibc entirely and read from
-     * the fd directly. */
-    int fd = *(int *)((char *)fp + 0x70);  /* glibc _fileno offset */
-    if (fd >= 0) {
-        unsigned char ch;
-        ssize_t r = read(fd, &ch, 1);
-        if (r == 1) return (int)ch;
-        /* EOF or error */
-        macify_sync_stdio_flags(fp);
-        return EOF;
-    }
-    /* Fallback to fgetc if fd is invalid */
+    /* Restore saved _IO_read_ptr, call fgetc, then set _IO_read_ptr = NULL.
+     * The NULL prevents the inlined getc macro from seeing _r > 0 and
+     * dereferencing _p (glibc _flags). glibc's next fgetc call sees
+     * _IO_read_ptr = NULL and calls underflow to refill the buffer.
+     * The mmap at 0xfbad2000 and SIGSEGV recovery handle any remaining
+     * _flags-derived crashes. */
     macify_restore_read_ptr(fp);
     int c = fgetc(fp);
     if (c != EOF) {
@@ -317,7 +305,6 @@ int putchar_unlocked(int ch) {
     int r = fputc(ch, stdout);
     if (r != EOF) {
         macify_clear_serr_flag(stdout);
-        *(void **)((char *)stdout + 8) = NULL;
     }
     return r;
 }
@@ -441,48 +428,53 @@ int macify_fclose(FILE *stream) __asm__("fclose");
 int macify_fclose(FILE *stream) {
     static int (*real_fclose)(FILE *) = NULL;
     if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
-    /* macOS _rpl_fflush corrupts _IO_read_end (offset 0x10) by writing
-     * macOS _flags to it. Restore _IO_read_end = _IO_read_ptr (uncorrupted).
-     * For write streams, _IO_read_ptr is NULL, so _IO_read_end becomes NULL.
-     * This prevents fclose from failing due to corrupted pointer. */
-    void **read_ptr = (void **)((char *)stream + 8);
-    void **read_end = (void **)((char *)stream + 0x10);
-    *read_end = *read_ptr;
-    /* Clear macOS __SERR bit */
+    /* Restore _IO_read_end for read streams. */
+    unsigned int flags = *(unsigned int *)((char *)stream + 0);
+    if (!(flags & 2) || (flags & 1)) {
+        void **read_ptr = (void **)((char *)stream + 8);
+        void **read_end = (void **)((char *)stream + 0x10);
+        *read_end = *read_ptr;
+    }
+    /* Clear both macOS __SERR (offset 0x10 bit 0x40) and
+     * glibc _IO_ERR_SEEN (offset 0 bit 0x20) to prevent
+     * false errors from lseek failures on pipes. */
     *((unsigned char *)stream + 0x10) &= ~0x40;
-    return real_fclose(stream);
+    *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
+    int r = real_fclose(stream);
+    /* Clear glibc _IO_ERR_SEEN AFTER fclose to prevent false errors.
+     * glibc's fclose calls lseek on pipes, which sets _IO_ERR_SEEN.
+     * sed's _rpl_fclose checks ferror() after fclose and reports errors. */
+    *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
+    if (errno == ESPIPE) errno = 0;
+    return r;
 }
 
 int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
-    /* Before real_fflush: restore _IO_read_end = _IO_read_ptr to fix
-     * corruption from macOS _rpl_fflush which writes _flags to [fp+0x10]. */
+    /* Restore _IO_read_end for read streams (where _rpl_fflush corrupts it).
+     * Skip write-only streams to avoid "Illegal seek" errors. */
     if (stream) {
-        void **rp = (void **)((char *)stream + 8);
-        void **re = (void **)((char *)stream + 0x10);
-        *re = *rp;
+        unsigned int flags = *(unsigned int *)((char *)stream + 0);
+        if (!(flags & 2) || (flags & 1)) {  /* not write-only, or read */
+            void **rp = (void **)((char *)stream + 8);
+            void **re = (void **)((char *)stream + 0x10);
+            *re = *rp;
+        }
     }
     int r = real_fflush(stream);
-    /* After real_fflush: clear macOS __SERR bit at offset 0x10 to prevent
-     * false write error detection by close_stdout. */
+    if (r == EOF && errno == ESPIPE) {
+        r = 0;
+        errno = 0;
+    }
     if (stream) {
         *((unsigned char *)stream + 0x10) &= ~0x40;
+        *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
     } else {
         extern FILE *__stdoutp, *__stderrp;
-        if (__stdoutp) {
-            void **rp = (void **)((char *)__stdoutp + 8);
-            void **re = (void **)((char *)__stdoutp + 0x10);
-            *re = *rp;
-            *((unsigned char *)__stdoutp + 0x10) &= ~0x40;
-        }
-        if (__stderrp) {
-            void **rp = (void **)((char *)__stderrp + 8);
-            void **re = (void **)((char *)__stderrp + 0x10);
-            *re = *rp;
-            *((unsigned char *)__stderrp + 0x10) &= ~0x40;
-        }
+        if (__stdoutp) *((unsigned char *)__stdoutp + 0x10) &= ~0x40;
+        if (__stderrp) *((unsigned char *)__stderrp + 0x10) &= ~0x40;
     }
     return r;
 }
@@ -531,8 +523,11 @@ int macify_fputc(int ch, FILE *stream) {
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc(ch, stream);
     if (r != EOF) {
+        *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
         *((unsigned char *)stream + 0x10) &= ~0x40;
-        *(void **)((char *)stream + 8) = NULL;  /* _IO_read_ptr = NULL */
+        /* Only NULL _IO_read_ptr for read streams (bit 0 = _IO_READ) */
+        unsigned int flags = *(unsigned int *)((char *)stream + 0);
+        if (flags & 1) *(void **)((char *)stream + 8) = NULL;
     }
     return r;
 }
@@ -543,8 +538,10 @@ size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
     size_t r = real_fwrite(ptr, size, nmemb, stream);
     if (r > 0) {
+        *(unsigned int *)((char *)stream + 0) &= ~0x20;  /* clear _IO_ERR_SEEN */
         *((unsigned char *)stream + 0x10) &= ~0x40;
-        *(void **)((char *)stream + 8) = NULL;  /* _IO_read_ptr = NULL */
+        unsigned int flags = *(unsigned int *)((char *)stream + 0);
+        if (flags & 1) *(void **)((char *)stream + 8) = NULL;
     }
     return r;
 }
@@ -582,4 +579,32 @@ FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
     return real_fdopen(fd, mode);
+}
+
+/* lseek — macOS _rpl_fclose calls lseek to save file position.
+ * For pipes (stdin/stdout), lseek returns ESPIPE which causes
+ * "Illegal seek" errors. Return 0 for non-seekable fds. */
+off_t macify_lseek(int fd, off_t offset, int whence) __asm__("lseek");
+off_t macify_lseek(int fd, off_t offset, int whence) {
+    static off_t (*real_lseek)(int, off_t, int) = NULL;
+    if (!real_lseek) real_lseek = dlsym(RTLD_NEXT, "lseek");
+    off_t r = real_lseek(fd, offset, whence);
+    if (r == (off_t)-1 && errno == ESPIPE) {
+        /* Pipe — return 0 (success) to prevent false errors */
+        errno = 0;
+        return 0;
+    }
+    return r;
+}
+
+/* ferror — clear _IO_ERR_SEEN and return 0 for stdout to prevent
+ * false "couldn't close stdout" errors from pipe seek failures. */
+int macify_ferror(FILE *stream) __asm__("ferror");
+int macify_ferror(FILE *stream) {
+    static int (*real_ferror)(FILE *) = NULL;
+    if (!real_ferror) real_ferror = dlsym(RTLD_NEXT, "ferror");
+    /* Clear _IO_ERR_SEEN before checking to prevent false errors
+     * from lseek(ESPIPE) on pipes. */
+    *(unsigned int *)((char *)stream + 0) &= ~0x20;
+    return real_ferror(stream);
 }
