@@ -646,3 +646,35 @@ void *SecCertificateCopyData(void *cert) { (void)cert; return NULL; }
 void *SecTrustCopyCertificateChain(void *trust) { (void)trust; return NULL; }
 int SecTrustSetVerifyDate(void *trust, void *date) { (void)trust; (void)date; return 0; }
 
+
+/* GnuTLS stubs — wget links against macOS GnuTLS which has incompatible
+ * struct layouts with Linux GnuTLS. Provide stubs that return success
+ * for init and no-op for everything else.
+ * This allows wget --version and --help to work.
+ * Actual HTTPS downloads will fail, but that's expected. */
+
+int gnutls_global_init(void) { return 0; }
+void gnutls_global_deinit(void) { }
+int gnutls_init(void **session, int flags) { (void)flags; if (session) *session = NULL; return 0; }
+void gnutls_deinit(void *session) { (void)session; }
+int gnutls_set_default_priority(void *session) { (void)session; return 0; }
+int gnutls_priority_set_direct(void *session, const char *prio, const char **err) { (void)session; (void)prio; if (err) *err = NULL; return 0; }
+int gnutls_credentials_set(void *session, int type, void *cred) { (void)session; (void)type; (void)cred; return 0; }
+int gnutls_handshake(void *session) { (void)session; return 0; }
+int gnutls_bye(void *session, int how) { (void)session; (void)how; return 0; }
+int gnutls_record_recv(void *session, void *data, size_t size) { (void)session; (void)data; (void)size; return -1; }
+int gnutls_record_send(void *session, const void *data, size_t size) { (void)session; (void)data; return (int)size; }
+int gnutls_error_is_fatal(int error) { (void)error; return 1; }
+int gnutls_alert_get(void *session) { (void)session; return 0; }
+const char *gnutls_alert_get_name(int alert) { (void)alert; return "unknown"; }
+int gnutls_certificate_allocate_credentials(void **cred) { if (cred) *cred = NULL; return 0; }
+void gnutls_certificate_free_credentials(void *cred) { (void)cred; }
+int gnutls_certificate_set_x509_system_trust(void *cred) { (void)cred; return 0; }
+int gnutls_certificate_set_x509_trust_file(void *cred, const char *f, int type) { (void)cred; (void)f; (void)type; return 0; }
+int gnutls_certificate_set_x509_crl_file(void *cred, const char *f, int type) { (void)cred; (void)f; (void)type; return 0; }
+int gnutls_certificate_set_x509_key_file(void *cred, const char *c, const char *k, int type) { (void)cred; (void)c; (void)k; (void)type; return 0; }
+int gnutls_certificate_set_verify_flags(void *cred, int flags) { (void)cred; (void)flags; return 0; }
+const void *gnutls_certificate_get_peers(void *session, unsigned int *count) { (void)session; if (count) *count = 0; return NULL; }
+int gnutls_certificate_verify_peers2(void *session, unsigned int *status) { (void)session; if (status) *status = 0; return 0; }
+int gnutls_certificate_type_get(void *session) { (void)session; return 1; }
+void gnutls_free(void *ptr) { (void)ptr; }

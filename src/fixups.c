@@ -526,17 +526,11 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                 uint32_t next = (value >> 51) & 0xFFF;
 
                 if (is_bind) {
-                    /* Bind fixup. Ordinal is the 0-based index into the imports
-                     * table (matches the indirect symbol table for jq_darwin:
-                     * ordinal=0 binds to import[0]=__DefaultRuneLocale, etc.).
-                     * Special ordinals 0xFD/0xFE/0xFF = flat-lookup/main-exec/self
-                     * (not supported here — left as-is). */
                     uint32_t ordinal = value & 0xFFFF;
                     uint32_t addend = (value >> 16) & 0xFFFF;
 
-                    if (ordinal >= 0xFD || ordinal >= hdr->imports_count) {
-                        /* Special ordinal (flat-lookup/main-exec/self) or
-                         * out-of-range — leave the entry as-is. */
+                    if (ordinal >= hdr->imports_count) {
+                        /* Out-of-range import index — leave as-is. */
                     } else {
                         uint32_t imp_raw = *(uint32_t *)(imports_base + ordinal * 4);
                         int lib_ordinal = imp_raw & 0xFF;
@@ -564,6 +558,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
                             if (getenv("MACIFY_TRACE_FIXUPS")) {
                                 fprintf(stderr, "macify: fixup sym=%s -> %p (GOT=%p)\n", sym, addr, (void*)chain_ptr);
+                                fflush(stderr);
                             }
                             if (strcmp(sym, "malloc_size") == 0) {
                                 if (getenv("MACIFY_VERBOSE")) fprintf(stderr, "macify: chained fixup malloc_size at chain_ptr=%p (page+0x%lx) -> %p\n",
@@ -579,13 +574,22 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                     }
                 } else {
                     /* Rebase fixup: target is OFFSET from image base */
-                    uint64_t target = value & 0x7FFFFFFFFFFULL;  /* 43 bits */
+                    uint64_t target = value & 0x7FFFFFFFFFFULL;
                     uint8_t  high8 = (value >> 43) & 0xFF;
                     uint64_t static_offset = ((uint64_t)high8 << 43) | target;
                     *(uint64_t *)chain_ptr = static_offset + load_base;
+                    if (getenv("MACIFY_TRACE_FIXUPS")) {
+                        fprintf(stderr, "macify: rebase -> 0x%lx (GOT=%p)\n",
+                                (unsigned long)(static_offset + load_base), (void*)chain_ptr);
+                    }
                 }
 
                 if (next == 0) break;
+                if (getenv("MACIFY_TRACE_FIXUPS")) {
+                    fprintf(stderr, "macify: chain next=%d -> offset 0x%lx\n",
+                            next, (unsigned long)(chain_ptr - page_base + (size_t)next * 4));
+                    fflush(stderr);
+                }
                 chain_ptr += (size_t)next * 4;  /* stride = 4 bytes */
                 if (chain_ptr + 8 > page_end) break;
                 chain_iter++;
