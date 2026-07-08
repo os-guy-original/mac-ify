@@ -1,0 +1,299 @@
+@name wget-1.25.0_1+gnutls
+@portname wget
+@portepoch 0
+@portversion 1.25.0
+@portrevision 1
+@archs x86_64
+@portvariant +gnutls
+@pkgdep gettext-runtime-0.22.5_0
+@pkgdep libiconv-1.17_0
+@pkgdep libidn2-2.3.7_0
+@pkgdep libproxy-0.5.9_0
+@pkgdep libpsl-0.21.5-20240306_0
+@pkgdep libunistring-1.3_0
+@pkgdep nettle-3.10_0
+@pkgdep pcre2-10.44_0
+@pkgdep zlib-1.3.1_0
+@pkgdep gnutls-3.7.11_1
+opt/local/bin/wget
+@comment MD5:1bdeff7120f060c1763eb8728eb7ac61
+@comment binary:1
+opt/local/etc/wgetrc.sample
+@comment MD5:4f85201ccffc7553359c409810045c05
+@comment binary:0
+opt/local/share/doc/wget/AUTHORS
+@comment MD5:73ec735b2ed0c22cf0ee49a0a5b3a62f
+@comment binary:0
+opt/local/share/doc/wget/COPYING
+@comment MD5:6f65012d1daf98cb09b386cfb68df26b
+@comment binary:0
+opt/local/share/doc/wget/ChangeLog
+@comment MD5:5f873626dee9bcf53cd30aacacbb6595
+@comment binary:0
+opt/local/share/doc/wget/MAILING-LIST
+@comment MD5:e6f406888c940a31427b6eaccabf4b62
+@comment binary:0
+opt/local/share/doc/wget/NEWS
+@comment MD5:7966ed762e02fe26fe9d0920730ca457
+@comment binary:0
+opt/local/share/doc/wget/README
+@comment MD5:acfe1b7114f17feee5a876ddf5510f7e
+@comment binary:0
+opt/local/share/info/wget.info
+@comment MD5:c2d42e129935bf9909fc07ec96f2cad9
+@comment binary:0
+opt/local/share/locale/af/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:3bf714e943a34ad31dd20c0a46ed0624
+@comment binary:0
+opt/local/share/locale/be/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:136a4bd94717e0c82279808825fd699a
+@comment binary:0
+opt/local/share/locale/be/LC_MESSAGES/wget.mo
+@comment MD5:0b80d668022fd2648a7b59ccf16871dc
+@comment binary:0
+opt/local/share/locale/bg/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:275cfcc48eaa0f88112951bce7acbaae
+@comment binary:0
+opt/local/share/locale/bg/LC_MESSAGES/wget.mo
+@comment MD5:aad2e33d7a5856a66891bbae74c127f2
+@comment binary:0
+opt/local/share/locale/ca/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:731cad40c7c1cd89da32048ce4796fe9
+@comment binary:0
+opt/local/share/locale/ca/LC_MESSAGES/wget.mo
+@comment MD5:9fd3c0b140d30e4db12ed0f0ba5aed00
+@comment binary:0
+opt/local/share/locale/cs/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:f73398b91805663e9982f54c33ad0aa5
+@comment binary:0
+opt/local/share/locale/cs/LC_MESSAGES/wget.mo
+@comment MD5:3b97e8bfe413c5a3124c3c1699ca25f0
+@comment binary:0
+opt/local/share/locale/da/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:9060bfe21c45ee4dfd1e688da75a1121
+@comment binary:0
+opt/local/share/locale/da/LC_MESSAGES/wget.mo
+@comment MD5:e8854233424cae795fc0fd0071fffc24
+@comment binary:0
+opt/local/share/locale/de/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:c5dd21520bf038aa71f65f99c28b382c
+@comment binary:0
+opt/local/share/locale/de/LC_MESSAGES/wget.mo
+@comment MD5:ca5bf67dcc770031666adf9eaa116101
+@comment binary:0
+opt/local/share/locale/el/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:c21fdc2e9b622baea6f2bdf34739868a
+@comment binary:0
+opt/local/share/locale/el/LC_MESSAGES/wget.mo
+@comment MD5:3e099119bbf1df0ed31d8aef7da4165d
+@comment binary:0
+opt/local/share/locale/en_GB/LC_MESSAGES/wget.mo
+@comment MD5:4f34239f4c96adfc59dffd60dda45edf
+@comment binary:0
+opt/local/share/locale/eo/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:4c24486cd6e99c2fc8b7ce52f0cc86fc
+@comment binary:0
+opt/local/share/locale/eo/LC_MESSAGES/wget.mo
+@comment MD5:ecdd18ed259b4991b491cbd2411c65e9
+@comment binary:0
+opt/local/share/locale/es/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:4354f38b7917507fcd55d15c1c9d9e8d
+@comment binary:0
+opt/local/share/locale/es/LC_MESSAGES/wget.mo
+@comment MD5:51bd6ef07fe8a888f43ed2970d96aa24
+@comment binary:0
+opt/local/share/locale/et/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:d898a7b3e54baaf0fcc140ff51f1779e
+@comment binary:0
+opt/local/share/locale/et/LC_MESSAGES/wget.mo
+@comment MD5:547a90e930d584bec86b90eed371f05e
+@comment binary:0
+opt/local/share/locale/eu/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:39c94751ad6e46e97b6d355fe6c8af51
+@comment binary:0
+opt/local/share/locale/eu/LC_MESSAGES/wget.mo
+@comment MD5:88ab8e0d4f413cb4e7f0853154d02713
+@comment binary:0
+opt/local/share/locale/fi/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:f96cdbeaad3890d0804e7508ae55423c
+@comment binary:0
+opt/local/share/locale/fi/LC_MESSAGES/wget.mo
+@comment MD5:db569f7945f5569ae9993f372c84a492
+@comment binary:0
+opt/local/share/locale/fr/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:8e9b237d87e3e8057759fbf4f2753a37
+@comment binary:0
+opt/local/share/locale/fr/LC_MESSAGES/wget.mo
+@comment MD5:43fd4c2d409b40b0c14b3a42306c2152
+@comment binary:0
+opt/local/share/locale/ga/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:645e471952f4373df05f2bb5785101a8
+@comment binary:0
+opt/local/share/locale/ga/LC_MESSAGES/wget.mo
+@comment MD5:1215f48ab151998e7afadbe99f14b349
+@comment binary:0
+opt/local/share/locale/gl/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:720da0afb640edb7e6272641322868ec
+@comment binary:0
+opt/local/share/locale/gl/LC_MESSAGES/wget.mo
+@comment MD5:d99bcf3385e9577adb87cbe62facb294
+@comment binary:0
+opt/local/share/locale/he/LC_MESSAGES/wget.mo
+@comment MD5:b7e3730f1cca13194e409c6042a718f1
+@comment binary:0
+opt/local/share/locale/hr/LC_MESSAGES/wget.mo
+@comment MD5:748e5efd5f13180a5fab716785b9ddea
+@comment binary:0
+opt/local/share/locale/hu/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:8be4ac4fab333ca3f425b3a300beed15
+@comment binary:0
+opt/local/share/locale/hu/LC_MESSAGES/wget.mo
+@comment MD5:2686f6e1b6ce62653ccce48f427efaac
+@comment binary:0
+opt/local/share/locale/id/LC_MESSAGES/wget.mo
+@comment MD5:c14a0530ffeb959743def5ad982d757e
+@comment binary:0
+opt/local/share/locale/it/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:332fa2b7b3df37568e73723ecbcccad9
+@comment binary:0
+opt/local/share/locale/it/LC_MESSAGES/wget.mo
+@comment MD5:f031f906a90f1580135f3bf9fb21b46d
+@comment binary:0
+opt/local/share/locale/ja/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:e817c36f5508ad3475d729a9e7ed8bfc
+@comment binary:0
+opt/local/share/locale/ja/LC_MESSAGES/wget.mo
+@comment MD5:7bad1dcf5c22ca3ef571ee5148f2df05
+@comment binary:0
+opt/local/share/locale/ka/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:4ecb22060a9c672f68a55c5c6f88a6a9
+@comment binary:0
+opt/local/share/locale/ka/LC_MESSAGES/wget.mo
+@comment MD5:1bdeacbbff5072d381e825f4a7ac7f74
+@comment binary:0
+opt/local/share/locale/ko/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:37c502e57b31c60c61a74e7da2053d90
+@comment binary:0
+opt/local/share/locale/ko/LC_MESSAGES/wget.mo
+@comment MD5:3c612a90019075e9052167ed93da852e
+@comment binary:0
+opt/local/share/locale/lt/LC_MESSAGES/wget.mo
+@comment MD5:127fb4f4607893c1f64e4b2e384b09a8
+@comment binary:0
+opt/local/share/locale/ms/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:afb89e0b338e54ba82e7eb67da600e9d
+@comment binary:0
+opt/local/share/locale/nb/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:b1862179290e6733ec8985c1d977530e
+@comment binary:0
+opt/local/share/locale/nb/LC_MESSAGES/wget.mo
+@comment MD5:15521f27956a2783b3e862847cc3f123
+@comment binary:0
+opt/local/share/locale/nl/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:68dfd0633b2219fa94a76692eefc9584
+@comment binary:0
+opt/local/share/locale/nl/LC_MESSAGES/wget.mo
+@comment MD5:461291c268c3fcedc25ba6752023fbe7
+@comment binary:0
+opt/local/share/locale/pl/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:a80a9c5ecd1d6699f2bc1474cd869c37
+@comment binary:0
+opt/local/share/locale/pl/LC_MESSAGES/wget.mo
+@comment MD5:ecb1a29d3176397465d4885a88cb4ea2
+@comment binary:0
+opt/local/share/locale/pt/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:1858d1bb3956b155200db38ec3934e5a
+@comment binary:0
+opt/local/share/locale/pt/LC_MESSAGES/wget.mo
+@comment MD5:d48e8823ed9f98ad2a016816ee5643c0
+@comment binary:0
+opt/local/share/locale/pt_BR/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:adbeee025ec5631c44f0b4790ce99998
+@comment binary:0
+opt/local/share/locale/pt_BR/LC_MESSAGES/wget.mo
+@comment MD5:07158bb0946ea286001d1299d635d16d
+@comment binary:0
+opt/local/share/locale/ro/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:dfb29d1ed7e1dfdf1f01f509333ec444
+@comment binary:0
+opt/local/share/locale/ro/LC_MESSAGES/wget.mo
+@comment MD5:a561dc9cf9ae1c3f7368099f5c303029
+@comment binary:0
+opt/local/share/locale/ru/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:1f500eaaaf4ecc149e5dff7339894791
+@comment binary:0
+opt/local/share/locale/ru/LC_MESSAGES/wget.mo
+@comment MD5:e09af7265cb2ef2f8bc89b827481ba05
+@comment binary:0
+opt/local/share/locale/rw/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:653e5d0d550274556b8b9af2da0f7a81
+@comment binary:0
+opt/local/share/locale/sk/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:dd191c83a929841d651ffcc6db273737
+@comment binary:0
+opt/local/share/locale/sk/LC_MESSAGES/wget.mo
+@comment MD5:a1a0c0151e42fc1aec1f915eecaa5a90
+@comment binary:0
+opt/local/share/locale/sl/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:915a56e5e79a0fac8c579a150426e522
+@comment binary:0
+opt/local/share/locale/sl/LC_MESSAGES/wget.mo
+@comment MD5:33156175a0a2d9883f534d1f2688fcc1
+@comment binary:0
+opt/local/share/locale/sr/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:bf8000f3b6344d35b5a4295fa92858b5
+@comment binary:0
+opt/local/share/locale/sr/LC_MESSAGES/wget.mo
+@comment MD5:bf9d8cf0f065a73849f088869d4bc59f
+@comment binary:0
+opt/local/share/locale/sv/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:91e24eedc06ae848fc80e5e7ae4948b6
+@comment binary:0
+opt/local/share/locale/sv/LC_MESSAGES/wget.mo
+@comment MD5:02a999a650f8d2b301714e528e88a958
+@comment binary:0
+opt/local/share/locale/tr/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:1fa002b4487572276774e69913da4504
+@comment binary:0
+opt/local/share/locale/tr/LC_MESSAGES/wget.mo
+@comment MD5:6bd8228956b20eb3f75fa3428e3bcb5f
+@comment binary:0
+opt/local/share/locale/uk/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:ebcf5a17d416d6657c123b923ac7fbd6
+@comment binary:0
+opt/local/share/locale/uk/LC_MESSAGES/wget.mo
+@comment MD5:18d8abadd7090fcde4870d28c80ec1ef
+@comment binary:0
+opt/local/share/locale/vi/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:c8a5b1c4534a5882f09234ecae76ee88
+@comment binary:0
+opt/local/share/locale/vi/LC_MESSAGES/wget.mo
+@comment MD5:28b037b4727279a85c57fb9e5ad1a346
+@comment binary:0
+opt/local/share/locale/zh_CN/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:abc995e635b0dd534c4e3e42a95c86c2
+@comment binary:0
+opt/local/share/locale/zh_CN/LC_MESSAGES/wget.mo
+@comment MD5:4825fb126df6b44e4115c8cd0633695c
+@comment binary:0
+opt/local/share/locale/zh_TW/LC_MESSAGES/wget-gnulib.mo
+@comment MD5:e76dd30dba67ff706c33e35a45db50e3
+@comment binary:0
+opt/local/share/locale/zh_TW/LC_MESSAGES/wget.mo
+@comment MD5:c73272c19090d42730fd31c5590730f1
+@comment binary:0
+opt/local/share/man/man1/wget.1.gz
+@comment MD5:9af9f7735d51d4701cb0f7ece1b80ad2
+@comment binary:0
+@ignore
++COMMENT
+@ignore
++CONTENTS
+@ignore
++DESC
+@ignore
++PORTFILE
+@ignore
++STATE
+@cxx_stdlib none
+@cxx_stdlib_overridden 0

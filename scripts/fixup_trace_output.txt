@@ -1,0 +1,388 @@
+Loaded /home/z/my-project/mac-ify/tests/real/wget_macos  (446520 bytes)
+=== Mach-O header ===
+  magic        = 0xFEEDFACF (64-bit)
+  cputype      = 0x01000007  cpusubtype = 0x00000003
+  filetype     = 2  (MH_EXECUTE)
+  ncmds        = 29
+  sizeofcmds   = 2312
+  flags        = 0x00200085
+
+=== Segments ===
+  [0] __PAGEZERO       vmaddr=0x000000000000 vmsize=0x100000000  fileoff=0x000000 filesize=0x0  nsects=0
+  [1] __TEXT           vmaddr=0x000100000000 vmsize=0x58000  fileoff=0x000000 filesize=0x58000  nsects=5
+  [2] __DATA_CONST     vmaddr=0x000100058000 vmsize=0x2000  fileoff=0x058000 filesize=0x2000  nsects=2
+  [3] __DATA           vmaddr=0x00010005a000 vmsize=0xc000  fileoff=0x05a000 filesize=0x5000  nsects=3
+  [4] __LINKEDIT       vmaddr=0x000100066000 vmsize=0xf000  fileoff=0x05f000 filesize=0xe038  nsects=0
+
+=== Sections ===
+  seg[1] __TEXT           __text               addr=0x0001000042c4 size=0x3e260 off=0x0042c4 flags=0x80000400
+  seg[1] __TEXT           __stubs              addr=0x000100042524 size=0x63c off=0x042524 flags=0x80000408
+  seg[1] __TEXT           __const              addr=0x000100042b60 size=0x9cd4 off=0x042b60 flags=0x00000000
+  seg[1] __TEXT           __cstring            addr=0x00010004c834 size=0xafe7 off=0x04c834 flags=0x00000002
+  seg[1] __TEXT           __unwind_info        addr=0x00010005781c size=0x7e0 off=0x05781c flags=0x00000000
+  seg[2] __DATA_CONST     __got                addr=0x000100058000 size=0x8b0 off=0x058000 flags=0x00000006
+  seg[2] __DATA_CONST     __const              addr=0x0001000588b0 size=0x1578 off=0x0588b0 flags=0x00000000
+  seg[3] __DATA           __data               addr=0x00010005a000 size=0x4470 off=0x05a000 flags=0x00000000
+  seg[3] __DATA           __bss                addr=0x00010005e470 size=0x6cc8 off=0x000000 flags=0x00000001
+  seg[3] __DATA           __common             addr=0x000100065138 size=0x440 off=0x000000 flags=0x00000001
+
+=== LC_DYLD_CHAINED_FIXUPS ===
+  dataoff  = 0x5f000  (=389120)
+  datasize = 4968
+
+--- dyld_chained_fixups_header ---
+  fixups_version = 0
+  starts_offset  = 0x20   (abs: 0x5f020)
+  imports_offset = 0x78  (abs: 0x5f078)
+  symbols_offset = 0x4c0  (abs: 0x5f4c0)
+  imports_count  = 274
+  symbols_length = 1
+  import_table_size = 1096 bytes  (4B per import  ->  dyld_chained_import (4B, lib_ord:8 weak:1 name_off:23))
+
+--- dyld_chained_starts_in_image ---
+  starts_count = 5
+  seg_starts_offsets (one per segment):
+    [0] __PAGEZERO       starts_offset=0x0  (no fixups)
+    [1] __TEXT           starts_offset=0x0  (no fixups)
+    [2] __DATA_CONST     starts_offset=0x18  
+    [3] __DATA           starts_offset=0x38  
+    [4] __LINKEDIT       starts_offset=0x0  (no fixups)
+
+  --- dyld_chained_starts_in_segment [2] __DATA_CONST ---
+    size           = 26
+    page_size      = 4096  (0x1000)
+    pointer_format = 6  (DYLD_CHAINED_PTR_64_OFFSET_64)
+    segment_offset = 0x58000
+    max_valid      = 0x0
+    page_count     = 2
+    page_starts (all 2): ['0x0', '0x0']
+
+  --- dyld_chained_starts_in_segment [3] __DATA ---
+    size           = 32
+    page_size      = 4096  (0x1000)
+    pointer_format = 6  (DYLD_CHAINED_PTR_64_OFFSET_64)
+    segment_offset = 0x5a000
+    max_valid      = 0x0
+    page_count     = 5
+    page_starts (all 5): ['0x28', '0x20', '0x10', '0xffff', '0x3c0']
+
+--- Imports table (274 entries, 4B each) ---
+  (first 16 imports shown)
+    [  0] lib_ord= 13  weak=0  name_off=0x000001  addend=0x0  name='__DefaultRuneLocale'
+    [  1] lib_ord= 13  weak=0  name_off=0x000015  addend=0x0  name='__NSGetEnviron'
+    [  2] lib_ord= 13  weak=0  name_off=0x000024  addend=0x0  name='____chkstk_darwin'
+    [  3] lib_ord= 13  weak=0  name_off=0x000036  addend=0x0  name='____mb_cur_max'
+    [  4] lib_ord= 13  weak=0  name_off=0x000045  addend=0x0  name='____mb_cur_max_l'
+    [  5] lib_ord= 13  weak=0  name_off=0x000056  addend=0x0  name='___bzero'
+    [  6] lib_ord= 13  weak=0  name_off=0x00005f  addend=0x0  name='___darwin_check_fd_set_overflow'
+    [  7] lib_ord= 13  weak=0  name_off=0x00007f  addend=0x0  name='___error'
+    [  8] lib_ord= 13  weak=0  name_off=0x000088  addend=0x0  name='___maskrune'
+    [  9] lib_ord= 13  weak=0  name_off=0x000094  addend=0x0  name='___mb_cur_max'
+    [ 10] lib_ord= 13  weak=0  name_off=0x0000a2  addend=0x0  name='___memcpy_chk'
+    [ 11] lib_ord= 13  weak=0  name_off=0x0000b0  addend=0x0  name='___sprintf_chk'
+    [ 12] lib_ord= 13  weak=0  name_off=0x0000bf  addend=0x0  name='___stack_chk_fail'
+    [ 13] lib_ord= 13  weak=0  name_off=0x0000d1  addend=0x0  name='___stack_chk_guard'
+    [ 14] lib_ord= 13  weak=0  name_off=0x0000e4  addend=0x0  name='___stderrp'
+    [ 15] lib_ord= 13  weak=0  name_off=0x0000ef  addend=0x0  name='___stdinp'
+    ... (274 total imports)
+
+======================================================================
+=== Tracing fixup chains in 3 modes for all ptr_format=6 segments ===
+  mode="12bit"     -> bits 51-62 (format 4/5 layout, works for jq)
+  mode="15bit"     -> bits 36-50 (format 6 layout, Apple spec)
+  mode="heuristic" -> 12-bit unless it overflows the page, then 15-bit
+======================================================================
+
+--- Segment [2] __DATA_CONST (page_size=4096, page_count=2) ---
+  mode=12bit    : visited 877 entries across 2 chains
+  mode=15bit    : visited 2 entries across 2 chains
+  mode=heuristic: visited 877 entries across 2 chains
+
+--- Segment [3] __DATA (page_size=4096, page_count=5) ---
+  mode=12bit    : visited 253 entries across 4 chains
+  mode=15bit    : visited 4 entries across 4 chains
+  mode=heuristic: visited 253 entries across 4 chains
+
+=== Total fixup entries visited per segment (per mode) ===
+  seg  name                12bit    15bit  heuristic
+  [2]  __DATA_CONST          877        2        877
+  [3]  __DATA                253        4        253
+
+=== page_start values with bit 15 set (DYLD_CHAINED_PTR_START_MULTI) ===
+  (none found — no page has bit 15 set)
+
+=== "next=0" chain-end occurrences (per mode) ===
+  mode=12bit     seg[2]: 2 chains ended by next=0,  0 by overflow,  0 by iter-limit
+  mode=12bit     seg[3]: 4 chains ended by next=0,  0 by overflow,  0 by iter-limit
+  mode=15bit     seg[2]: 2 chains ended by next=0,  0 by overflow,  0 by iter-limit
+  mode=15bit     seg[3]: 4 chains ended by next=0,  0 by overflow,  0 by iter-limit
+  mode=heuristic seg[2]: 2 chains ended by next=0,  0 by overflow,  0 by iter-limit
+  mode=heuristic seg[3]: 4 chains ended by next=0,  0 by overflow,  0 by iter-limit
+
+======================================================================
+=== __DATA_CONST analysis (this is the segment containing __got) ===
+======================================================================
+  seg_idx        = 2
+  vmaddr         = 0x100058000
+  vmsize         = 0x2000
+  fileoff        = 0x58000
+  filesize       = 0x2000
+
+  __DATA_CONST sections:
+    __got                addr=0x100058000 size=0x8b0 (seg offset 0x0)  flags=0x00000006
+    __const              addr=0x1000588b0 size=0x1578 (seg offset 0x8b0)  flags=0x00000000
+
+  __got found in __DATA_CONST:
+    offset within __DATA_CONST = 0x0
+    size                       = 0x8b0
+    number of 8-byte entries   = 278
+    entries span offsets 0x0 .. 0x8b0
+
+  __DATA_CONST page_size = 4096
+  page_starts (all 2): ['0x0', '0x0']
+
+  >>> Target offset 0x858 within __DATA_CONST <<<
+      page index       = 0
+      offset in page    = 0x858
+      page_start[0] = 0x0000
+      visited by mode=12bit     ? True
+      visited by mode=15bit     ? False
+      visited by mode=heuristic ? True
+
+  All visited offsets on __DATA_CONST page 0:
+    mode=12bit    : 458 entries
+      offsets: ['0x0', '0x8', '0x10', '0x18', '0x20', '0x28', '0x30', '0x38', '0x40', '0x48', '0x50', '0x58', '0x60', '0x68', '0x70', '0x78', '0x80', '0x88', '0x90', '0x98', '0xa0', '0xa8', '0xb0', '0xb8', '0xc0', '0xc8', '0xd0', '0xd8', '0xe0', '0xe8', '0xf0', '0xf8', '0x100', '0x108', '0x110', '0x118', '0x120', '0x128', '0x130', '0x138', '0x140', '0x148', '0x150', '0x158', '0x160', '0x168', '0x170', '0x178', '0x180', '0x188', '0x190', '0x198', '0x1a0', '0x1a8', '0x1b0', '0x1b8', '0x1c0', '0x1c8', '0x1d0', '0x1d8', '0x1e0', '0x1e8', '0x1f0', '0x1f8', '0x200', '0x208', '0x210', '0x218', '0x220', '0x228', '0x230', '0x238', '0x240', '0x248', '0x250', '0x258', '0x260', '0x268', '0x270', '0x278', '0x280', '0x288', '0x290', '0x298', '0x2a0', '0x2a8', '0x2b0', '0x2b8', '0x2c0', '0x2c8', '0x2d0', '0x2d8', '0x2e0', '0x2e8', '0x2f0', '0x2f8', '0x300', '0x308', '0x310', '0x318', '0x320', '0x328', '0x330', '0x338', '0x340', '0x348', '0x350', '0x358', '0x360', '0x368', '0x370', '0x378', '0x380', '0x388', '0x390', '0x398', '0x3a0', '0x3a8', '0x3b0', '0x3b8', '0x3c0', '0x3c8', '0x3d0', '0x3d8', '0x3e0', '0x3e8', '0x3f0', '0x3f8', '0x400', '0x408', '0x410', '0x418', '0x420', '0x428', '0x430', '0x438', '0x440', '0x448', '0x450', '0x458', '0x460', '0x468', '0x470', '0x478', '0x480', '0x488', '0x490', '0x498', '0x4a0', '0x4a8', '0x4b0', '0x4b8', '0x4c0', '0x4c8', '0x4d0', '0x4d8', '0x4e0', '0x4e8', '0x4f0', '0x4f8', '0x500', '0x508', '0x510', '0x518', '0x520', '0x528', '0x530', '0x538', '0x540', '0x548', '0x550', '0x558', '0x560', '0x568', '0x570', '0x578', '0x580', '0x588', '0x590', '0x598', '0x5a0', '0x5a8', '0x5b0', '0x5b8', '0x5c0', '0x5c8', '0x5d0', '0x5d8', '0x5e0', '0x5e8', '0x5f0', '0x5f8', '0x600', '0x608', '0x610', '0x618', '0x620', '0x628', '0x630', '0x638', '0x640', '0x648', '0x650', '0x658', '0x660', '0x668', '0x670', '0x678', '0x680', '0x688', '0x690', '0x698', '0x6a0', '0x6a8', '0x6b0', '0x6b8', '0x6c0', '0x6c8', '0x6d0', '0x6d8', '0x6e0', '0x6e8', '0x6f0', '0x6f8', '0x700', '0x708', '0x710', '0x718', '0x720', '0x728', '0x730', '0x738', '0x740', '0x748', '0x750', '0x758', '0x760', '0x768', '0x770', '0x778', '0x780', '0x788', '0x790', '0x798', '0x7a0', '0x7a8', '0x7b0', '0x7b8', '0x7c0', '0x7c8', '0x7d0', '0x7d8', '0x7e0', '0x7e8', '0x7f0', '0x7f8', '0x800', '0x808', '0x810', '0x818', '0x820', '0x828', '0x830', '0x838', '0x840', '0x848', '0x850', '0x858', '0x860', '0x868', '0x870', '0x878', '0x880', '0x888', '0x890', '0x898', '0x8a0', '0x8a8', '0x8b0', '0x8b8', '0x8c0', '0x8d0', '0x8d8', '0x8e0', '0x8e8', '0x8f0', '0x8f8', '0x900', '0x908', '0x910', '0x918', '0x920', '0x928', '0x930', '0x938', '0x948', '0x960', '0x978', '0x990', '0x9a8', '0x9c0', '0x9d8', '0x9f0', '0xa08', '0xa20', '0xa38', '0xa50', '0xa68', '0xa80', '0xa98', '0xab0', '0xac8', '0xae0', '0xaf8', '0xb10', '0xb28', '0xb40', '0xb58', '0xb70', '0xb88', '0xba0', '0xbb0', '0xbb8', '0xbc0', '0xbc8', '0xbd0', '0xbd8', '0xbe0', '0xbe8', '0xbf0', '0xbf8', '0xc00', '0xc08', '0xc10', '0xc18', '0xc20', '0xc28', '0xc30', '0xc38', '0xc40', '0xc48', '0xc50', '0xc58', '0xc60', '0xc68', '0xc70', '0xc78', '0xc80', '0xc88', '0xc90', '0xc98', '0xca0', '0xca8', '0xcb0', '0xcb8', '0xcc0', '0xcc8', '0xcd0', '0xcd8', '0xce0', '0xce8', '0xcf0', '0xcf8', '0xd00', '0xd08', '0xd10', '0xd18', '0xd20', '0xd28', '0xd30', '0xd38', '0xd40', '0xd48', '0xd50', '0xd58', '0xd60', '0xd68', '0xd70', '0xd78', '0xd80', '0xd88', '0xd90', '0xd98', '0xda0', '0xda8', '0xdb0', '0xdb8', '0xdc0', '0xdc8', '0xdd0', '0xdd8', '0xde0', '0xde8', '0xdf0', '0xdf8', '0xe00', '0xe08', '0xe10', '0xe18', '0xe20', '0xe28', '0xe30', '0xe38', '0xe40', '0xe48', '0xe50', '0xe58', '0xe60', '0xe68', '0xe70', '0xe78', '0xe80', '0xe88', '0xe90', '0xe98', '0xea0', '0xea8', '0xeb0', '0xeb8', '0xec0', '0xec8', '0xed0', '0xed8', '0xee0', '0xee8', '0xef0', '0xef8', '0xf00', '0xf08', '0xf10', '0xf18', '0xf20', '0xf28', '0xf30', '0xf38', '0xf40', '0xf48', '0xf50', '0xf58', '0xf60', '0xf68', '0xf70', '0xf78', '0xf80', '0xf90', '0xf98', '0xfa0', '0xfa8', '0xfb0', '0xfb8', '0xfc0', '0xfc8', '0xfd0', '0xfd8', '0xfe0', '0xfe8', '0xff0', '0xff8']
+    mode=15bit    : 1 entries
+      offsets: ['0x0']
+    mode=heuristic: 458 entries
+      offsets: ['0x0', '0x8', '0x10', '0x18', '0x20', '0x28', '0x30', '0x38', '0x40', '0x48', '0x50', '0x58', '0x60', '0x68', '0x70', '0x78', '0x80', '0x88', '0x90', '0x98', '0xa0', '0xa8', '0xb0', '0xb8', '0xc0', '0xc8', '0xd0', '0xd8', '0xe0', '0xe8', '0xf0', '0xf8', '0x100', '0x108', '0x110', '0x118', '0x120', '0x128', '0x130', '0x138', '0x140', '0x148', '0x150', '0x158', '0x160', '0x168', '0x170', '0x178', '0x180', '0x188', '0x190', '0x198', '0x1a0', '0x1a8', '0x1b0', '0x1b8', '0x1c0', '0x1c8', '0x1d0', '0x1d8', '0x1e0', '0x1e8', '0x1f0', '0x1f8', '0x200', '0x208', '0x210', '0x218', '0x220', '0x228', '0x230', '0x238', '0x240', '0x248', '0x250', '0x258', '0x260', '0x268', '0x270', '0x278', '0x280', '0x288', '0x290', '0x298', '0x2a0', '0x2a8', '0x2b0', '0x2b8', '0x2c0', '0x2c8', '0x2d0', '0x2d8', '0x2e0', '0x2e8', '0x2f0', '0x2f8', '0x300', '0x308', '0x310', '0x318', '0x320', '0x328', '0x330', '0x338', '0x340', '0x348', '0x350', '0x358', '0x360', '0x368', '0x370', '0x378', '0x380', '0x388', '0x390', '0x398', '0x3a0', '0x3a8', '0x3b0', '0x3b8', '0x3c0', '0x3c8', '0x3d0', '0x3d8', '0x3e0', '0x3e8', '0x3f0', '0x3f8', '0x400', '0x408', '0x410', '0x418', '0x420', '0x428', '0x430', '0x438', '0x440', '0x448', '0x450', '0x458', '0x460', '0x468', '0x470', '0x478', '0x480', '0x488', '0x490', '0x498', '0x4a0', '0x4a8', '0x4b0', '0x4b8', '0x4c0', '0x4c8', '0x4d0', '0x4d8', '0x4e0', '0x4e8', '0x4f0', '0x4f8', '0x500', '0x508', '0x510', '0x518', '0x520', '0x528', '0x530', '0x538', '0x540', '0x548', '0x550', '0x558', '0x560', '0x568', '0x570', '0x578', '0x580', '0x588', '0x590', '0x598', '0x5a0', '0x5a8', '0x5b0', '0x5b8', '0x5c0', '0x5c8', '0x5d0', '0x5d8', '0x5e0', '0x5e8', '0x5f0', '0x5f8', '0x600', '0x608', '0x610', '0x618', '0x620', '0x628', '0x630', '0x638', '0x640', '0x648', '0x650', '0x658', '0x660', '0x668', '0x670', '0x678', '0x680', '0x688', '0x690', '0x698', '0x6a0', '0x6a8', '0x6b0', '0x6b8', '0x6c0', '0x6c8', '0x6d0', '0x6d8', '0x6e0', '0x6e8', '0x6f0', '0x6f8', '0x700', '0x708', '0x710', '0x718', '0x720', '0x728', '0x730', '0x738', '0x740', '0x748', '0x750', '0x758', '0x760', '0x768', '0x770', '0x778', '0x780', '0x788', '0x790', '0x798', '0x7a0', '0x7a8', '0x7b0', '0x7b8', '0x7c0', '0x7c8', '0x7d0', '0x7d8', '0x7e0', '0x7e8', '0x7f0', '0x7f8', '0x800', '0x808', '0x810', '0x818', '0x820', '0x828', '0x830', '0x838', '0x840', '0x848', '0x850', '0x858', '0x860', '0x868', '0x870', '0x878', '0x880', '0x888', '0x890', '0x898', '0x8a0', '0x8a8', '0x8b0', '0x8b8', '0x8c0', '0x8d0', '0x8d8', '0x8e0', '0x8e8', '0x8f0', '0x8f8', '0x900', '0x908', '0x910', '0x918', '0x920', '0x928', '0x930', '0x938', '0x948', '0x960', '0x978', '0x990', '0x9a8', '0x9c0', '0x9d8', '0x9f0', '0xa08', '0xa20', '0xa38', '0xa50', '0xa68', '0xa80', '0xa98', '0xab0', '0xac8', '0xae0', '0xaf8', '0xb10', '0xb28', '0xb40', '0xb58', '0xb70', '0xb88', '0xba0', '0xbb0', '0xbb8', '0xbc0', '0xbc8', '0xbd0', '0xbd8', '0xbe0', '0xbe8', '0xbf0', '0xbf8', '0xc00', '0xc08', '0xc10', '0xc18', '0xc20', '0xc28', '0xc30', '0xc38', '0xc40', '0xc48', '0xc50', '0xc58', '0xc60', '0xc68', '0xc70', '0xc78', '0xc80', '0xc88', '0xc90', '0xc98', '0xca0', '0xca8', '0xcb0', '0xcb8', '0xcc0', '0xcc8', '0xcd0', '0xcd8', '0xce0', '0xce8', '0xcf0', '0xcf8', '0xd00', '0xd08', '0xd10', '0xd18', '0xd20', '0xd28', '0xd30', '0xd38', '0xd40', '0xd48', '0xd50', '0xd58', '0xd60', '0xd68', '0xd70', '0xd78', '0xd80', '0xd88', '0xd90', '0xd98', '0xda0', '0xda8', '0xdb0', '0xdb8', '0xdc0', '0xdc8', '0xdd0', '0xdd8', '0xde0', '0xde8', '0xdf0', '0xdf8', '0xe00', '0xe08', '0xe10', '0xe18', '0xe20', '0xe28', '0xe30', '0xe38', '0xe40', '0xe48', '0xe50', '0xe58', '0xe60', '0xe68', '0xe70', '0xe78', '0xe80', '0xe88', '0xe90', '0xe98', '0xea0', '0xea8', '0xeb0', '0xeb8', '0xec0', '0xec8', '0xed0', '0xed8', '0xee0', '0xee8', '0xef0', '0xef8', '0xf00', '0xf08', '0xf10', '0xf18', '0xf20', '0xf28', '0xf30', '0xf38', '0xf40', '0xf48', '0xf50', '0xf58', '0xf60', '0xf68', '0xf70', '0xf78', '0xf80', '0xf90', '0xf98', '0xfa0', '0xfa8', '0xfb0', '0xfb8', '0xfc0', '0xfc8', '0xfd0', '0xfd8', '0xfe0', '0xfe8', '0xff0', '0xff8']
+
+  Nearest visited offsets (mode=15bit) to 0x858:
+    BEFORE: 0x0  (distance 2136 bytes)
+    AFTER : (none on this page in 15-bit mode)
+
+  Nearest visited offsets (mode=12bit) to 0x858:
+    BEFORE: 0x850  (distance 8 bytes)
+    AFTER : 0x860  (distance 8 bytes)
+
+  Raw 8-byte values around __DATA_CONST offset 0x858 (showing +/- 0x80):
+       seg_off                 raw  bind?  next12  next15  15bit_visited  12bit_visited  sym_name
+    0x000007d8  0x80100000000000f7      1       2       0             no             YES  _strrchr
+    0x000007e0  0x80100000000000f8      1       2       0             no             YES  _strspn
+    0x000007e8  0x80100000000000f9      1       2       0             no             YES  _strstr
+    0x000007f0  0x80100000000000fa      1       2       0             no             YES  _strtok
+    0x000007f8  0x80100000000000fb      1       2       0             no             YES  _strtok_r
+    0x00000800  0x80100000000000fc      1       2       0             no             YES  _symlink
+    0x00000808  0x80100000000000fd      1       2       0             no             YES  _tcgetattr
+    0x00000810  0x80100000000000fe      1       2       0             no             YES  _tcgetpgrp
+    0x00000818  0x80100000000000ff      1       2       0             no             YES  _tcsetattr
+    0x00000820  0x8010000000000100      1       2       0             no             YES  _time
+    0x00000828  0x8010000000000101      1       2       0             no             YES  _tzset
+    0x00000830  0x8010000000000102      1       2       0             no             YES  _uc_width
+    0x00000838  0x8010000000000103      1       2       0             no             YES  _unlink
+    0x00000840  0x8010000000000104      1       2       0             no             YES  _uselocale
+    0x00000848  0x8010000000000105      1       2       0             no             YES  _usleep
+    0x00000850  0x8010000000000106      1       2       0             no             YES  _utime
+    0x00000858  0x8010000000000107      1       2       0             no             YES  _vasprintf  <-- TARGET 0x858
+    0x00000860  0x8010000000000108      1       2       0             no             YES  _vfork
+    0x00000868  0x8010000000000109      1       2       0             no             YES  _vfprintf
+    0x00000870  0x801000000000010a      1       2       0             no             YES  _vsnprintf
+    0x00000878  0x801000000000010b      1       2       0             no             YES  _wcscat
+    0x00000880  0x801000000000010c      1       2       0             no             YES  _wcslen
+    0x00000888  0x801000000000010d      1       2       0             no             YES  _wctype
+    0x00000890  0x801000000000010e      1       2       0             no             YES  _wcwidth
+    0x00000898  0x801000000000010f      1       2       0             no             YES  _wmemchr
+    0x000008a0  0x8010000000000110      1       2       0             no             YES  _wmemcpy
+    0x000008a8  0x8010000000000111      1       2       0             no             YES  _write
+    0x000008b0  0x001000000005e4e0      0       2       0             no             YES  rebase@0x5e4e0
+    0x000008b8  0x001000000005a00c      0       2       0             no             YES  rebase@0x5a00c
+    0x000008c0  0x002000000005a010      0       4       0             no             YES  rebase@0x5a010
+    0x000008c8  0x0000000000000000      0       0       0             no              no  rebase@0x0
+    0x000008d0  0x001000000004e171      0       2       0             no             YES  rebase@0x4e171
+
+======================================================================
+=== Gap analysis: unvisited fixup-like entries in __DATA_CONST ===
+======================================================================
+  Total fixup-like slots in __DATA_CONST: 340 (approx)
+  Unvisited by 15-bit mode : 338
+  Unvisited by 12-bit mode : 65
+  Visited by 15-bit mode    : 2
+  Visited by 12-bit mode    : 877
+  Visited by heuristic mode : 877
+
+  Gap examples (showing up to 60):
+       abs_off  page   in_page                 raw  bind?  in_15b  in_12b  in_heur  sym
+    0x00000008     0  0x000008  0x8010000000000001      1       n       Y        Y  __NSGetEnviron
+    0x00000010     0  0x000010  0x8010000000000002      1       n       Y        Y  ____chkstk_darwin
+    0x00000018     0  0x000018  0x8010000000000003      1       n       Y        Y  ____mb_cur_max
+    0x00000020     0  0x000020  0x8010000000000004      1       n       Y        Y  ____mb_cur_max_l
+    0x00000028     0  0x000028  0x8010000000000005      1       n       Y        Y  ___bzero
+    0x00000030     0  0x000030  0x8010000000000006      1       n       Y        Y  ___darwin_check_fd_set_overflow
+    0x00000038     0  0x000038  0x8010000000000007      1       n       Y        Y  ___error
+    0x00000040     0  0x000040  0x8010000000000008      1       n       Y        Y  ___maskrune
+    0x00000048     0  0x000048  0x8010000000000009      1       n       Y        Y  ___mb_cur_max
+    0x00000050     0  0x000050  0x801000000000000a      1       n       Y        Y  ___memcpy_chk
+    0x00000058     0  0x000058  0x801000000000000b      1       n       Y        Y  ___sprintf_chk
+    0x00000060     0  0x000060  0x801000000000000c      1       n       Y        Y  ___stack_chk_fail
+    0x00000068     0  0x000068  0x801000000000000d      1       n       Y        Y  ___stack_chk_guard
+    0x00000070     0  0x000070  0x801000000000000e      1       n       Y        Y  ___stderrp
+    0x00000078     0  0x000078  0x801000000000000f      1       n       Y        Y  ___stdinp
+    0x00000080     0  0x000080  0x8010000000000010      1       n       Y        Y  ___stdoutp
+    0x00000088     0  0x000088  0x8010000000000011      1       n       Y        Y  ___strncat_chk
+    0x00000090     0  0x000090  0x8010000000000012      1       n       Y        Y  ___tolower
+    0x00000098     0  0x000098  0x8010000000000013      1       n       Y        Y  ___toupper
+    0x000000a0     0  0x0000a0  0x8010000000000014      1       n       Y        Y  __exit
+    0x000000a8     0  0x0000a8  0x8010000000000015      1       n       Y        Y  _abort
+    0x000000b0     0  0x0000b0  0x8010000000000016      1       n       Y        Y  _accept
+    0x000000b8     0  0x0000b8  0x8010000000000017      1       n       Y        Y  _atoi
+    0x000000c0     0  0x0000c0  0x8010000000000018      1       n       Y        Y  _bind
+    0x000000c8     0  0x0000c8  0x8010000000000019      1       n       Y        Y  _btowc
+    0x000000d0     0  0x0000d0  0x801000000000001a      1       n       Y        Y  _calloc
+    0x000000d8     0  0x0000d8  0x801000000000001b      1       n       Y        Y  _chdir
+    0x000000e0     0  0x0000e0  0x801000000000001c      1       n       Y        Y  _chmod
+    0x000000e8     0  0x0000e8  0x801000000000001d      1       n       Y        Y  _clearerr
+    0x000000f0     0  0x0000f0  0x801000000000001e      1       n       Y        Y  _close
+    0x000000f8     0  0x0000f8  0x801000000000001f      1       n       Y        Y  _closedir
+    0x00000108     0  0x000108  0x8010000000000020      1       n       Y        Y  _confstr
+    0x00000110     0  0x000110  0x8010000000000021      1       n       Y        Y  _connect
+    0x00000118     0  0x000118  0x8010000000000022      1       n       Y        Y  _daylight
+    0x00000120     0  0x000120  0x8010000000000023      1       n       Y        Y  _dup
+    0x00000128     0  0x000128  0x8010000000000024      1       n       Y        Y  _dup2
+    0x00000130     0  0x000130  0x8010000000000025      1       n       Y        Y  _execve
+    0x00000138     0  0x000138  0x8010000000000026      1       n       Y        Y  _exit
+    0x00000140     0  0x000140  0x8010000000000027      1       n       Y        Y  _fchdir
+    0x00000148     0  0x000148  0x8010000000000028      1       n       Y        Y  _fclose
+    0x00000150     0  0x000150  0x8010000000000029      1       n       Y        Y  _fcntl
+    0x00000158     0  0x000158  0x801000000000002a      1       n       Y        Y  _fdopen$DARWIN_EXTSN
+    0x00000160     0  0x000160  0x801000000000002b      1       n       Y        Y  _feof
+    0x00000168     0  0x000168  0x801000000000002c      1       n       Y        Y  _ferror
+    0x00000170     0  0x000170  0x801000000000002d      1       n       Y        Y  _fflush
+    0x00000178     0  0x000178  0x801000000000002e      1       n       Y        Y  _fgetc
+    0x00000180     0  0x000180  0x801000000000002f      1       n       Y        Y  _fileno
+    0x00000188     0  0x000188  0x8010000000000030      1       n       Y        Y  _flock
+    0x00000190     0  0x000190  0x8010000000000031      1       n       Y        Y  _flockfile
+    0x00000198     0  0x000198  0x8010000000000032      1       n       Y        Y  _fopen$DARWIN_EXTSN
+    0x000001a0     0  0x0001a0  0x8010000000000033      1       n       Y        Y  _fork
+    0x000001a8     0  0x0001a8  0x8010000000000034      1       n       Y        Y  _fprintf
+    0x000001b0     0  0x0001b0  0x8010000000000035      1       n       Y        Y  _fpurge
+    0x000001b8     0  0x0001b8  0x8010000000000036      1       n       Y        Y  _fputc
+    0x000001c0     0  0x0001c0  0x8010000000000037      1       n       Y        Y  _fputs
+    0x000001c8     0  0x0001c8  0x8010000000000038      1       n       Y        Y  _fread
+    0x000001d0     0  0x0001d0  0x8010000000000039      1       n       Y        Y  _free
+    0x000001d8     0  0x0001d8  0x801000000000003a      1       n       Y        Y  _freeaddrinfo
+    0x000001e0     0  0x0001e0  0x801000000000003b      1       n       Y        Y  _freopen
+    0x000001e8     0  0x0001e8  0x801000000000003c      1       n       Y        Y  _fseeko
+
+======================================================================
+=== KEY QUESTION: which tracing mode visits offset 0x858? ===
+======================================================================
+  mode=12bit    : VISITED
+  mode=15bit    : NOT visited
+  mode=heuristic: VISITED
+
+  Entry at 0x858 in mode=12bit:
+    raw        = 0x8010000000000107
+    is_bind    = True
+    next_12    = 2  (next slot would be 0x860)
+    next_15    = 0  (next slot would be 0x858)
+    next_used  = 2
+    sym_name   = '_vasprintf'
+
+  Entry at 0x858 in mode=heuristic:
+    raw        = 0x8010000000000107
+    is_bind    = True
+    next_12    = 2  (next slot would be 0x860)
+    next_15    = 0  (next slot would be 0x858)
+    next_used  = 2
+    sym_name   = '_vasprintf'
+
+======================================================================
+=== Multi-chain-per-page detection ===
+  (looking for fixup-like slots AFTER a next=0 termination on the same page)
+======================================================================
+
+  mode=12bit:
+
+  mode=15bit:
+    page 0: chain ended at 0x0 (next=0). 324 unvisited fixup-like slots AFTER it:
+      off 0x8: raw=0x8010000000000001 bind=1 next12=2 next15=0 sym='__NSGetEnviron'
+      off 0x10: raw=0x8010000000000002 bind=1 next12=2 next15=0 sym='____chkstk_darwin'
+      off 0x18: raw=0x8010000000000003 bind=1 next12=2 next15=0 sym='____mb_cur_max'
+      off 0x20: raw=0x8010000000000004 bind=1 next12=2 next15=0 sym='____mb_cur_max_l'
+      off 0x28: raw=0x8010000000000005 bind=1 next12=2 next15=0 sym='___bzero'
+      off 0x30: raw=0x8010000000000006 bind=1 next12=2 next15=0 sym='___darwin_check_fd_set_overflow'
+      off 0x38: raw=0x8010000000000007 bind=1 next12=2 next15=0 sym='___error'
+      off 0x40: raw=0x8010000000000008 bind=1 next12=2 next15=0 sym='___maskrune'
+    page 1: chain ended at 0x0 (next=0). 14 unvisited fixup-like slots AFTER it:
+      off 0xbf8: raw=0x0000000000000001 bind=0 next12=0 next15=0 sym='rebase@0x1'
+      off 0xc08: raw=0x0000000000000001 bind=0 next12=0 next15=0 sym='rebase@0x1'
+      off 0xc28: raw=0x0000000000000001 bind=0 next12=0 next15=0 sym='rebase@0x1'
+      off 0xc38: raw=0x0000000000000002 bind=0 next12=0 next15=0 sym='rebase@0x2'
+      off 0xc58: raw=0x0000000000000001 bind=0 next12=0 next15=0 sym='rebase@0x1'
+      off 0xc68: raw=0x0000000000000002 bind=0 next12=0 next15=0 sym='rebase@0x2'
+      off 0xc78: raw=0x0000000000000001 bind=0 next12=0 next15=0 sym='rebase@0x1'
+      off 0xca8: raw=0x0000000000000001 bind=0 next12=0 next15=0 sym='rebase@0x1'
+
+  mode=heuristic:
+
+======================================================================
+=== FINAL VERDICT ===
+======================================================================
+  Offset 0x858 in __DATA_CONST page 0:
+    visited by 12-bit mode     : True
+    visited by 15-bit mode     : False
+    visited by heuristic mode  : True
+
+  page_start bit-15 set on any __DATA_CONST page?
+    False
+
+  Did any chain terminate early via next=0 leaving fixup-like
+  slots unvisited afterwards on the same page?
+  (checked in ALL three modes; "missed" means fixup-like slots exist
+   after the chain terminated via next=0)
+    mode=12bit    : no — chain covers all fixup-like slots
+    mode=15bit    : YES — unvisited fixup-like slots after next=0
+    mode=heuristic: no — chain covers all fixup-like slots
+
+======================================================================
+=== SPECIAL-ORDINAL THRESHOLD DIAGNOSTIC (root cause of crash) ===
+======================================================================
+  imports_count = 274
+  OLD macify threshold: ordinal >= 0xFD  (253)  -> treats ordinals 253..273 as "special"
+  CORRECT threshold   : ordinal >= 0xFFF0 (65520)  (16-bit chained-fixup specials are 0xFFF0-0xFFFF)
+
+  Ordinals INCORRECTLY skipped by old code: 21
+  (these are valid bind ordinals but were left as raw 0x8010... values)
+
+   ord     hex   lib  symbol
+   253  0x00fd    13  '_tcgetattr'
+   254  0x00fe    13  '_tcgetpgrp'
+   255  0x00ff    13  '_tcsetattr'
+   256  0x0100    13  '_time'
+   257  0x0101    13  '_tzset'
+   258  0x0102     5  '_uc_width'
+   259  0x0103    13  '_unlink'
+   260  0x0104    13  '_uselocale'
+   261  0x0105    13  '_usleep'
+   262  0x0106    13  '_utime'
+   263  0x0107    13  '_vasprintf'
+   264  0x0108    13  '_vfork'
+   265  0x0109    13  '_vfprintf'
+   266  0x010a    13  '_vsnprintf'
+   267  0x010b    13  '_wcscat'
+   268  0x010c    13  '_wcslen'
+   269  0x010d    13  '_wctype'
+   270  0x010e    13  '_wcwidth'
+   271  0x010f    13  '_wmemchr'
+   272  0x0110    13  '_wmemcpy'
+   273  0x0111    13  '_write'
+
+  >>> The crashing __got slot at offset 0x858 holds ordinal 263 (0x107) = _vasprintf.
+      With the old 0xFD threshold, this ordinal is INCORRECTLY treated as special,
+      so the slot is left as the raw value 0x8010000000000107 — a non-canonical
+      x86_64 address. The stub at __TEXT offset 0x42b1e does
+      `jmp qword ptr [rip+0x15d34]` which reads this slot and jumps to that
+      non-canonical address -> SIGSEGV (reported as faulting addr=(nil)).
+
+  FIX: change `ordinal >= 0xFD` to `ordinal >= 0xFFF0` in fixups.c.
+       After applying this fix, wget --help and wget --version both work.

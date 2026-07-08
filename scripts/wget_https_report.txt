@@ -1,0 +1,228 @@
+================================================================================
+wget HTTPS GnuTLS hang — root-cause analysis & fix
+================================================================================
+Project : mac-ify (/home/z/my-project/mac-ify)
+Binary  : tests/real/wget_macos  (wget 1.25.0, macOS x86_64, GnuTLS backend)
+Date    : 2026-07-03
+
+--------------------------------------------------------------------------------
+1. Symptom
+--------------------------------------------------------------------------------
+wget over HTTP works.  wget over HTTPS hangs forever (until the 15 s `timeout`
+kills it):
+
+    $ cd /home/z/my-project/mac-ify/build
+    $ LD_LIBRARY_PATH=$PWD timeout 15 ./macify ../tests/real/wget_macos \
+          -O /dev/null https://1.1.1.1/
+
+    --2026-07-03 13:02:24--  https://1.1.1.1/
+    Connecting to 1.1.1.1:443... connected.
+    select: ENTER nfds=5 macos_tv=900.0 linux_tv=900.0
+    <hangs here for the full 15 s timeout>
+
+The TCP connect succeeds, "connected." is printed, and the next event in the
+log is a `select()` call that never returns.  No `send:`/`recv:` debug lines
+are ever produced, so the TLS handshake never starts — GnuTLS is never given
+a chance to send ClientHello.
+
+The same hang happens with `--no-check-certificate`, so cert verification is
+NOT the issue.
+
+--------------------------------------------------------------------------------
+2. Reproduction / debug
+--------------------------------------------------------------------------------
+    MACIFY_NET_DEBUG=1 ./macify wget_macos -O /dev/null https://1.1.1.1/
+
+Key observations from the debug log:
+  * socket() returns fd 4
+  * connect() returns 0 (success — "connected." printed by wget)
+  * select() is then called with:
+        nfds=5, readfds=<stack ptr>, writefds=NULL, exceptfds=NULL,
+        timeout=900 s (wget's connect_timeout)
+
+After adding a hex-dump of the read fd_set inside `macify_select()` I found:
+
+    select: nfds=5 rd=0x7febc57fe990 wr=(nil) ex=(nil) to=0x7febc57fea10
+      rd full 128 bytes:
+        00000000000000000000000000000000   (4 lines of zeros)
+        ...
+      rd_fds=
+
+i.e. wget passes select() a *completely empty* read fd_set.  select() with
+no fds to watch just sleeps for the 900 s timeout — that is the "hang".
+
+--------------------------------------------------------------------------------
+3. Crash/hang location
+--------------------------------------------------------------------------------
+The hang is in glibc's `__select`, called from `macify_select` in
+shim/shim_io.c (line ~656).  The bug is NOT in select itself; the fd_set is
+already empty when select is entered, so select correctly has nothing to do
+but wait.
+
+--------------------------------------------------------------------------------
+4. Root cause: `__darwin_check_fd_set_overflow` returns void
+--------------------------------------------------------------------------------
+Disassembling wget's `_select_fd` (at vmaddr 0x100004c6d in the Mach-O)
+shows the modern macOS FD_SET macro:
+
+      mov   r12d, 1
+      mov   edi, ebx                 ; edi = fd
+      mov   rsi, r14                 ; rsi = &fdset
+      mov   edx, 1                   ; silent=1
+      call  0x100042542              ; ___darwin_check_fd_set_overflow
+      test  eax, eax                 ; if (ret == 0)
+      je    skip                     ;   SKIP the bit-set
+      mov   ecx, ebx
+      shl   r12d, cl                 ; r12d = 1 << (fd % 32)
+      mov   eax, ebx
+      shr   eax, 5                   ; eax = fd / 32
+      or    dword ptr [rbp+rax*4-0xc0], r12d   ; fdset[fd/32] |= bit
+
+Resolving the stub at 0x100042542 via the indirect symbol table gives:
+
+    stub index 5  ->  indirect sym 951  ->  "___darwin_check_fd_set_overflow"
+
+Modern macOS SDKs compile the FD_SET macro as:
+
+    #define __DARWIN_FD_SET(n, p) \
+        __darwin_check_fd_set_overflow((n), (p), 1) ? __darwin_fd_set((n), (p)) : 0
+
+i.e. the bit is only set if `__darwin_check_fd_set_overflow` returns non-zero.
+
+The shim DID export `__darwin_check_fd_set_overflow` (shim/shim_misc.c:1161)
+but defined it with the wrong prototype and wrong behaviour:
+
+    void __darwin_check_fd_set_overflow(int fd, const void *fdset, int silent) {
+        (void)fd; (void)fdset; (void)silent;
+    }
+
+The compiled body was literally a single `ret` instruction with no return
+value, so eax contained whatever garbage the caller left there — in wget's
+case 0.  The `test eax, eax; je skip` check then always skipped the bit-set,
+the fd_set stayed empty, and select() had nothing to wait on.
+
+This is why HTTP worked (wget's HTTP path goes through `write()` and a
+`recv(..., MSG_PEEK)` loop that does not depend on FD_SET) but HTTPS hung
+(wget's TLS path goes through `select_fd()` which uses FD_SET).
+
+--------------------------------------------------------------------------------
+5. The fix (shim/shim_misc.c)
+--------------------------------------------------------------------------------
+--- a/shim/shim_misc.c
++++ b/shim/shim_misc.c
+@@ -1158,9 +1158,24 @@
+  * After stripping one: __darwin_check_fd_set_overflow (2 underscores).
+  * We need to export this name.
+  *
++ * Modern macOS SDKs compile FD_SET as:
++ *   #define __DARWIN_FD_SET(n, p) \
++ *       __darwin_check_fd_set_overflow((n), (p), 1) ? __darwin_fd_set((n), (p)) : 0
++ * So this function MUST return non-zero (true) when the fd is safe to set
++ * (i.e. fd < FD_SETSIZE). Returning 0 (or void, which leaves eax as
++ * garbage — usually 0) causes FD_SET to silently skip setting the bit,
++ * leaving the fd_set empty. select() then has nothing to wait on and
++ * blocks until its timeout — exactly the "HTTPS hangs forever" symptom
++ * seen in wget (which uses select() to wait for the TLS socket).
++ *
+  * The macOS implementation also emits an abort/warning when fd >=
+  * FD_SETSIZE and silent==0; we just silently return 0 in that case. */
+-int __darwin_check_fd_set_overflow(int fd, const void *fdset, int silent) {
+-    (void)fdset; (void)silent;
+-    return (fd >= 0 && fd < 1024) ? 1 : 0;
++int __darwin_check_fd_set_overflow(int fd, const void *fdset, int silent) {
++    (void)fdset;
++    (void)silent;
++    /* FD_SETSIZE = 1024 on both macOS and Linux. Return 1 (safe) for any
++     * fd in [0, 1024), 0 (overflow) otherwise. */
++    return (fd >= 0 && fd < 1024) ? 1 : 0;
+ }
+
+The function now:
+  * Has the correct `int` return type
+  * Returns 1 ("safe to FD_SET") for any fd in [0, FD_SETSIZE)
+  * Returns 0 ("would overflow") for fd >= 1024
+
+Compiled body is now:
+
+    000000000000db90 <__darwin_check_fd_set_overflow>:
+        db90:  31 c0            xor    %eax,%eax
+        db92:  81 ff ff 03 00   cmp    $0x3ff,%edi
+        db98:  0f 96 c0         setbe  %al
+        db9b:  c3               ret
+
+--------------------------------------------------------------------------------
+6. GnuTLS missing-function check
+--------------------------------------------------------------------------------
+    python3 /home/z/my-project/scripts/list_all_undef.py \
+        /home/z/my-project/mac-ify/tests/real/wget_macos | \
+        grep -iE "gnutls|tls|cert|x509|cipher|hash|rand"
+
+Lists the standard set of GnuTLS entry points wget imports:
+
+    _gnutls_alert_get, _gnutls_certificate_allocate_credentials,
+    _gnutls_certificate_set_x509_system_trust, _gnutls_handshake,
+    _gnutls_init, _gnutls_record_recv, _gnutls_record_send,
+    _gnutls_transport_set_ptr, _gnutls_x509_crt_check_hostname, ...
+
+All of these are resolved by the macify loader to Linux's libgnutls.so.30
+(mapped from LC_LOAD_DYLIB "/opt/local/lib/libgnutls.30.dylib").  No GnuTLS
+function was actually missing — the hang was purely on the select/FD_SET
+side, before GnuTLS ever got to run.
+
+--------------------------------------------------------------------------------
+7. Verification
+--------------------------------------------------------------------------------
+After rebuilding (`cd /home/z/my-project/mac-ify && make`):
+
+HTTPS works end-to-end:
+
+    $ LD_LIBRARY_PATH=$PWD timeout 30 ./macify ../tests/real/wget_macos \
+          -O /dev/null https://1.1.1.1/
+
+    --2026-07-03 13:21:19--  https://1.1.1.1/
+    Connecting to 1.1.1.1:443... connected.
+    HTTP request sent, awaiting response... 301 Moved Permanently
+    Location: https://one.one.one.one/ [following]
+    --2026-07-03 13:21:20--  https://one.one.one.one/
+    Resolving one.one.one.one (one.one.one.one)... 1.1.1.1, 1.0.0.1
+    Connecting to one.one.one.one (one.one.one.one)|1.1.1.1|:443... connected.
+    HTTP request sent, awaiting response... 200 OK
+    Length: 56614 (55K) [text/html]
+    Saving to: '/dev/null'
+
+         0K .......... .......... .......... .......... .......... 90% 5.08M 0s
+        50K .....                                                 100% 8.41M=0.01s
+
+    2026-07-03 13:21:20 (5.28 MB/s) - '/dev/null' saved [56614/56614]
+
+Also verified:
+  * https://1.1.1.1/ with --no-check-certificate           -> 200 OK
+  * https://example.com/                                    -> exit 0
+  * https://www.google.com/  (saves 35 KB of HTML)         -> exit 0
+  * http://example.com/  (regression check)                -> exit 0
+  * curl_macos https://1.1.1.1/  (regression check)        -> exit 0
+  * Full mac-ify test suite (tests/run_tests.py)           -> 16 passed, 0 failed
+
+--------------------------------------------------------------------------------
+8. Notes / next actions
+--------------------------------------------------------------------------------
+* The bug was latent for any macOS binary built against a recent macOS SDK
+  that uses the new FD_SET macro (which gates the bit-set on
+  `__darwin_check_fd_set_overflow`).  wget is the first test binary to
+  actually exercise it because its TLS path goes through select_fd().
+  Other networked binaries (curl, ripgrep's HTTP fetcher, etc.) might
+  have been silently affected depending on their I/O path.
+
+* The temporary fd_set hex-dump that was added to `macify_select()` for
+  diagnosis has been removed; the function is back to its original
+  debug output (`select: ENTER ...` / `select: ret=...`).
+
+* No changes were needed in the GnuTLS path itself — the TLS handshake,
+  cert verification, and errno-translation gating
+  (macify_caller_is_macos_text) all work correctly once select() can
+  actually see the socket fd.
+
+* Future hardening: consider auditing the shim for other "stub" functions
+  that were declared `void` but are expected by macOS SDK macros to
+  return a value (e.g. the `__darwin_*` family in sys/_types/*).  A
+  quick grep for `void.*__darwin` in shim/*.c would catch them.

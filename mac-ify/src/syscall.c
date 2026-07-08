@@ -1,0 +1,945 @@
+#include "macify.h"
+
+/* Syscall translation table — flat array indexed by BSD syscall #.
+ * macOS x86_64 syscall numbers: 0x2000000 | BSD_NR, where BSD_NR is 0..~500
+ * for the syscalls we care about. Each entry is the Linux syscall number,
+ * or -1 if unimplemented. Argument translation flags live in a parallel
+ * array.
+ */
+
+#define BSD_SYSCALL_MAX 600
+
+static const int16_t bsd_to_linux[BSD_SYSCALL_MAX] = {
+    /* [0] is unused */
+    [1]   = 231,            /* exit           -> exit_group (kills all threads) */
+    [2]   = SYS_fork,       /* fork           */
+    [3]   = SYS_read,       /* read           */
+    [4]   = SYS_write,      /* write          */
+    [5]   = SYS_open,       /* open           (ARG_OPEN_FLAGS) */
+    [6]   = SYS_close,      /* close          */
+    [7]   = SYS_wait4,      /* wait4          */
+    [9]   = SYS_link,       /* link           */
+    [10]  = SYS_unlink,     /* unlink         */
+    [12]  = SYS_chdir,      /* chdir          */
+    [13]  = SYS_fchdir,     /* fchdir         */
+    [14]  = SYS_mknod,      /* mknod          */
+    [15]  = SYS_chmod,      /* chmod          */
+    [16]  = SYS_chown,      /* chown          */
+    [20]  = SYS_getpid,     /* getpid         */
+    [23]  = SYS_setuid,     /* setuid         */
+    [24]  = SYS_getuid,     /* getuid         */
+    [25]  = SYS_geteuid,    /* geteuid        */
+    [27]  = SYS_recvmsg,    /* recvmsg        */
+    [28]  = SYS_sendmsg,    /* sendmsg        */
+    [29]  = SYS_recvfrom,   /* recvfrom       */
+    [30]  = SYS_accept,     /* accept         */
+    [31]  = SYS_getpeername,/* getpeername    */
+    [32]  = SYS_getsockname,/* getsockname    */
+    [33]  = SYS_access,     /* access         */
+    [36]  = SYS_sync,       /* sync           */
+    [37]  = SYS_kill,       /* kill           */
+    [39]  = SYS_getppid,    /* getppid        */
+    [41]  = SYS_pipe,       /* pipe (old macOS) */
+    [42]  = SYS_pipe,       /* pipe (modern macOS) */
+    [43]  = SYS_getegid,    /* getegid        */
+    [46]  = SYS_rt_sigaction, /* sigaction (old macOS) */
+    [47]  = SYS_getgid,     /* getgid         */
+    [48]  = SYS_rt_sigprocmask, /* sigprocmask */
+    [53]  = SYS_sigaltstack,/* sigaltstack    */
+    [54]  = SYS_ioctl,      /* ioctl          (pass-through) */
+    [57]  = SYS_symlink,    /* symlink        */
+    [58]  = SYS_readlink,   /* readlink       */
+    [59]  = SYS_execve,     /* execve         */
+    [60]  = SYS_umask,      /* umask          */
+    [61]  = SYS_chroot,     /* chroot         */
+    [65]  = SYS_msync,      /* msync          (flags identical) */
+    [73]  = SYS_munmap,     /* munmap         */
+    [74]  = SYS_mprotect,   /* mprotect       (prot identical) */
+    [75]  = SYS_madvise,    /* madvise        */
+    [78]  = SYS_mincore,    /* mincore        */
+    [79]  = SYS_getgroups,  /* getgroups      */
+    [80]  = SYS_setgroups,  /* setgroups      */
+    [81]  = SYS_getpgrp,    /* getpgrp        */
+    [82]  = SYS_setpriority,/* setpriority    */
+    [83]  = SYS_getpriority,/* getpriority    */
+    [89]  = SYS_getitimer,  /* getitimer      */
+    [90]  = SYS_setitimer,  /* setitimer      */
+    [92]  = SYS_fcntl,      /* fcntl          */
+    [93]  = SYS_select,     /* select         */
+    [95]  = SYS_fsync,      /* fsync          */
+    [97]  = SYS_socket,     /* socket         (type identical) */
+    [98]  = SYS_connect,    /* connect        */
+    [116] = SYS_gettimeofday, /* gettimeofday */
+    [117] = SYS_getrusage,  /* getrusage      (struct layout same) */
+    [118] = SYS_getsockopt, /* getsockopt     */
+    [120] = SYS_readv,      /* readv          */
+    [121] = SYS_writev,     /* writev         */
+    [126] = SYS_settimeofday, /* settimeofday */
+    [128] = SYS_rename,     /* rename         */
+    [131] = SYS_flock,      /* flock          (op identical) */
+    [133] = SYS_sendto,     /* sendto         */
+    [134] = SYS_shutdown,   /* shutdown       (how identical) */
+    [135] = SYS_socketpair, /* socketpair     */
+    [136] = SYS_mkdir,      /* mkdir          */
+    [137] = SYS_rmdir,      /* rmdir          */
+    [138] = SYS_utimes,     /* utimes         */
+    [197] = SYS_mmap,       /* mmap           (flags translated) */
+    [199] = SYS_lseek,      /* lseek          */
+    [200] = SYS_truncate,   /* truncate       */
+    [201] = SYS_ftruncate,  /* ftruncate      */
+    [202] = SYS_nanosleep,  /* nanosleep      */
+    [220] = SYS_getxattr,   /* getxattr       */
+    [221] = SYS_fgetxattr,  /* fgetxattr      */
+    [222] = SYS_setxattr,   /* setxattr       */
+    [223] = SYS_fsetxattr,  /* fsetxattr      */
+    [224] = SYS_removexattr,/* removexattr    */
+    [225] = SYS_fremovexattr,/* fremovexattr  */
+    [226] = SYS_listxattr,  /* listxattr      */
+    [227] = SYS_llistxattr, /* llistxattr     */
+    [228] = SYS_flistxattr, /* flistxattr     */
+    [286] = SYS_pwrite64,   /* pwrite (old macOS) */
+    [287] = SYS_pread64,    /* pread  (old macOS) */
+    [331] = SYS_fchown,     /* fchown         */
+    [333] = SYS_fchmod,     /* fchmod         */
+    [396] = SYS_read,       /* read_nocancel          */
+    [397] = SYS_write,      /* write_nocancel         */
+    [398] = SYS_open,       /* open_nocancel (ARG_OPEN_FLAGS) */
+    [399] = SYS_close,      /* close_nocancel         */
+    [400] = SYS_wait4,      /* wait4_nocancel         */
+    [401] = SYS_recvmsg,    /* recvmsg_nocancel       */
+    [402] = SYS_sendmsg,    /* sendmsg_nocancel       */
+    [403] = SYS_recvfrom,   /* recvfrom_nocancel      */
+    [404] = SYS_accept,     /* accept_nocancel        */
+    [405] = SYS_fcntl,      /* fcntl_nocancel         */
+    [406] = SYS_select,     /* select_nocancel        */
+    [460] = SYS_pread64,    /* pread  (modern macOS)  */
+    [461] = SYS_pwrite64,   /* pwrite (modern macOS)  */
+    [462] = SYS_rt_sigaction, /* sigaction_nocancel (modern macOS) */
+    [463] = SYS_rt_sigprocmask, /* sigprocmask_nocancel (modern macOS) */
+    [465] = SYS_pread64,    /* pread_nocancel         */
+    [466] = SYS_pwrite64,   /* pwrite_nocancel        */
+    /* Go binaries use modern macOS syscall numbers (400+) */
+    [477] = SYS_mmap,       /* mmap (modern macOS)    (ARG_MMAP_FLAGS) */
+    [478] = SYS_lseek,      /* lseek (modern macOS)   */
+    [480] = SYS_ftruncate,  /* ftruncate (modern macOS) */
+    [481] = SYS_truncate,   /* truncate (modern macOS) */
+    [482] = SYS_stat,       /* stat (modern macOS)    */
+    [483] = SYS_fstat,      /* fstat (modern macOS)   */
+    [484] = SYS_lstat,      /* lstat (modern macOS)   */
+    [485] = SYS_unlink,     /* unlink (modern macOS)  */
+    [486] = SYS_access,     /* access (modern macOS)  */
+    [488] = SYS_read,       /* read_nocancel (modern) */
+    [489] = SYS_write,      /* write_nocancel (modern) */
+    [490] = SYS_open,       /* open_nocancel (modern) (ARG_OPEN_FLAGS) */
+    [491] = SYS_close,      /* close_nocancel (modern) */
+    [492] = SYS_getpid,     /* getpid (modern macOS)  */
+    [493] = SYS_getuid,     /* getuid (modern macOS)  */
+    [494] = SYS_geteuid,    /* geteuid (modern macOS) */
+    [495] = SYS_getgid,     /* getgid (modern macOS)  */
+    [496] = SYS_getegid,    /* getegid (modern macOS) */
+    [497] = SYS_setuid,     /* setuid (modern macOS)  */
+    [498] = SYS_setgid,     /* setgid (modern macOS)  */
+    [500] = SYS_read,       /* read_nocancel (modern macOS) */
+    [501] = SYS_write,      /* write_nocancel (modern macOS) */
+    /* All other entries are 0 (unimplemented). We treat 0 as "unimplemented"
+     * because Linux syscall 0 is SYS_read, which we never want to dispatch
+     * to from a macOS syscall. Use -1 in the table to be explicit. */
+};
+
+/* Argument translation flags. */
+#define ARG_OPEN_FLAGS    0x01   /* translate macOS open() flag bits */
+#define ARG_MMAP_FLAGS    0x02   /* translate mmap() flag bits (MAP_ANON etc) */
+#define ARG_FCNTL_CMD     0x04   /* translate fcntl() cmd values */
+#define ARG_KILL_SIGNAL   0x08   /* translate kill() signal number */
+#define ARG_MADVISE       0x10   /* translate madvise() advice value */
+#define ARG_SIGACTION     0x20   /* translate sigaction struct (macOS → Linux) */
+#define ARG_FORCE_SLOW    0x80   /* always go through SIGILL (e.g., exit) */
+
+/* Constants confirmed identical between macOS and Linux (no translation):
+ *   PROT_*  (mprotect, mmap prot arg)
+ *   SOCK_*  (socket type, except macOS lacks SOCK_CLOEXEC)
+ *   LOCK_*  (flock op)
+ *   SHUT_*  (shutdown how)
+ *   MS_*    (msync flags)
+ *   RUSAGE_* (getrusage who; struct rusage layout also same)
+ *   SIG_BLOCK/UNBLOCK/SETMASK (sigprocmask how; sigset_t layout differs — deep issue)
+ * ioctl cmd values are too complex to translate; passed through as-is.
+ */
+
+static const uint8_t bsd_arg_flags[BSD_SYSCALL_MAX] = {
+    [1]   = ARG_FORCE_SLOW,                   /* exit — print stats */
+    [5]   = ARG_OPEN_FLAGS,                   /* open */
+    [37]  = ARG_KILL_SIGNAL,                  /* kill */
+    [46]  = ARG_SIGACTION | ARG_FORCE_SLOW,   /* sigaction — struct translation */
+    [75]  = ARG_MADVISE,                      /* madvise */
+    [92]  = ARG_FCNTL_CMD,                    /* fcntl */
+    [197] = ARG_MMAP_FLAGS,                   /* mmap */
+    [398] = ARG_OPEN_FLAGS,                   /* open_nocancel */
+    [405] = ARG_FCNTL_CMD,                    /* fcntl_nocancel */
+    [462] = ARG_SIGACTION | ARG_FORCE_SLOW,   /* sigaction_nocancel — struct translation */
+    [477] = ARG_MMAP_FLAGS,                   /* mmap (modern macOS) */
+    [490] = ARG_OPEN_FLAGS,                   /* open_nocancel (modern macOS) */
+    /* wait4 (7) options WCONTINUED bit differs but is rarely used. */
+};
+
+/* BSD syscall names for nicer verbose output. */
+static const char *bsd_syscall_name(uint32_t bsd_nr) {
+    switch (bsd_nr) {
+        case 1:   return "exit";
+        case 2:   return "fork";
+        case 3:   return "read";
+        case 4:   return "write";
+        case 5:   return "open";
+        case 6:   return "close";
+        case 7:   return "wait4";
+        case 9:   return "link";
+        case 10:  return "unlink";
+        case 12:  return "chdir";
+        case 13:  return "fchdir";
+        case 14:  return "mknod";
+        case 15:  return "chmod";
+        case 16:  return "chown";
+        case 20:  return "getpid";
+        case 23:  return "setuid";
+        case 24:  return "getuid";
+        case 25:  return "geteuid";
+        case 27:  return "recvmsg";
+        case 28:  return "sendmsg";
+        case 29:  return "recvfrom";
+        case 30:  return "accept";
+        case 31:  return "getpeername";
+        case 32:  return "getsockname";
+        case 33:  return "access";
+        case 36:  return "sync";
+        case 37:  return "kill";
+        case 39:  return "getppid";
+        case 41:  return "pipe";
+        case 42:  return "pipe";
+        case 43:  return "getegid";
+        case 46:  return "sigaction";
+        case 47:  return "getgid";
+        case 48:  return "sigprocmask";
+        case 53:  return "sigaltstack";
+        case 54:  return "ioctl";
+        case 57:  return "symlink";
+        case 58:  return "readlink";
+        case 59:  return "execve";
+        case 60:  return "umask";
+        case 61:  return "chroot";
+        case 65:  return "msync";
+        case 73:  return "munmap";
+        case 74:  return "mprotect";
+        case 75:  return "madvise";
+        case 78:  return "mincore";
+        case 79:  return "getgroups";
+        case 80:  return "setgroups";
+        case 81:  return "getpgrp";
+        case 82:  return "setpriority";
+        case 83:  return "getpriority";
+        case 89:  return "getitimer";
+        case 90:  return "setitimer";
+        case 92:  return "fcntl";
+        case 93:  return "select";
+        case 95:  return "fsync";
+        case 97:  return "socket";
+        case 98:  return "connect";
+        case 116: return "gettimeofday";
+        case 117: return "getrusage";
+        case 118: return "getsockopt";
+        case 120: return "readv";
+        case 121: return "writev";
+        case 126: return "settimeofday";
+        case 128: return "rename";
+        case 131: return "flock";
+        case 133: return "sendto";
+        case 134: return "shutdown";
+        case 135: return "socketpair";
+        case 136: return "mkdir";
+        case 137: return "rmdir";
+        case 138: return "utimes";
+        case 197: return "mmap";
+        case 199: return "lseek";
+        case 200: return "truncate";
+        case 201: return "ftruncate";
+        case 202: return "nanosleep";
+        case 220: return "getxattr";
+        case 221: return "fgetxattr";
+        case 222: return "setxattr";
+        case 223: return "fsetxattr";
+        case 224: return "removexattr";
+        case 225: return "fremovexattr";
+        case 226: return "listxattr";
+        case 227: return "llistxattr";
+        case 228: return "flistxattr";
+        case 286: return "pwrite";
+        case 287: return "pread";
+        case 331: return "fchown";
+        case 333: return "fchmod";
+        case 396: return "read_nocancel";
+        case 397: return "write_nocancel";
+        case 398: return "open_nocancel";
+        case 399: return "close_nocancel";
+        case 400: return "wait4_nocancel";
+        case 401: return "recvmsg_nocancel";
+        case 402: return "sendmsg_nocancel";
+        case 403: return "recvfrom_nocancel";
+        case 404: return "accept_nocancel";
+        case 405: return "fcntl_nocancel";
+        case 406: return "select_nocancel";
+        case 460: return "pread";
+        case 461: return "pwrite";
+        case 465: return "pread_nocancel";
+        case 466: return "pwrite_nocancel";
+        default:  return "?";
+    }
+}
+
+
+/* Syscall argument translation
+ * 
+ * Most syscalls take the same args on macOS and Linux (file
+ * descriptors, pointers, sizes). A few take flag bitmasks whose
+ * numeric values differ between the two systems.
+ */
+
+static int translate_open_flags(int macos_flags) {
+    int linux_flags = macos_flags & 0x3;  /* O_RDONLY / O_WRONLY / O_RDWR */
+    if (macos_flags & 0x0000004) linux_flags |= O_NONBLOCK;
+    if (macos_flags & 0x0000008) linux_flags |= O_APPEND;
+    if (macos_flags & 0x0000040) linux_flags |= O_ASYNC;
+    if (macos_flags & 0x0000080) linux_flags |= O_SYNC;
+    if (macos_flags & 0x0000100) linux_flags |= O_NOFOLLOW;
+    if (macos_flags & 0x0000200) linux_flags |= O_CREAT;
+    if (macos_flags & 0x0000400) linux_flags |= O_TRUNC;
+    if (macos_flags & 0x0000800) linux_flags |= O_EXCL;
+    if (macos_flags & 0x0020000) linux_flags |= O_NOCTTY;
+    if (macos_flags & 0x1000000) linux_flags |= O_CLOEXEC;
+    return linux_flags;
+}
+
+/* mmap flags — prot bits are the same, but flag bits differ.
+ * macOS MAP_ANON=0x1000 vs Linux MAP_ANONYMOUS=0x20 is the big one. */
+static int translate_mmap_flags(int macos_flags) {
+    int linux_flags = 0;
+    /* Access mode (low 2 bits) — same on both. */
+    linux_flags |= macos_flags & 0x3;
+    /* Common flags — same bit positions on both. */
+    if (macos_flags & 0x0001) linux_flags |= MAP_SHARED;
+    if (macos_flags & 0x0002) linux_flags |= MAP_PRIVATE;
+    if (macos_flags & 0x0010) linux_flags |= MAP_FIXED;
+    /* MAP_ANON (macOS 0x1000) → MAP_ANONYMOUS (Linux 0x20). */
+    if (macos_flags & 0x1000) linux_flags |= MAP_ANONYMOUS;
+    /* Linux-only flags we can't translate from macOS — ignored. */
+    return linux_flags;
+}
+
+/* kill() signal number translation.
+ * Signals 1-6 are the same. From 7 onward macOS and Linux diverge. */
+static int translate_kill_signal(int macos_sig) {
+    /* 1=SIGHUP, 2=SIGINT, 3=SIGQUIT, 4=SIGILL, 5=SIGTRAP, 6=SIGABRT,
+       9=SIGKILL, 11=SIGSEGV, 13=SIGPIPE, 14=SIGALRM, 15=SIGTERM —
+       all the same on macOS and Linux. */
+    static const int sig_xlate[32] = {
+        [0]  = 0,                /* 0 = no signal (kill(pid, 0) checks existence) */
+        [7]  = 0,                /* macOS SIGEMT — no Linux equivalent; 0 = skip */
+        [8]  = 8,                /* SIGFPE — same */
+        [10] = 7,                /* macOS SIGBUS  → Linux SIGBUS (7) */
+        [12] = 31,               /* macOS SIGSYS  → Linux SIGSYS (31) */
+        [16] = 23,               /* macOS SIGURG  → Linux SIGURG (23) */
+        [17] = 19,               /* macOS SIGSTOP → Linux SIGSTOP (19) */
+        [18] = 20,               /* macOS SIGTSTP → Linux SIGTSTP (20) */
+        [19] = 18,               /* macOS SIGCONT → Linux SIGCONT (18) */
+        [20] = 17,               /* macOS SIGCHLD → Linux SIGCHLD (17) */
+        [21] = 21,               /* SIGTTIN — same */
+        [22] = 22,               /* SIGTTOU — same */
+        [23] = 29,               /* macOS SIGIO   → Linux SIGIO (29) */
+        [24] = 24,               /* SIGXCPU — same */
+        [25] = 25,               /* SIGXFSZ — same */
+        [26] = 26,               /* SIGVTALRM — same */
+        [27] = 27,               /* SIGPROF — same */
+        [28] = 28,               /* SIGWINCH — same */
+        [29] = 0,                /* macOS SIGINFO — no Linux equivalent; 0 = skip */
+        [30] = 10,               /* macOS SIGUSR1 → Linux SIGUSR1 (10) */
+        [31] = 12,               /* macOS SIGUSR2 → Linux SIGUSR2 (12) */
+    };
+    if (macos_sig < 0 || macos_sig >= 32) return macos_sig;  /* pass through */
+    int linux_sig = sig_xlate[macos_sig];
+    return linux_sig ? linux_sig : macos_sig;  /* 0 means "no equiv" → pass through */
+}
+
+/* fcntl() cmd translation. Cmds 0-4 are the same. 5-9 are reshuffled. */
+static int translate_fcntl_cmd(int macos_cmd) {
+    switch (macos_cmd) {
+        case 0: return F_DUPFD;            /* same */
+        case 1: return F_GETFD;            /* same */
+        case 2: return F_SETFD;            /* same */
+        case 3: return F_GETFL;            /* same */
+        case 4: return F_SETFL;            /* same */
+        case 5: return F_GETOWN;           /* macOS F_GETOWN=5, Linux=9 */
+        case 6: return F_SETOWN;           /* macOS F_SETOWN=6, Linux=8 */
+        case 7: return F_GETLK;            /* macOS F_GETLK=7,  Linux=5 */
+        case 8: return F_SETLK;            /* macOS F_SETLK=8,  Linux=6 */
+        case 9: return F_SETLKW;           /* macOS F_SETLKW=9, Linux=7 */
+        case 67: return F_DUPFD_CLOEXEC;   /* macOS 67, Linux 1030 */
+        /* macOS-specific cmds (F_GETPATH=50, F_FULLFSYNC=51, F_NOCACHE=48,
+         * F_RDADVISE=57, F_RDAHEAD=58, F_PREALLOCATE=42, etc.) have no
+         * Linux equivalent. Return -1 to signal "unsupported". */
+        default: return -1;
+    }
+}
+
+/* madvise() advice translation. 0-4 are the same. MADV_FREE differs. */
+static int translate_madvise(int macos_advice) {
+    switch (macos_advice) {
+        case 0: return MADV_NORMAL;       /* same */
+        case 1: return MADV_RANDOM;       /* same */
+        case 2: return MADV_SEQUENTIAL;   /* same */
+        case 3: return MADV_WILLNEED;     /* same */
+        case 4: return MADV_DONTNEED;     /* same */
+        case 5: return MADV_FREE;         /* macOS MADV_FREE=5, Linux=8 */
+        /* macOS-specific (MADV_ZERO_WIRED_PAGES=6, MADV_FREE_REUSABLE=7,
+         * MADV_FREE_REUSE=8, MADV_CAN_REUSE=9) — no Linux equivalent.
+         * Fall through to default. */
+        default: return macos_advice;     /* pass through; Linux may reject */
+    }
+}
+
+
+/* Raw syscall — bypasses glibc's errno translation. */
+
+static inline long raw_syscall(long nr, long a1, long a2, long a3,
+                                long a4, long a5, long a6) {
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    register long r8  __asm__("r8")  = a5;
+    register long r9  __asm__("r9")  = a6;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+          "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+
+/* Stats printing */
+
+void print_stats(void) {
+    if (g_stats_printed) return;
+    g_stats_printed = true;
+    fprintf(stderr, "\nmacify: stats:\n");
+    fprintf(stderr, "         slow-path SIGILL invocations: %lu\n", g_slow_path_calls);
+    fprintf(stderr, "         fast-path syscall sites:      %lu  (patched at load)\n",
+            g_fast_path_sites);
+    fprintf(stderr, "         slow-path syscall sites:      %lu  (patched at load)\n",
+            g_slow_path_sites);
+}
+
+
+/* SIGILL handler — slow path.
+ * 
+ * Invoked when a patched UD2 (was: syscall) executes. Translates
+ * the macOS BSD syscall number to Linux, translates arguments if
+ * needed, executes the Linux syscall, and resumes the app.
+ * 
+ * For exit (BSD 1): prints stats before exiting.
+ */
+
+/* Crash handler for SIGSEGV/SIGBUS/SIGFPE — prints the faulting address
+ * and register state so we can debug crashes in loaded macOS binaries. */
+void crash_handler(int sig, siginfo_t *info, void *uctx) {
+    /* Debug: write directly to fd 2 to verify handler is called.
+     * Use write() not fprintf() in case stdio is corrupted. */
+    const char msg[] = "\n*** crash_handler called ***\n";
+    write(2, msg, sizeof(msg) - 1);
+
+    ucontext_t *uc = (ucontext_t *)uctx;
+    greg_t *regs = uc->uc_mcontext.gregs;
+
+    fprintf(stderr, "\nmacify: CRASH — signal %d (%s)\n", sig,
+            sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" :
+            sig == SIGFPE ? "SIGFPE" : "?");
+    fprintf(stderr, "  faulting address: %p\n", info->si_addr);
+    fprintf(stderr, "  rip=%#016lx  rsp=%#016lx  rbp=%#016lx\n",
+            (unsigned long)regs[REG_RIP], (unsigned long)regs[REG_RSP],
+            (unsigned long)regs[REG_RBP]);
+    fprintf(stderr, "  rax=%#016lx  rbx=%#016lx  rcx=%#016lx  rdx=%#016lx\n",
+            (unsigned long)regs[REG_RAX], (unsigned long)regs[REG_RBX],
+            (unsigned long)regs[REG_RCX], (unsigned long)regs[REG_RDX]);
+    fprintf(stderr, "  rdi=%#016lx  rsi=%#016lx  r8 =%#016lx  r9 =%#016lx\n",
+            (unsigned long)regs[REG_RDI], (unsigned long)regs[REG_RSI],
+            (unsigned long)regs[REG_R8],  (unsigned long)regs[REG_R9]);
+    fprintf(stderr, "  r10=%#016lx  r11=%#016lx  r12=%#016lx  r13=%#016lx\n",
+            (unsigned long)regs[REG_R10], (unsigned long)regs[REG_R11],
+            (unsigned long)regs[REG_R12], (unsigned long)regs[REG_R13]);
+    fprintf(stderr, "  r14=%#016lx  r15=%#016lx\n",
+            (unsigned long)regs[REG_R14], (unsigned long)regs[REG_R15]);
+
+    /* Check if rip is in one of our mapped segments */
+    uint64_t rip = (uint64_t)regs[REG_RIP];
+
+    /* Print stack dump FIRST — this is the most useful info for debugging
+     * and doesn't risk a secondary crash from reading instruction bytes
+     * at an invalid address. */
+    fprintf(stderr, "  stack dump (rsp + offset):\n");
+    uint64_t *sp = (uint64_t *)regs[REG_RSP];
+    for (int s = 0; s < 48; s++) {
+        /* Check if the stack address itself is readable by seeing if it
+         * falls in any mapped segment or our allocated stack. We use
+         * a simple heuristic: if rsp is valid, the first 48 entries
+         * should be in the same page or nearby pages. */
+        uint64_t addr = (uint64_t)(sp + s);
+        /* Skip if address is in __PAGEZERO (unmapped) */
+        if (addr < 0x1000) continue;
+        /* Try to read — if it faults, the signal handler will re-enter
+         * but we've already printed useful info. Use volatile to prevent
+         * the compiler from hoisting the read. */
+        uint64_t val;
+        /* Safe read: check address is in a plausible range */
+        if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
+        val = sp[s];
+        /* Check if value is in any mapped segment (potential return addr) */
+        const char *seg = "unknown";
+        for (int si = 0; si < g_nsegments; si++) {
+            if (val >= g_segments[si].vmaddr &&
+                val < g_segments[si].vmaddr + g_segments[si].vmsize) {
+                seg = g_segments[si].name;
+                break;
+            }
+        }
+        fprintf(stderr, "    rsp+0x%-3x: %#018lx (%s)\n",
+                s * 8, (unsigned long)val, seg);
+    }
+
+    /* Print instruction bytes only if rip is in a valid, readable segment
+     * (not __PAGEZERO). When rip=0 (NULL function pointer call), reading
+     * rip-8 would fault and crash the crash handler. */
+    int rip_in_pagezero = (rip < 0x100000000UL);  /* __PAGEZERO is 0..0x100000000 */
+    int rip_in_our_segments = 0;
+    if (!rip_in_pagezero) {
+        for (int i = 0; i < g_nsegments; i++) {
+            if (rip >= g_segments[i].vmaddr &&
+                rip < g_segments[i].vmaddr + g_segments[i].vmsize) {
+                rip_in_our_segments = 1;
+                uint64_t offset = rip - g_segments[i].vmaddr;
+                fprintf(stderr, "  rip is in segment %s at offset %#lx (static=%#lx)\n",
+                        g_segments[i].name, (unsigned long)offset,
+                        (unsigned long)(g_segments[i].vmaddr - g_slide + offset));
+                fprintf(stderr, "  bytes at rip-8:");
+                for (int b = -8; b < 0; b++) {
+                    fprintf(stderr, " %02x", ((uint8_t *)rip)[b]);
+                }
+                fprintf(stderr, "\n  bytes at rip:  ");
+                for (int b = 0; b < 16; b++) {
+                    fprintf(stderr, " %02x", ((uint8_t *)rip)[b]);
+                }
+                fprintf(stderr, "\n");
+                break;
+            }
+        }
+    } else {
+        fprintf(stderr, "  rip is NULL — a NULL function pointer was called\n");
+    }
+
+    /* If rip is NOT in any of our mapped segments, it's in a host library
+     * (libmacify_shim.so, libc.so.6, libm.so.6, etc.). Use dladdr to find
+     * which library/symbol the crash occurred in. */
+    if (!rip_in_pagezero && !rip_in_our_segments) {
+        Dl_info di;
+        if (dladdr((void *)(uintptr_t)rip, &di)) {
+            /* Compute offset within the library file */
+            unsigned long offset_in_lib = 0;
+            if (di.dli_fbase) {
+                offset_in_lib = (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_fbase);
+            }
+            fprintf(stderr, "  rip is in host library %s (base=%p, offset=0x%lx)\n",
+                    di.dli_fname ? di.dli_fname : "(unknown)",
+                    di.dli_fbase, offset_in_lib);
+            if (di.dli_sname) {
+                fprintf(stderr, "    symbol: %s + 0x%lx\n",
+                        di.dli_sname,
+                        (unsigned long)((uint64_t)rip - (uint64_t)(uintptr_t)di.dli_saddr));
+            } else {
+                fprintf(stderr, "    symbol: (unknown — stripped)\n");
+                /* Print all loaded libraries with dl_iterate_phdr so we can
+                 * match the offset to the right library manually. */
+                extern int print_loaded_libs(void);
+                print_loaded_libs();
+            }
+        }
+    }
+    fprintf(stderr, "  si_code=%d (%s)\n", info->si_code,
+            info->si_code == 1 ? "MAPERR (unmapped)" :
+            info->si_code == 2 ? "ACCERR (protection)" : "other");
+
+    /* For Go binaries: print tls_g value (current goroutine pointer). */
+    if (g_tls_g_addr) {
+        uint64_t tls_g_val = 0;
+        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL) {
+            tls_g_val = *(volatile uint64_t *)g_tls_g_addr;
+        }
+        fprintf(stderr, "  Go tls_g at 0x%lx = 0x%lx (current g)\n",
+                (unsigned long)g_tls_g_addr, (unsigned long)tls_g_val);
+        if (tls_g_val > 0x10000 && tls_g_val < 0x7fffffffffffUL) {
+            uint64_t g_m = *(volatile uint64_t *)(tls_g_val + 0x30);
+            fprintf(stderr, "  g.m = 0x%lx\n", (unsigned long)g_m);
+            if (g_m > 0x10000 && g_m < 0x7fffffffffffUL) {
+                uint64_t m_g0 = *(volatile uint64_t *)g_m;
+                uint64_t m_curg = *(volatile uint64_t *)(g_m + 8);
+                fprintf(stderr, "  m.g0 = 0x%lx, m.curg = 0x%lx\n",
+                        (unsigned long)m_g0, (unsigned long)m_curg);
+            }
+        }
+    }
+
+    print_stats();
+    _exit(128 + sig);
+}
+
+void sigill_handler(int sig, siginfo_t *info, void *uctx) {
+    (void)sig; (void)info;
+    ucontext_t *uc = (ucontext_t *)uctx;
+    greg_t *regs = uc->uc_mcontext.gregs;
+
+    uint64_t macos_nr = (uint64_t)regs[REG_RAX];
+    uint32_t bsd_nr   = macos_nr & 0xFFFFFF;
+
+    /* Fast bounds check. Most syscalls are < 600. */
+    if (__builtin_expect(bsd_nr >= BSD_SYSCALL_MAX, 0)) {
+        fprintf(stderr,
+                "\nmacify: unhandled macOS syscall 0x%llx (BSD #%u, out of range)\n",
+                (unsigned long long)macos_nr, bsd_nr);
+        _exit(127);
+    }
+
+    int16_t linux_nr = bsd_to_linux[bsd_nr];
+    if (__builtin_expect(linux_nr <= 0, 0)) {
+        /* linux_nr == 0 means "unimplemented" (unused table slot). */
+        fprintf(stderr,
+                "\nmacify: unhandled macOS syscall 0x%llx (BSD #%u = %s)\n",
+                (unsigned long long)macos_nr, bsd_nr, bsd_syscall_name(bsd_nr));
+        _exit(127);
+    }
+
+    uint8_t flags = bsd_arg_flags[bsd_nr];
+    g_slow_path_calls++;
+
+    /* For exit (BSD 1): print stats, then exit_group. */
+    if (__builtin_expect(bsd_nr == 1, 0)) {
+        if (g_verbose) {
+            fprintf(stderr, "macify: syscall exit(code=%lld)\n",
+                    (long long)regs[REG_RDI]);
+        }
+        print_stats();
+        raw_syscall(SYS_exit_group, regs[REG_RDI], 0, 0, 0, 0, 0);
+        __builtin_unreachable();
+    }
+
+    /* Extract args. */
+    long a1 = regs[REG_RDI];
+    long a2 = regs[REG_RSI];
+    long a3 = regs[REG_RDX];
+    long a4 = regs[REG_R10];
+    long a5 = regs[REG_R8];
+    long a6 = regs[REG_R9];
+
+    /* Per-syscall argument translation. */
+    if (flags & ARG_OPEN_FLAGS) {
+        int old_a2 = (int)a2;
+        a2 = (long)translate_open_flags(old_a2);
+        if (g_verbose) {
+            fprintf(stderr, "macify:   open flags macos=%#x -> linux=%#lx\n",
+                    (unsigned)old_a2, a2);
+        }
+    }
+    if (flags & ARG_MMAP_FLAGS) {
+        int old_a4 = (int)a4;
+        a4 = (long)translate_mmap_flags(old_a4);
+        if (g_verbose) {
+            fprintf(stderr, "macify:   mmap flags macos=%#x -> linux=%#lx\n",
+                    (unsigned)old_a4, a4);
+        }
+    }
+    if (flags & ARG_KILL_SIGNAL) {
+        int old_a2 = (int)a2;
+        a2 = (long)translate_kill_signal(old_a2);
+        if (g_verbose) {
+            fprintf(stderr, "macify:   kill signal macos=%d -> linux=%ld\n",
+                    old_a2, a2);
+        }
+    }
+    if (flags & ARG_FCNTL_CMD) {
+        int old_a2 = (int)a2;
+        int new_a2 = translate_fcntl_cmd(old_a2);
+        if (new_a2 < 0) {
+            /* macOS-specific cmd with no Linux equivalent. Return EINVAL. */
+            if (g_verbose) {
+                fprintf(stderr, "macify:   fcntl cmd macos=%d -> UNSUPPORTED\n",
+                        old_a2);
+            }
+            regs[REG_RAX] = (greg_t)(-EINVAL);
+            regs[REG_RIP] += 2;
+            return;
+        }
+        a2 = (long)new_a2;
+        if (g_verbose) {
+            fprintf(stderr, "macify:   fcntl cmd macos=%d -> linux=%ld\n",
+                    old_a2, a2);
+        }
+    }
+    if (flags & ARG_MADVISE) {
+        int old_a3 = (int)a3;
+        a3 = (long)translate_madvise(old_a3);
+        if (g_verbose) {
+            fprintf(stderr, "macify:   madvise advice macos=%d -> linux=%ld\n",
+                    old_a3, a3);
+        }
+    }
+    if (flags & ARG_SIGACTION) {
+        /* macOS sigaction(int signum, const struct sigaction *act,
+         *                  struct sigaction *oldact)
+         * a1 = signum, a2 = act (macOS struct ptr), a3 = oldact (macOS struct ptr)
+         */
+        if (a1 == SIGILL || a1 == SIGSEGV || a1 == SIGBUS) {
+            /* NEVER let the macOS binary replace our SIGILL/SIGSEGV/SIGBUS
+             * handlers. SIGILL is critical for syscall translation.
+             * SIGSEGV/SIGBUS are our crash handlers. */
+            if (g_verbose) {
+                fprintf(stderr, "macify:   sigaction(%ld) - skipped, keeping our handler\n", a1);
+            }
+            regs[REG_RAX] = 0;  /* return success */
+            regs[REG_RIP] += 2;  /* skip UD2 */
+            return;
+        }
+        if (a2) {
+            static struct {
+                void *handler;
+                unsigned long flags;
+                void *restorer;
+                unsigned char mask[128];
+            } linux_sa;
+            uint8_t *macos_sa = (uint8_t *)a2;
+            memset(&linux_sa, 0, sizeof(linux_sa));
+            linux_sa.handler = *(void **)macos_sa;
+            unsigned int macos_flags = *(unsigned int *)(macos_sa + 12);
+            linux_sa.flags = macos_flags | SA_ONSTACK;
+            memcpy(&linux_sa.mask, macos_sa + 8, 4);
+            a2 = (long)&linux_sa;
+            if (g_verbose) {
+                fprintf(stderr, "macify:   sigaction signum=%ld handler=%p flags=0x%x -> 0x%lx\n",
+                        a1, linux_sa.handler, macos_flags, linux_sa.flags);
+            }
+        }
+        if (a3) {
+            static unsigned char linux_old_sa[152];
+            a3 = (long)linux_old_sa;
+        }
+    }
+    /* wait4 options WCONTINUED bit differs (macOS 0x4 vs Linux 0x8) but is
+     * rarely used; left untranslated. */
+
+    if (g_verbose) {
+        fprintf(stderr, "macify: syscall %-16s macos=0x%-10llx -> linux=%-3d  "
+                        "args=%#llx,%#llx,%#llx,%#llx,%#llx,%#llx\n",
+                bsd_syscall_name(bsd_nr),
+                (unsigned long long)macos_nr, (int)linux_nr,
+                (unsigned long long)a1, (unsigned long long)a2,
+                (unsigned long long)a3, (unsigned long long)a4,
+                (unsigned long long)a5, (unsigned long long)a6);
+    }
+
+    long result = raw_syscall((long)linux_nr, a1, a2, a3, a4, a5, a6);
+
+    /* Linux raw syscalls return -errno on failure (e.g., -9 for EBADF).
+     * macOS raw syscalls return -1 on failure and set errno via __errno().
+     * Real macOS apps check for -1, not -errno.
+     *
+     * We convert -errno → -1 and set errno via our shim's __errno() function.
+     * The shim's __errno() returns __errno_location(), so errno is properly set. */
+    if (__builtin_expect(result < 0 && result > -4096, 0)) {
+        /* result is -errno. Set errno and convert to -1 (macOS convention). */
+        int err = (int)(-result);
+        errno = err;  /* Sets glibc's errno via __errno_location() */
+        if (g_verbose) {
+            fprintf(stderr, "macify:   syscall failed: linux returned %ld (-errno=%d), "
+                            "converting to -1 (macOS convention)\n", result, err);
+        }
+        result = -1;
+    }
+
+    regs[REG_RAX] = (greg_t)result;
+    regs[REG_RIP] += 2;  /* skip past the 2-byte UD2 (0F 0B) */
+}
+
+
+
+#define BACKWARD_SCAN_BYTES 32
+
+/* Helper: scan a byte range for syscall instructions and patch them.
+ * base = segment base address (slid)
+ * seg_start = offset within base where the range starts
+ * seg_len = length of the range
+ * Returns number of sites patched (fast + slow), or -1 on error. */
+int patch_syscalls_in_range(loaded_segment *seg, uint8_t *base,
+                                    size_t range_start, size_t range_len,
+                                    int *fast_count, int *slow_count) {
+    size_t range_end = range_start + range_len;
+    if (range_end > seg->vmsize) range_end = seg->vmsize;
+
+    for (size_t i = range_start; i + 1 < range_end; i++) {
+        if (base[i] != 0x0F || base[i+1] != 0x05) continue;  /* not syscall */
+
+        /* CRITICAL: Check that this 0F 05 is NOT inside another instruction.
+         * The byte pattern 0F 05 can appear as:
+         *   - Part of a JMP/CALL rel32 displacement (e.g., e9 0f 05 00 00)
+         *   - Part of a LEA rip+disp32 displacement (e.g., 48 8d 35 0f 05 00 00)
+         *   - Part of a MOV imm32 (e.g., b8 0f 05 00 00)
+         *   - Part of a CMP imm32 (e.g., 81 f9 0f 05 00 00)
+         *   - Part of conditional jump (e.g., 0f 84 0f 05 00 00)
+         *
+         * Strategy: only patch 0F 05 if we can find a mov eax, 0x2000XXXX
+         * within 32 bytes BEFORE it. If no such mov is found, skip. */
+        {
+            bool found_mov = false;
+            size_t scan_start = (i >= BACKWARD_SCAN_BYTES) ? (i - BACKWARD_SCAN_BYTES) : 0;
+            for (size_t j = (i >= 5) ? (i - 5) : 0; j >= scan_start && j < i; j--) {
+                if (base[j] == 0xB8 && j+4 < i &&
+                    base[j+3] == 0x00 && base[j+4] == 0x20) {
+                    /* Check it's not preceded by REX prefix */
+                    if (j > 0 && base[j-1] >= 0x40 && base[j-1] <= 0x4F) continue;
+                    found_mov = true;
+                    break;
+                }
+                if (j == 0) break;
+            }
+            if (!found_mov) continue;  /* No mov eax, 0x2000XXXX — not a real syscall */
+        }
+
+        /* Found a syscall at offset i. Look backward for mov eax, 0x2000XXXX. */
+        size_t mov_off = (size_t)-1;
+        size_t mov_scan_start = (i >= BACKWARD_SCAN_BYTES) ? (i - BACKWARD_SCAN_BYTES) : 0;
+        size_t scan_end   = (i >= 5) ? (i - 5) : 0;
+
+        for (size_t j = scan_end + 1; j-- > mov_scan_start; ) {
+            if (base[j] != 0xB8) continue;
+            if (base[j+3] != 0x00 || base[j+4] != 0x20) continue;
+            /* Skip if preceded by ANY REX prefix (0x40-0x4F). */
+            if (j > 0 && base[j-1] >= 0x40 && base[j-1] <= 0x4F) continue;
+            mov_off = j;
+            break;
+        }
+
+        if (mov_off != (size_t)-1) {
+            uint16_t bsd_nr = base[mov_off+1] | (base[mov_off+2] << 8);
+            if (bsd_nr >= BSD_SYSCALL_MAX) {
+                base[i+1] = 0x0B;  /* UD2 */
+                (*slow_count)++;
+                continue;
+            }
+            int16_t linux_nr = bsd_to_linux[bsd_nr];
+            uint8_t flags = bsd_arg_flags[bsd_nr];
+            bool needs_translation = (flags & ~ARG_FORCE_SLOW) != 0;
+            bool force_slow = (flags & ARG_FORCE_SLOW) != 0;
+
+            if (!g_no_fast_path && linux_nr > 0 && !needs_translation && !force_slow) {
+                /* FAST PATH: rewrite the immediate. */
+                base[mov_off+1] = (uint8_t)(linux_nr & 0xFF);
+                base[mov_off+2] = (uint8_t)((linux_nr >> 8) & 0xFF);
+                base[mov_off+3] = 0;
+                base[mov_off+4] = 0;
+                (*fast_count)++;
+            } else {
+                /* SLOW PATH: patch syscall to UD2. */
+                base[i+1] = 0x0B;
+                (*slow_count)++;
+            }
+        } else {
+            /* No mov found: dynamically computed syscall #. SLOW PATH. */
+            base[i+1] = 0x0B;
+            (*slow_count)++;
+        }
+    }
+    return 0;
+}
+
+int patch_syscalls_in_segment(loaded_segment *seg) {
+    if (!(seg->prot & PROT_EXEC)) return 0;
+    if (seg->is_pagezero) return 0;
+
+    if (mprotect((void *)(uintptr_t)seg->vmaddr, seg->vmsize,
+                 PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
+        perror("mprotect RWX");
+        return -1;
+    }
+
+    uint8_t *base = (uint8_t *)(uintptr_t)seg->vmaddr;
+    int fast_count = 0, slow_count = 0;
+
+    /* If we have section info, only patch code sections (more precise —
+     * avoids false positives in data sections like __cstring, __const).
+     * If no sections, patch the whole segment (backward compat). */
+    bool has_code_sections = false;
+    for (int i = 0; i < g_nsections; i++) {
+        if (strncmp(g_sections[i].segname, seg->name, 16) == 0 &&
+            section_is_code(&g_sections[i])) {
+            has_code_sections = true;
+            size_t sec_start = (size_t)(g_sections[i].addr - seg->vmaddr);
+            size_t sec_len = (size_t)g_sections[i].size;
+            patch_syscalls_in_range(seg, base, sec_start, sec_len,
+                                    &fast_count, &slow_count);
+            if (g_verbose) {
+                fprintf(stderr, "macify: patched section %s.%s "
+                                "(range %#lx+%lu, fast=%d slow=%d so far)\n",
+                        g_sections[i].segname, g_sections[i].sectname,
+                        (unsigned long)sec_start, (unsigned long)sec_len,
+                        fast_count, slow_count);
+            }
+        }
+    }
+
+    if (!has_code_sections) {
+        /* No code sections — scan the whole segment (legacy behavior) */
+        patch_syscalls_in_range(seg, base, 0, seg->vmsize,
+                                &fast_count, &slow_count);
+    }
+
+    /* Downgrade to target protection. */
+    if (mprotect((void *)(uintptr_t)seg->vmaddr, seg->vmsize,
+                 seg->target_prot) < 0) {
+        perror("mprotect final");
+        return -1;
+    }
+    seg->prot = seg->target_prot;
+
+    g_fast_path_sites += fast_count;
+    g_slow_path_sites += slow_count;
+
+    if (g_verbose) {
+        fprintf(stderr, "macify: patched %d syscall site(s) in %s "
+                        "(fast=%d, slow=%d%s)\n",
+                fast_count + slow_count, seg->name, fast_count, slow_count,
+                has_code_sections ? ", sections-only" : "");
+    }
+    return fast_count + slow_count;
+}
+
+
+
+
+/* Print all loaded libraries (for crash debugging). */
+static int dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size; (void)data;
+    const char *name = info->dlpi_name;
+    if (!name || !*name) name = "(main executable)";
+    fprintf(stderr, "    base=0x%lx name=%s\n",
+            (unsigned long)info->dlpi_addr, name);
+    return 0;
+}
+
+int print_loaded_libs(void) {
+    fprintf(stderr, "  Loaded libraries:\n");
+    dl_iterate_phdr(dl_iterate_cb, NULL);
+    return 0;
+}
