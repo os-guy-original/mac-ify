@@ -124,13 +124,12 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 int open(const char *pathname, int flags, ...) {
     LAZY_INIT_IO();
     mode_t mode = 0;
-    /* Only translate flags for macOS callers */
     int linux_flags;
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (is_macos) {
         linux_flags = (int)translate_open_flags((unsigned int)flags);
     } else {
-        linux_flags = flags; /* Linux caller — flags are already Linux */
+        linux_flags = flags;
     }
     if (linux_flags & LINUX_O_CREAT) {
         va_list ap;
@@ -139,17 +138,14 @@ int open(const char *pathname, int flags, ...) {
         va_end(ap);
     }
 
-    /* Prefix path translation for macOS callers */
     const char *effective_path = pathname;
     char translated_path[4096];
     if (is_macos) {
-        /* Check if path should be hidden */
         extern int macify_should_hide_path(const char *);
         if (macify_should_hide_path(pathname)) {
             errno = ENOENT;
             return -1;
         }
-        /* Translate macOS paths to prefix paths */
         extern int macify_translate_path(const char *, char *, size_t);
         if (macify_translate_path(pathname, translated_path, sizeof(translated_path)) == 0) {
             effective_path = translated_path;
@@ -157,10 +153,6 @@ int open(const char *pathname, int flags, ...) {
     }
 
     int fd = real_open(effective_path, linux_flags, mode);
-    /* Don't clear errno on success — glibc doesn't do this, and Rust's
-     * std::io::Error::last_os_error() reads errno. If we clear it, a
-     * later failed call that doesn't set errno will report 'Success
-     * (os error 0)' instead of the real error. */
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512];
         int n = snprintf(b, sizeof(b), "macify: open(\"%s\"%s, 0x%x->0x%x) = %d\n",
@@ -170,6 +162,69 @@ int open(const char *pathname, int flags, ...) {
         (void)write(2, b, n);
     }
     return fd;
+}
+
+/* open64 — glibc's 64-bit offset variant of open.
+ * Rust's std::fs::File::open uses open64 on 64-bit Linux.
+ * Without this shim, bat's file opens bypass our path translation
+ * and flag translation. */
+int macify_open64(const char *pathname, int flags, ...) __asm__("open64");
+int macify_open64(const char *pathname, int flags, ...) {
+    LAZY_INIT_IO();
+    mode_t mode = 0;
+    int linux_flags;
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (is_macos) {
+        linux_flags = (int)translate_open_flags((unsigned int)flags);
+    } else {
+        linux_flags = flags;
+    }
+    if (linux_flags & LINUX_O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+
+    const char *effective_path = pathname;
+    char translated_path[4096];
+    if (is_macos) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) {
+            errno = ENOENT;
+            return -1;
+        }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, translated_path, sizeof(translated_path)) == 0) {
+            effective_path = translated_path;
+        }
+    }
+
+    static int (*real_open64)(const char *, int, ...) = NULL;
+    if (!real_open64) real_open64 = dlsym(RTLD_NEXT, "open64");
+    int fd = real_open64(effective_path, linux_flags, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512];
+        int n = snprintf(b, sizeof(b), "macify: open64(\"%s\"%s, 0x%x->0x%x) = %d\n",
+                pathname,
+                effective_path != pathname ? " [translated]" : "",
+                flags, linux_flags, fd);
+        (void)write(2, b, n);
+    }
+    return fd;
+}
+
+/* __open_2 — glibc's _FORTIFY_SOURCE variant of open.
+ * Used when compile-time flag checking is enabled. */
+int macify___open_2(const char *pathname, int flags) __asm__("__open_2");
+int macify___open_2(const char *pathname, int flags) {
+    return open(pathname, flags);
+}
+
+/* __open64_2 — glibc's _FORTIFY_SOURCE variant of open64. */
+int macify___open64_2(const char *pathname, int flags) __asm__("__open64_2");
+int macify___open64_2(const char *pathname, int flags) {
+    return macify_open64(pathname, flags);
 }
 
 /* openat — like open but relative to a directory fd.

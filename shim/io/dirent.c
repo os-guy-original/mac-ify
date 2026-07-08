@@ -27,15 +27,23 @@ DIR *macify_opendir(const char *name) {
     if (!real_opendir) real_opendir = dlsym(RTLD_NEXT, "opendir");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_opendir(name);
-    /* Try path translation */
     extern int macify_should_hide_path(const char *);
     extern int macify_translate_path(const char *, char *, size_t);
     if (macify_should_hide_path(name)) { errno = ENOENT; return NULL; }
     char translated[PATH_MAX];
+    DIR *r;
     if (macify_translate_path(name, translated, sizeof(translated)) == 0) {
-        return real_opendir(translated);
+        r = real_opendir(translated);
+    } else {
+        r = real_opendir(name);
     }
-    return real_opendir(name);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: opendir(\"%s\") = %p errno=%d\n",
+            name ? name : "(null)", (void*)r, r ? 0 : errno);
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 DIR *opendirat(int dirfd, const char *name, int flags) {

@@ -303,6 +303,11 @@ int macify_fstat(int fd, struct macos_stat *buf) {
         return real_fstat(fd, (struct stat *)buf);
     struct stat ls;
     int ret = real_fstat(fd, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: fstat(%d) = %d errno=%d\n", fd, ret, ret ? errno : 0);
+        (void)write(2, b, n);
+    }
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
 }
@@ -315,7 +320,6 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (!real_fstatat) real_fstatat = dlsym(RTLD_NEXT, "fstatat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstatat(dirfd, pathname, (struct stat *)buf, flags);
-    /* macOS AT_FDCWD = -2, Linux AT_FDCWD = -100 */
     if (dirfd == -2) dirfd = -100;
     int linux_flags = 0;
     if (flags & 0x0200) linux_flags |= 0x0100;
@@ -324,6 +328,12 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (flags & 0x1000) linux_flags |= 0x0200;
     struct stat ls;
     int ret = real_fstatat(dirfd, pathname, &ls, linux_flags);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: fstatat(%d, \"%s\", 0x%x->0x%x) = %d errno=%d\n",
+            dirfd, pathname ? pathname : "(null)", flags, linux_flags, ret, ret ? errno : 0);
+        (void)write(2, b, n);
+    }
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
 }
