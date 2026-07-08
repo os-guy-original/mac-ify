@@ -462,6 +462,23 @@ int macify_fgetc(FILE *stream) {
     return r;
 }
 
+/* ungetc — push back a character. MUST restore _IO_read_ptr before
+ * calling glibc's ungetc, because glibc accesses _IO_read_ptr directly
+ * to decrement it. Our _r=-1 corruption makes _IO_read_ptr invalid. */
+int macify_ungetc(int c, FILE *stream) __asm__("ungetc");
+int macify_ungetc(int c, FILE *stream) {
+    static int (*real_ungetc)(int, FILE *) = NULL;
+    if (!real_ungetc) real_ungetc = dlsym(RTLD_NEXT, "ungetc");
+    macify_restore_read_ptr(stream);
+    int r = real_ungetc(c, stream);
+    if (r != EOF) {
+        /* Re-save and re-corrupt _r = -1 */
+        macify_save_read_ptr(stream);
+        *(int *)((char *)stream + 8) = -1;
+    }
+    return r;
+}
+
 /* fseeko — glibc clears _IO_EOF_SEEN on seek. We must also clear
  * macOS __SEOF at offset 0x10 so sort doesn't think we're still at EOF. */
 int macify_fseeko(FILE *stream, long off, int whence) __asm__("fseeko");
