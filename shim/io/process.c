@@ -418,13 +418,28 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
-    /* Restore _IO_read_ptr (undo _r=-1 from fopen). */
     macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
+    if (getenv("MACIFY_TRACE_READ")) {
+        unsigned int flags_before = *(unsigned int *)((char *)stream);
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: fread(%p, %zu, %zu, %p) = %zu flags=0x%x err=%d eof=%d\n",
+            ptr, size, nmemb, (void*)stream, r, flags_before,
+            (flags_before & 0x20) ? 1 : 0, (flags_before & 0x10) ? 1 : 0);
+        (void)write(2, b, n);
+    }
     if (r > 0) {
-        /* Save and re-corrupt _r = -1 for inlined getc. */
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
+        /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte).
+         * macOS code checks [fp+0x10] & 0x40 for __SERR directly
+         * (not via ferror). After fread, _IO_read_end points to
+         * the end of buffered data — its low byte may have bit 0x40
+         * set, causing false "read failed" errors. Clearing it
+         * changes the pointer by at most 0x40, which is safe because
+         * we force __srget for every getc (via _r=-1), so glibc
+         * never reads from the buffer directly. */
+        *((unsigned char *)stream + 0x10) &= ~0x40;
     }
     return r;
 }
@@ -462,13 +477,12 @@ int macify_fseeko(FILE *stream, long off, int whence) {
     return r;
 }
 
-/* clearerr — clear both glibc's flags and macOS's flags at offset 0x10 */
+/* clearerr — clear glibc's EOF and error flags directly. */
 void macify_clearerr(FILE *stream) __asm__("clearerr");
 void macify_clearerr(FILE *stream) {
-    static void (*real_clearerr)(FILE *) = NULL;
-    if (!real_clearerr) real_clearerr = dlsym(RTLD_NEXT, "clearerr");
-    real_clearerr(stream);
-    unsigned char *macos_flags = (unsigned char *)stream + 0x10;
+    if (!stream) return;
+    unsigned int *glibc_flags = (unsigned int *)((char *)stream + 0);
+    *glibc_flags &= ~0x30;  /* Clear _IO_EOF_SEEN | _IO_ERR_SEEN */
 }
 
 /* ── fclose/fflush shims — protect _IO_read_end from macOS _flags writes ──
@@ -530,6 +544,28 @@ int macify_fflush(FILE *stream) {
         }
     }
     return r;
+}
+
+/* ferror — check glibc's _IO_ERR_SEEN directly, bypassing any
+ * consistency checks that might detect our _IO_read_ptr corruption.
+ * sort calls ferror() after fread() to check for read errors.
+ * glibc's ferror checks _flags (offset 0) bit 0x20 (_IO_ERR_SEEN).
+ * Our _r=-1 corruption of _IO_read_ptr doesn't set _IO_ERR_SEEN,
+ * but glibc's internal consistency checks might. This shim reads
+ * _flags directly to avoid triggering those checks. */
+int macify_ferror(FILE *stream) __asm__("ferror");
+int macify_ferror(FILE *stream) {
+    if (!stream) return 0;
+    unsigned int glibc_flags = *(unsigned int *)((char *)stream + 0);
+    return (glibc_flags & 0x20) ? 1 : 0;  /* _IO_ERR_SEEN */
+}
+
+/* feof — check glibc's _IO_EOF_SEEN directly. */
+int macify_feof(FILE *stream) __asm__("feof");
+int macify_feof(FILE *stream) {
+    if (!stream) return 0;
+    unsigned int glibc_flags = *(unsigned int *)((char *)stream + 0);
+    return (glibc_flags & 0x10) ? 1 : 0;  /* _IO_EOF_SEEN */
 }
 
 /* setvbuf — ensure buffer address doesn't have bit 0x40 in low byte.
