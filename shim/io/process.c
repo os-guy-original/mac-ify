@@ -76,21 +76,28 @@ ssize_t macify_read(int fd, void *buf, size_t count) {
     static int (*real_fstat)(int, struct stat *) = NULL;
     if (!real_read) real_read = dlsym(RTLD_NEXT, "read");
     if (!real_fstat) real_fstat = dlsym(RTLD_NEXT, "fstat");
+    /* Check if fd is a pipe (FIFO). Use real_fstat (not our interposed
+     * fstat) because we need Linux-format struct stat.
+     * CRITICAL: Save/restore errno around fstat — if fstat fails (e.g.,
+     * for an already-closed fd), it sets errno. When read() succeeds
+     * after, errno is still set from fstat. sort checks errno after
+     * read() and reports "read failed" with the stale error. */
+    int saved_errno = errno;
     struct stat st;
-    int is_fifo = 0;
-    if (real_fstat && real_fstat(fd, &st) == 0) {
-        is_fifo = S_ISFIFO(st.st_mode);
-        if (is_fifo) {
-            struct pollfd pfd = { .fd = fd, .events = POLLIN };
-            int pr = poll(&pfd, 1, 0);
-            if (pr == 0) return 0;
+    if (real_fstat && real_fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode)) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, 0);
+        if (pr == 0) {
+            errno = saved_errno;
+            return 0;
         }
     }
+    errno = saved_errno;
     ssize_t r = real_read(fd, buf, count);
     if (getenv("MACIFY_TRACE_READ")) {
         char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: read(%d, %zu) fifo=%d = %zd errno=%d\n",
-            fd, count, is_fifo, r, r < 0 ? errno : 0);
+            "macify: read(%d, %zu) = %zd errno=%d\n",
+            fd, count, r, r < 0 ? errno : 0);
         (void)write(2, b, n);
     }
     return r;
@@ -132,29 +139,6 @@ FILE *macify_fopen(const char *path, const char *mode) {
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
     FILE *fp = real_fopen(path, mode);
     if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
-        /* Set a custom buffer at a safe address (low byte without bit 0x40).
-         * macOS binaries check [fp + 0x10] & 0x40 for __SERR (error).
-         * Glibc stores _IO_read_end (buffer pointer) at offset 0x10.
-         * If the buffer address has bit 0x40, false read errors are detected. */
-        char *buf = (char *)malloc(4096 + 128);
-        if (buf) {
-            /* Find offset within allocation that clears bit 0x40 */
-            uintptr_t addr = (uintptr_t)buf;
-            if (addr & 0x40) addr = (addr + 0x7f) & ~0x7f;
-            if (((uintptr_t)addr & 0x40) == 0) {
-                setvbuf(fp, (char *)addr, _IOFBF, 4096);
-            }
-        }
-        /* CRITICAL: setvbuf sets _IO_read_ptr (offset 8) to the buffer base
-         * address. macOS's inlined getc macro reads _r from offset 8 (low 4
-         * bytes of _IO_read_ptr). If _r > 0, getc reads *_p (offset 0 =
-         * glibc _flags = 0xfbad2084) as a pointer → crash.
-         * Save _IO_read_ptr, then set _r = -1 to force the first getc to
-         * call __srget. __srget will restore _IO_read_ptr before calling
-         * fgetc.
-         * NOTE: Only do this for read-mode files. For write-mode files,
-         * _IO_read_ptr is not used for reads, so setting _r=-1 is safe
-         * but unnecessary. For update mode (r+), skip it entirely. */
         if (strchr(mode, 'r') && !strchr(mode, '+')) {
             macify_save_read_ptr(fp);
             *(int *)((char *)fp + 8) = -1;
@@ -434,24 +418,11 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
+    /* Restore _IO_read_ptr (undo _r=-1 from fopen). */
     macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
-    if (getenv("MACIFY_TRACE_FREAD") || getenv("MACIFY_TRACE_READ")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: fread(%p, %zu, %zu, %p) = %zu\n",
-            ptr, size, nmemb, (void*)stream, r);
-        (void)write(2, b, n);
-    }
-    if (r == 0) {
-        /* EOF or error — just restore _IO_read_ptr.
-         * Don't write to offset 0x10 (_IO_read_end) — it corrupts
-         * the pointer. The caller detects EOF via fread returning 0. */
-        macify_restore_read_ptr(stream);
-    } else {
-        /* Data was read. Save _IO_read_ptr and set _r = -1 for ALL
-         * streams. This prevents inlined getc from dereferencing _p
-         * (glibc _flags). __srget and subsequent fread calls restore
-         * _IO_read_ptr before use. */
+    if (r > 0) {
+        /* Save and re-corrupt _r = -1 for inlined getc. */
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
     }
