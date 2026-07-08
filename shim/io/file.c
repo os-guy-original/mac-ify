@@ -186,7 +186,6 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos)
         return real_lstat(path, (struct stat *)buf);
-    /* Prefix path translation */
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -197,7 +196,14 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
     }
     struct stat ls;
     int ret = real_lstat(eff, &ls);
-    if (ret == 0) { translate_stat(&ls, buf);  }
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: lstat(\"%s\"%s) = %d errno=%d\n",
+            path ? path : "(null)",
+            eff != path ? " [translated]" : "", ret, ret ? errno : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) { translate_stat(&ls, buf); }
     return ret;
 }
 
@@ -231,6 +237,25 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     int ret = real_fstatat(dirfd, pathname, &ls, linux_flags);
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
+}
+
+/* ── access ──────────────────────────────────────────────────── */
+/* access — check file accessibility. Apply prefix path translation. */
+int macify_access(const char *path, int mode) __asm__("access");
+int macify_access(const char *path, int mode) {
+    static int (*real_access)(const char *, int) = NULL;
+    if (!real_access) real_access = dlsym(RTLD_NEXT, "access");
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+        return real_access(path, mode);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    return real_access(eff, mode);
 }
 
 /* ── faccessat ───────────────────────────────────────────────── */
@@ -382,7 +407,43 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
     static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getpwuid_r");
     if (!real) { errno = ENOSYS; return -1; }
-    return real(uid, pwd, buf, buflen, result);
+    /* Call real getpwuid_r with a Linux-format struct passwd.
+     * Then translate to macOS format in the caller's buffer.
+     * CRITICAL: The caller (bat/Rust) expects macOS passwd layout.
+     * We must use a separate Linux struct for the real call, then
+     * copy fields to the macOS-format struct. */
+    struct passwd linux_pw;
+    char linux_buf[4096];
+    struct passwd *linux_result = NULL;
+    int r = real(uid, &linux_pw, linux_buf, sizeof(linux_buf), &linux_result);
+    if (r == 0 && linux_result) {
+        /* Translate to macOS format in caller's buffer */
+        struct macos_passwd *mp = (struct macos_passwd *)pwd;
+        size_t need = 0;
+        need += strlen(linux_pw.pw_name) + 1;
+        if (linux_pw.pw_passwd) need += strlen(linux_pw.pw_passwd) + 1;
+        if (linux_pw.pw_gecos) need += strlen(linux_pw.pw_gecos) + 1;
+        need += strlen(linux_pw.pw_dir) + 1;
+        need += strlen(linux_pw.pw_shell) + 1;
+        if (need > buflen) { *result = NULL; return ERANGE; }
+        char *p = buf;
+        mp->pw_name = p; strcpy(p, linux_pw.pw_name); p += strlen(p) + 1;
+        if (linux_pw.pw_passwd) { mp->pw_passwd = p; strcpy(p, linux_pw.pw_passwd); p += strlen(p) + 1; }
+        else mp->pw_passwd = NULL;
+        mp->pw_uid = linux_pw.pw_uid;
+        mp->pw_gid = linux_pw.pw_gid;
+        mp->pw_change = 0;
+        mp->pw_class = NULL;
+        if (linux_pw.pw_gecos) { mp->pw_gecos = p; strcpy(p, linux_pw.pw_gecos); p += strlen(p) + 1; }
+        else mp->pw_gecos = NULL;
+        mp->pw_dir = p; strcpy(p, linux_pw.pw_dir); p += strlen(p) + 1;
+        mp->pw_shell = p; strcpy(p, linux_pw.pw_shell); p += strlen(p) + 1;
+        mp->pw_expire = 0;
+        *result = (struct passwd *)mp;
+    } else {
+        *result = NULL;
+    }
+    return r;
 }
 
 struct passwd *macify_getpwnam(const char *name) __asm__("getpwnam");
