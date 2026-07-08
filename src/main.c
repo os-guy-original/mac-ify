@@ -336,6 +336,20 @@ int main(int argc, char **argv, char **envp) {
                 extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libmagic")) {
                 extra1 = dlopen("libmagic.so.1", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libcurl")) {
+                extra1 = dlopen("libcurl.so.4", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libssh2")) {
+                extra1 = dlopen("libssh2.so.1", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libnghttp3")) {
+                extra1 = dlopen("libnghttp3.so.9", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libnghttp2")) {
+                extra1 = dlopen("libnghttp2.so.14", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libngtcp2")) {
+                extra1 = NULL;  /* no Linux equivalent, skip */
+            } else if (strstr(name, "libzstd")) {
+                extra1 = dlopen("libzstd.so.1", RTLD_NOW | RTLD_GLOBAL);
+            } else if (strstr(name, "libbrotli")) {
+                extra1 = NULL;  /* may not be available, skip */
             } else if (strstr(name, "libintl")) {
                 /* libintl is part of glibc on Linux — no separate library */
                 extra1 = NULL;
