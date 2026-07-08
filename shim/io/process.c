@@ -73,18 +73,24 @@ int macify_pipe(int *pipefd) {
 ssize_t macify_read(int fd, void *buf, size_t count) __asm__("read");
 ssize_t macify_read(int fd, void *buf, size_t count) {
     static ssize_t (*real_read)(int, void *, size_t) = NULL;
+    static int (*real_fstat)(int, struct stat *) = NULL;
     if (!real_read) real_read = dlsym(RTLD_NEXT, "read");
-    /* Check if fd is a pipe (FIFO) */
+    if (!real_fstat) real_fstat = dlsym(RTLD_NEXT, "fstat");
     struct stat st;
-    if (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode)) {
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int pr = poll(&pfd, 1, 0);
-        if (pr == 0) return 0; /* No data — pipe has no writer */
+    int is_fifo = 0;
+    if (real_fstat && real_fstat(fd, &st) == 0) {
+        is_fifo = S_ISFIFO(st.st_mode);
+        if (is_fifo) {
+            struct pollfd pfd = { .fd = fd, .events = POLLIN };
+            int pr = poll(&pfd, 1, 0);
+            if (pr == 0) return 0;
+        }
     }
     ssize_t r = real_read(fd, buf, count);
-    if (getenv("MACIFY_TRACE_OPEN")) {
+    if (getenv("MACIFY_TRACE_READ")) {
         char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: read(%d, %zu) = %zd\n", fd, count, r);
+            "macify: read(%d, %zu) fifo=%d = %zd errno=%d\n",
+            fd, count, is_fifo, r, r < 0 ? errno : 0);
         (void)write(2, b, n);
     }
     return r;
@@ -428,25 +434,26 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
-    /* Restore saved _IO_read_ptr before calling fread (like __srget) */
     macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
+    if (getenv("MACIFY_TRACE_FREAD") || getenv("MACIFY_TRACE_READ")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: fread(%p, %zu, %zu, %p) = %zu\n",
+            ptr, size, nmemb, (void*)stream, r);
+        (void)write(2, b, n);
+    }
     if (r == 0) {
         /* EOF or error — just restore _IO_read_ptr.
          * Don't write to offset 0x10 (_IO_read_end) — it corrupts
          * the pointer. The caller detects EOF via fread returning 0. */
         macify_restore_read_ptr(stream);
     } else {
-        /* Data was read. Save _IO_read_ptr and set _r = -1 to prevent
-         * inlined getc from dereferencing _p (glibc _flags) → SIGSEGV.
-         * Only do this for stdin (where inlined getc is used).
-         * For file streams (opened via fopen), sort uses fread directly,
-         * so _r = -1 is not needed and corrupts _IO_read_ptr. */
-        extern FILE *__stdinp;
-        if (stream == __stdinp) {
-            macify_save_read_ptr(stream);
-            *(int *)((char *)stream + 8) = -1;
-        }
+        /* Data was read. Save _IO_read_ptr and set _r = -1 for ALL
+         * streams. This prevents inlined getc from dereferencing _p
+         * (glibc _flags). __srget and subsequent fread calls restore
+         * _IO_read_ptr before use. */
+        macify_save_read_ptr(stream);
+        *(int *)((char *)stream + 8) = -1;
     }
     return r;
 }
@@ -507,14 +514,19 @@ int macify_fclose(FILE *stream) __asm__("fclose");
 int macify_fclose(FILE *stream) {
     static int (*real_fclose)(FILE *) = NULL;
     if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
-    /* macOS _rpl_fflush corrupts _IO_read_end (offset 0x10) by writing
-     * macOS _flags to it. Restore _IO_read_end = _IO_read_ptr (uncorrupted).
-     * For write streams, _IO_read_ptr is NULL, so _IO_read_end becomes NULL.
-     * This prevents fclose from failing due to corrupted pointer. */
+    /* Restore saved _IO_read_ptr before fclose. */
+    macify_restore_read_ptr(stream);
     void **read_ptr = (void **)((char *)stream + 8);
     void **read_end = (void **)((char *)stream + 0x10);
     *read_end = *read_ptr;
-    /* Clear macOS __SERR bit */
+    /* Invalidate the save/restore entry so a reused FILE* (same address)
+     * doesn't get the stale saved _IO_read_ptr restored. */
+    for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
+        if (macify_saved_fps[i].fp == stream && macify_saved_fps[i].valid) {
+            macify_saved_fps[i].valid = 0;
+            break;
+        }
+    }
     return real_fclose(stream);
 }
 

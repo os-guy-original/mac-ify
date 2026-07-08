@@ -1,6 +1,7 @@
 #include "macify.h"
 #include <sys/utsname.h>
 #include <stdlib.h>
+#include <locale.h>
 
 
 /* Stack setup — build the macOS-style entry stack:
@@ -350,6 +351,13 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
             (void)write(2, b, n);
         }
     }
+
+    /* Clear LC_CTYPE from environment to prevent glibc from using a
+     * UTF-8 locale that causes sort -n to crash via inlined getc.
+     * glibc reads LC_* env vars at startup; clearing LC_CTYPE forces
+     * the default "C" locale. The macOS binary can still call
+     * setlocale() to set it (our shim re-forces LC_CTYPE=C after). */
+    unsetenv("LC_CTYPE");
 
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because

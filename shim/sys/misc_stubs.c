@@ -188,7 +188,36 @@ char *libintl_textdomain(const char *domainname) {
 /* libintl_setlocale - glibc has setlocale, delegate to it. */
 #include <locale.h>
 char *libintl_setlocale(int category, const char *locale) {
-    return setlocale(category, locale);
+    /* Call our setlocale shim (not glibc's) to force LC_NUMERIC=C. */
+    extern char *macify_setlocale(int, const char *) __asm__("setlocale");
+    return macify_setlocale(category, locale);
+}
+
+/* setlocale - intercept and force LC_NUMERIC to "C" after any setlocale
+ * call. macOS binaries call setlocale(LC_ALL, "") which sets all locale
+ * categories based on environment. If LC_NUMERIC is set to a locale with
+ * "," as decimal point, glibc's strtold loops infinitely (sort -n).
+ * By forcing LC_NUMERIC=C, we ensure "." is always the decimal point. */
+char *macify_setlocale(int category, const char *locale) __asm__("setlocale");
+char *macify_setlocale(int category, const char *locale) {
+    static char *(*real_setlocale)(int, const char *) = NULL;
+    if (!real_setlocale) real_setlocale = dlsym(RTLD_NEXT, "setlocale");
+    char *r = real_setlocale ? real_setlocale(category, locale) : NULL;
+    if (r && real_setlocale) {
+        /* Force LC_NUMERIC=C (prevents strtold loops with "," decimal point)
+         * and LC_CTYPE=C (prevents character classification issues with
+         * UTF-8 locale that cause sort -n to crash via inlined getc). */
+        real_setlocale(LC_NUMERIC, "C");
+        real_setlocale(LC_CTYPE, "C");
+    }
+    if (getenv("MACIFY_TRACE_LOCALE")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b),
+            "macify: setlocale(cat=%d, locale=%s) = %s, LC_NUMERIC forced to C\n",
+            category, locale ? locale : "(null)", r ? r : "(null)");
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 /* nl_langinfo - macOS function to query locale information.
@@ -238,11 +267,17 @@ static int macos_to_linux_nl_item(int macos_item) {
 char *nl_langinfo(int item) {
     static char *(*real_nl_langinfo)(int) = NULL;
     if (!real_nl_langinfo) real_nl_langinfo = dlsym(RTLD_NEXT, "nl_langinfo");
-    if (!real_nl_langinfo) return "ANSI_X3.4-1968";  /* ASCII fallback */
     /* If item is in macOS range (small int), translate to glibc value. */
     if (item >= 0 && item < 100) {
+        /* Force RADIXCHAR (macOS item 50) to always return "." regardless
+         * of locale. sort -n uses strtold which reads nl_langinfo(RADIXCHAR)
+         * for the decimal point. If it returns "," (comma) instead of ".",
+         * strtold loops infinitely or crashes. */
+        if (item == 50) return ".";
+        if (item == 51) return "";  /* THOUSEP — no thousands separator */
         item = macos_to_linux_nl_item(item);
     }
+    if (!real_nl_langinfo) return "ANSI_X3.4-1968";  /* ASCII fallback */
     return real_nl_langinfo(item);
 }
 
