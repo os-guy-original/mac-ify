@@ -209,6 +209,14 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     static int (*real_openat)(int, const char *, int, ...) = NULL;
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
     int fd = real_openat(linux_dirfd, effective_path, linux_flags, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: openat(%d, \"%s\"%s, 0x%x->0x%x) = %d\n",
+            dirfd, pathname ? pathname : "(null)",
+            effective_path != pathname ? " [translated]" : "",
+            flags, linux_flags, fd);
+        (void)write(2, b, n);
+    }
     return fd;
 }
 

@@ -1,7 +1,83 @@
-/* file.c — file I/O: fcntl, strerror_r, stat/lstat/fstat, passwd */
+/* file.c — file I/O: fcntl, strerror_r, stat/lstat/fstat, passwd,
+ * realpath, readlink, getcwd, mkdir, isatty */
 #include "io_internal.h"
 #include <sys/stat.h>
 #include <pwd.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+
+/* ── realpath ────────────────────────────────────────────────── */
+char *macify_realpath(const char *path, char *resolved) __asm__("realpath");
+char *macify_realpath(const char *path, char *resolved) {
+    static char *(*real)(const char *, char *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "realpath");
+    char *r = real(path, resolved);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: realpath(\"%s\") = %s errno=%d\n",
+            path ? path : "(null)", r ? r : "NULL", r ? 0 : errno);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+/* ── readlink ────────────────────────────────────────────────── */
+ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) __asm__("readlink");
+ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) {
+    static ssize_t (*real)(const char *, char *, size_t) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "readlink");
+    ssize_t r = real(path, buf, bufsiz);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: readlink(\"%s\") = %zd errno=%d\n",
+            path ? path : "(null)", r, r < 0 ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+/* ── getcwd ──────────────────────────────────────────────────── */
+char *macify_getcwd(char *buf, size_t size) __asm__("getcwd");
+char *macify_getcwd(char *buf, size_t size) {
+    static char *(*real)(char *, size_t) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "getcwd");
+    char *r = real(buf, size);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: getcwd() = %s\n", r ? r : "NULL");
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+/* ── mkdir ───────────────────────────────────────────────────── */
+int macify_mkdir(const char *path, mode_t mode) __asm__("mkdir");
+int macify_mkdir(const char *path, mode_t mode) {
+    static int (*real)(const char *, mode_t) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "mkdir");
+    int r = real(path, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: mkdir(\"%s\", 0%o) = %d errno=%d\n",
+            path ? path : "(null)", mode, r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+/* ── isatty ──────────────────────────────────────────────────── */
+int macify_isatty(int fd) __asm__("isatty");
+int macify_isatty(int fd) {
+    static int (*real)(int) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "isatty");
+    int r = real(fd);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: isatty(%d) = %d\n", fd, r);
+        (void)write(2, b, n);
+    }
+    return r;
+}
 
 /* ── fcntl ───────────────────────────────────────────────────── */
 
@@ -165,7 +241,6 @@ int macify_stat(const char *path, struct macos_stat *buf) {
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos)
         return real_stat(path, (struct stat *)buf);
-    /* Prefix path translation */
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -176,7 +251,21 @@ int macify_stat(const char *path, struct macos_stat *buf) {
     }
     struct stat ls;
     int ret = real_stat(eff, &ls);
-    if (ret == 0) { translate_stat(&ls, buf);  }
+    /* Don't clear errno — glibc doesn't, and Rust reads errno.
+     * But also don't leave stale ENOENT from a prior failed call.
+     * The correct behavior: errno is only valid when the call fails.
+     * If ret==0, errno is undefined (glibc may or may not clear it).
+     * Rust only reads errno when the call fails, so we don't need
+     * to do anything. */
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: stat(\"%s\"%s) = %d errno=%d st_mode=0%o st_size=%ld\n",
+            path ? path : "(null)",
+            eff != path ? " [translated]" : "", ret, ret ? errno : 0,
+            ret == 0 ? ls.st_mode : 0, ret == 0 ? (long)ls.st_size : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) { translate_stat(&ls, buf); }
     return ret;
 }
 
