@@ -180,6 +180,102 @@ int macify_strerror_r(int errnum, char *buf, size_t buflen) {
     return 0;
 }
 
+/* ── __xstat / __lxstat / __fxstat ─────────────────────────────
+ * glibc's old-style stat wrappers. Rust's libc crate may use these
+ * instead of stat/lstat/fstat on some platforms. Without shims,
+ * these bypass our macOS struct stat translation. */
+
+/* macos_stat and translate_stat are defined below in the stat section.
+ * We forward-declare them here. */
+struct macos_stat;
+static void translate_stat(const struct stat *ls, struct macos_stat *ms);
+
+int macify___xstat(int ver, const char *path, struct macos_stat *buf) __asm__("__xstat");
+int macify___xstat(int ver, const char *path, struct macos_stat *buf) {
+    static int (*real)(int, const char *, struct stat *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "__xstat");
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (!is_macos) return real(ver, path, (struct stat *)buf);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    struct stat ls;
+    int ret = real(ver, eff, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: __xstat(\"%s\") = %d errno=%d st_mode=0%o\n",
+            path ? path : "(null)", ret, ret ? errno : 0,
+            ret == 0 ? ls.st_mode : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) translate_stat(&ls, buf);
+    return ret;
+}
+
+int macify___lxstat(int ver, const char *path, struct macos_stat *buf) __asm__("__lxstat");
+int macify___lxstat(int ver, const char *path, struct macos_stat *buf) {
+    static int (*real)(int, const char *, struct stat *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "__lxstat");
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (!is_macos) return real(ver, path, (struct stat *)buf);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    struct stat ls;
+    int ret = real(ver, eff, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: __lxstat(\"%s\") = %d errno=%d\n",
+            path ? path : "(null)", ret, ret ? errno : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) translate_stat(&ls, buf);
+    return ret;
+}
+
+int macify___fxstat(int ver, int fd, struct macos_stat *buf) __asm__("__fxstat");
+int macify___fxstat(int ver, int fd, struct macos_stat *buf) {
+    static int (*real)(int, int, struct stat *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "__fxstat");
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (!is_macos) return real(ver, fd, (struct stat *)buf);
+    struct stat ls;
+    int ret = real(ver, fd, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: __fxstat(%d) = %d errno=%d\n", fd, ret, ret ? errno : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) translate_stat(&ls, buf);
+    return ret;
+}
+
+/* __xstat64 / __lxstat64 / __fxstat64 — 64-bit variants */
+int macify___xstat64(int ver, const char *path, struct macos_stat *buf) __asm__("__xstat64");
+int macify___xstat64(int ver, const char *path, struct macos_stat *buf) {
+    return macify___xstat(ver, path, buf);
+}
+
+int macify___lxstat64(int ver, const char *path, struct macos_stat *buf) __asm__("__lxstat64");
+int macify___lxstat64(int ver, const char *path, struct macos_stat *buf) {
+    return macify___lxstat(ver, path, buf);
+}
+
+int macify___fxstat64(int ver, int fd, struct macos_stat *buf) __asm__("__fxstat64");
+int macify___fxstat64(int ver, int fd, struct macos_stat *buf) {
+    return macify___fxstat(ver, fd, buf);
+}
+
 /* ── stat / lstat / fstat ────────────────────────────────────── */
 
 /* macOS x86_64 struct stat (with _DARWIN_C_SOURCE / 64-bit ino_t).
@@ -336,6 +432,29 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     }
     if (ret == 0) translate_stat(&ls, buf);
     return ret;
+}
+
+/* stat64 / lstat64 / fstat64 / fstatat64 — glibc's 64-bit stat variants.
+ * Rust's libc crate may call these instead of stat/lstat/fstat on
+ * 64-bit Linux. Without shims, these bypass our macOS struct translation. */
+int macify_stat64(const char *path, struct macos_stat *buf) __asm__("stat64");
+int macify_stat64(const char *path, struct macos_stat *buf) {
+    return macify_stat(path, buf);
+}
+
+int macify_lstat64(const char *path, struct macos_stat *buf) __asm__("lstat64");
+int macify_lstat64(const char *path, struct macos_stat *buf) {
+    return macify_lstat(path, buf);
+}
+
+int macify_fstat64(int fd, struct macos_stat *buf) __asm__("fstat64");
+int macify_fstat64(int fd, struct macos_stat *buf) {
+    return macify_fstat(fd, buf);
+}
+
+int macify_fstatat64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) __asm__("fstatat64");
+int macify_fstatat64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) {
+    return macify_fstatat(dirfd, pathname, buf, flags);
 }
 
 /* ── access ──────────────────────────────────────────────────── */
