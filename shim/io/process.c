@@ -157,7 +157,7 @@ int macify_msync(void *addr, size_t length, int flags) {
     size_t adj = a % ps;
     int r = real_msync((void *)(a - adj), length + adj, flags);
     if (r == -1 && (errno == EINVAL || errno == ENOMEM)) {
-        errno = 0;
+        
         return 0; /* macOS is more lenient */
     }
     return r;

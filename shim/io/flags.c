@@ -157,7 +157,10 @@ int open(const char *pathname, int flags, ...) {
     }
 
     int fd = real_open(effective_path, linux_flags, mode);
-    if (fd >= 0) errno = 0;
+    /* Don't clear errno on success — glibc doesn't do this, and Rust's
+     * std::io::Error::last_os_error() reads errno. If we clear it, a
+     * later failed call that doesn't set errno will report 'Success
+     * (os error 0)' instead of the real error. */
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512];
         int n = snprintf(b, sizeof(b), "macify: open(\"%s\"%s, 0x%x->0x%x) = %d\n",
@@ -206,7 +209,6 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     static int (*real_openat)(int, const char *, int, ...) = NULL;
     if (!real_openat) real_openat = dlsym(RTLD_NEXT, "openat");
     int fd = real_openat(linux_dirfd, effective_path, linux_flags, mode);
-    if (fd >= 0) errno = 0;
     return fd;
 }
 

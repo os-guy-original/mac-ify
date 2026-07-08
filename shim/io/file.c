@@ -176,7 +176,7 @@ int macify_stat(const char *path, struct macos_stat *buf) {
     }
     struct stat ls;
     int ret = real_stat(eff, &ls);
-    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
+    if (ret == 0) { translate_stat(&ls, buf);  }
     return ret;
 }
 
@@ -197,7 +197,7 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
     }
     struct stat ls;
     int ret = real_lstat(eff, &ls);
-    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
+    if (ret == 0) { translate_stat(&ls, buf);  }
     return ret;
 }
 

@@ -386,7 +386,27 @@ echo "-- GitHub releases --"
 run fetch_gh "watchexec" "watchexec/watchexec" "x86_64-apple-darwin" "watchexec_macos"
 run fetch_gh "btm"       "ClementTsang/bottom" "x86_64-apple-darwin" "btm_macos"
 run fetch_gh "bat"       "sharkdp/bat"         "x86_64-apple-darwin" "bat_macos"
-run fetch_gh "fd"        "sharkdp/fd"          "aarch64-apple-darwin" "fd_macos"
+# fd: latest release only has aarch64, use v10.3.0 for x86_64
+fetch_gh_fd() {
+    local dest="$DEST_DIR/fd_macos"
+    if [ -f "$dest" ] && [ -s "$dest" ]; then return 0; fi
+    echo "  [fetch] fd v10.3.0 (x86_64)"
+    local url="https://github.com/sharkdp/fd/releases/download/v10.3.0/fd-v10.3.0-x86_64-apple-darwin.tar.gz"
+    local archive="$TMPDIR_FETCH/fd.tar.gz"
+    local extract_dir="$TMPDIR_FETCH/fd.d"
+    rm -rf "$extract_dir"; mkdir -p "$extract_dir"
+    if curl -fsSL "$url" -o "$archive" 2>/dev/null && tar xzf "$archive" -C "$extract_dir" 2>/dev/null; then
+        local bin=$(find "$extract_dir" -type f -name "fd" | head -1)
+        if [ -n "$bin" ] && cp "$bin" "$dest" && chmod +x "$dest"; then
+            echo "  [OK]   fd -> fd_macos"
+        else
+            echo "  [FAIL] fd (binary not found)"
+        fi
+    else
+        echo "  [FAIL] fd (download failed)"
+    fi
+}
+run fetch_gh_fd
 run fetch_gh "rg"        "BurntSushi/ripgrep"  "x86_64-apple-darwin" "rg_macos"
 run fetch_gh "sd"        "chmln/sd"            "x86_64-apple-darwin" "sd_macos"
 run fetch_gh "dust"      "bootandy/dust"       "x86_64-apple-darwin" "dust_macos"
