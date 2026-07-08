@@ -56,9 +56,7 @@ uint64_t g_slow_path_sites = 0;   /* patched at load time */
 uint64_t g_slow_path_calls = 0;   /* invoked at runtime */
 bool     g_stats_printed  = false;
 
-/* Dynamic linking state. */
-#define MAX_DYLIBS 16
-
+/* Dynamic linking state. MAX_DYLIBS defined in macify.h */
 loaded_dylib g_dylibs[MAX_DYLIBS];
 int g_ndylibs = 0;
 

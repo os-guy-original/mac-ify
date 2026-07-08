@@ -175,7 +175,7 @@ typedef struct {
 
 #define MAX_SEGMENTS 32
 #define MAX_SECTIONS 64
-#define MAX_DYLIBS 16
+#define MAX_DYLIBS 32
 
 typedef struct {
     uint64_t vmaddr;

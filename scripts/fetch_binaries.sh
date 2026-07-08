@@ -358,6 +358,24 @@ run fetch_macports "makeinfo" \
     "$MP/texinfo/texinfo-7.3_0+perl5_34.darwin_24.x86_64.tbz2" \
     "opt/local/bin/makeinfo" "makeinfo_macos"
 
+# util-linux (for rev)
+run fetch_macports "rev" \
+    "$MP/util-linux/util-linux-2.41.3_0.darwin_19.x86_64.tbz2" \
+    "opt/local/bin/rev" "rev_macos"
+
+# sqlite3
+run fetch_macports "sqlite3" \
+    "$MP/sqlite3/sqlite3-3.51.2_0+universal.darwin_10.i386-x86_64.tbz2" \
+    "opt/local/bin/sqlite3" "sqlite3_macos"
+
+# MacPorts coreutils has gnucut, but it may not be in the g* glob
+# Check if cut_macos exists, if not try gnucut
+if [ ! -f "$DEST_DIR/cut_macos" ]; then
+    run fetch_macports "coreutils/gnucut" \
+        "$MP/coreutils/coreutils-9.10_0.darwin_24.x86_64.tbz2" \
+        "opt/local/bin/gnucut" "cut_macos"
+fi
+
 echo ""
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -367,6 +385,123 @@ echo "-- GitHub releases --"
 
 run fetch_gh "watchexec" "watchexec/watchexec" "x86_64-apple-darwin" "watchexec_macos"
 run fetch_gh "btm"       "ClementTsang/bottom" "x86_64-apple-darwin" "btm_macos"
+run fetch_gh "bat"       "sharkdp/bat"         "x86_64-apple-darwin" "bat_macos"
+run fetch_gh "fd"        "sharkdp/fd"          "aarch64-apple-darwin" "fd_macos"
+run fetch_gh "rg"        "BurntSushi/ripgrep"  "x86_64-apple-darwin" "rg_macos"
+run fetch_gh "sd"        "chmln/sd"            "x86_64-apple-darwin" "sd_macos"
+run fetch_gh "dust"      "bootandy/dust"       "x86_64-apple-darwin" "dust_macos"
+run fetch_gh "starship"  "starship/starship"   "x86_64-apple-darwin" "starship_macos"
+run fetch_gh "zoxide"    "ajeetdsouza/zoxide"  "x86_64-apple-darwin" "zoxide_macos"
+run fetch_gh "procs"     "dalance/procs"       "x86_64-mac"          "procs_macos"
+run fetch_gh "jq"        "jqlang/jq"           "macos-amd64"         "jq_darwin"
+run fetch_gh "xsv"       "BurntSushi/xsv"      "x86_64-apple-darwin" "xsv_macos"
+run fetch_gh "rclone"    "rclone/rclone"       "osx-amd64"           "rclone_macos"
+run fetch_gh "nvim"      "neovim/neovim"       "macos-x86_64"        "nvim_macos"
+
+echo ""
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Homebrew bottles (more macOS binaries)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+echo "-- Homebrew bottles --"
+
+# fetch_brew <name> <bottle_url> <bin_path_in_tar.gz> <dest>
+# Uses Homebrew's formulae API to get bottle download URLs.
+fetch_brew() {
+    local name="$1"
+    local formula="$2"
+    local bin_path="$3"
+    local dest="$4"
+    local dest_path="$DEST_DIR/$dest"
+
+    if [ -f "$dest_path" ] && [ -s "$dest_path" ]; then
+        status_skip "$name"
+        return 0
+    fi
+
+    echo "  [fetch] $name (brew)"
+    local extract_dir="$TMPDIR_FETCH/${dest}.d"
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+
+    # Get bottle URL from Homebrew API
+    local bottle_url
+    bottle_url=$(curl -fsSL "https://formulae.brew.sh/api/formula/${formula}.json" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    files = d.get("bottle", {}).get("stable", {}).get("files", {})
+    # Try sonoma, ventura, monterey, big_sur, catalina (x86_64 only)
+    for key in ["sonoma", "ventura", "monterey", "big_sur", "catalina"]:
+        if key in files:
+            print(files[key]["url"])
+            break
+    else:
+        # Just get the first one
+        for k, v in files.items():
+            print(v["url"])
+            break
+except Exception:
+    pass
+' 2>/dev/null || true)
+
+    if [ -z "$bottle_url" ]; then
+        status_fail "$name (no bottle URL)"
+        return 0
+    fi
+
+    local archive="$TMPDIR_FETCH/${dest}.tar.gz"
+    # GHCR requires auth token for bottle downloads
+    # URL format: https://ghcr.io/v2/homebrew/core/<name>/blobs/sha256:<hash>
+    # Scope: repository:homebrew/core/<name>:pull
+    local token
+    token=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:homebrew/core/${formula}:pull" 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)
+    if [ -n "$token" ]; then
+        if ! curl -fsSL -H "Authorization: Bearer $token" "$bottle_url" -o "$archive" 2>/dev/null; then
+            status_fail "$name (download failed with token)"
+            return 0
+        fi
+    else
+        if ! curl -fsSL "$bottle_url" -o "$archive" 2>/dev/null; then
+            status_fail "$name (download failed, no token)"
+            return 0
+        fi
+    fi
+
+    if ! tar xzf "$archive" -C "$extract_dir" 2>/dev/null; then
+        status_fail "$name (extraction failed)"
+        return 0
+    fi
+
+    local src="$extract_dir/$bin_path"
+    if [ -f "$src" ]; then
+        if cp "$src" "$dest_path" && chmod +x "$dest_path"; then
+            status_ok "$name -> $dest"
+        else
+            status_fail "$name (copy failed)"
+        fi
+    else
+        src=$(find "$extract_dir" -type f -name "$name" 2>/dev/null | head -1)
+        if [ -n "$src" ] && [ -f "$src" ]; then
+            if cp "$src" "$dest_path" && chmod +x "$dest_path"; then
+                status_ok "$name -> $dest"
+            else
+                status_fail "$name (copy failed)"
+            fi
+        else
+            status_fail "$name (binary not found)"
+        fi
+    fi
+}
+
+# wget
+run fetch_brew "wget" "wget" "bin/wget" "wget_macos"
+# htop
+run fetch_brew "htop" "htop" "bin/htop" "htop_macos"
+# tree
+run fetch_brew "tree" "tree" "bin/tree" "tree_macos"
+# curl
+run fetch_brew "curl" "curl" "bin/curl" "curl_macos"
 
 echo ""
 
