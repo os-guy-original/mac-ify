@@ -145,10 +145,14 @@ FILE *macify_fopen(const char *path, const char *mode) {
          * glibc _flags = 0xfbad2084) as a pointer → crash.
          * Save _IO_read_ptr, then set _r = -1 to force the first getc to
          * call __srget. __srget will restore _IO_read_ptr before calling
-         * fgetc, so glibc sees a valid pointer. For fread-based binaries,
-         * the restore also fixes _IO_read_ptr before glibc uses it. */
-        macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = -1;
+         * fgetc.
+         * NOTE: Only do this for read-mode files. For write-mode files,
+         * _IO_read_ptr is not used for reads, so setting _r=-1 is safe
+         * but unnecessary. For update mode (r+), skip it entirely. */
+        if (strchr(mode, 'r') && !strchr(mode, '+')) {
+            macify_save_read_ptr(fp);
+            *(int *)((char *)fp + 8) = -1;
+        }
     }
     return fp;
 }
@@ -186,11 +190,13 @@ int macify_msync(void *addr, size_t length, int flags) {
  * streams like stdout/stderr where glibc doesn't use _IO_read_end. */
 
 static inline void macify_clear_serr_flag(FILE *fp) {
-    /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte).
-     * macOS code checks [fp+0x10] & 0x40 for __SERR (error flag).
-     * On glibc, offset 0x10 is _IO_read_end (a pointer). Its low
-     * byte may have bit 0x40 set after writes, causing false errors. */
-    *((unsigned char *)fp + 0x10) &= ~0x40;
+    /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte) for
+     * WRITE streams only (stdout/stderr). For read streams, writing
+     * to offset 0x10 corrupts _IO_read_end and crashes glibc. */
+    extern FILE *__stdoutp, *__stderrp;
+    if (fp == __stdoutp || fp == __stderrp) {
+        *((unsigned char *)fp + 0x10) &= ~0x40;
+    }
 }
 
 /* __srget — read one character from FILE* (macOS internal).
@@ -264,20 +270,15 @@ int __srget(FILE *fp) {
     if (c != EOF) {
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
-        /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte). */
-        unsigned char *p10 = (unsigned char *)fp + 0x10;
-        unsigned char old = *p10;
-        *p10 &= ~0x40;
-        if (getenv("MACIFY_TRACE_SRGET")) {
-            char b[128];
-            int n = snprintf(b, sizeof(b),
-                "  cleared 0x40: offset 0x10 was 0x%02x now 0x%02x\n",
-                old, *p10);
-            (void)write(2, b, n);
-        }
+        /* Don't write to offset 0x10 (_IO_read_end) during reads.
+         * It corrupts the pointer and crashes glibc's buffer management.
+         * The 0x40 (__SERR) check by macOS code is handled by the
+         * write shims (fputc/fwrite/vfprintf) which clear 0x40 after
+         * writes to stdout. For read streams, macOS code checks
+         * __srget's return value (-1 = EOF) not _flags. */
     } else {
         macify_restore_read_ptr(fp);
-        macify_sync_stdio_flags(fp);
+        /* skip — caller detects EOF via return value */
     }
     return c;
 }
@@ -300,16 +301,18 @@ int __swbuf(int ch, FILE *fp) {
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
-        macify_clear_serr_flag(fp);
-        /* Set _w = -1 (offset 0x0c = high 4 bytes of _IO_read_ptr) */
-        *(int *)((char *)fp + 0x0c) = -1;
+        /* Only modify stdout/stderr — other streams' _IO_read_ptr
+         * gets corrupted by _w=-1 write. */
+        extern FILE *__stdoutp, *__stderrp;
+        if (fp == __stdoutp || fp == __stderrp) {
+            macify_clear_serr_flag(fp);
+            *(int *)((char *)fp + 0x0c) = -1;
+        }
     }
     return r;
 }
 
 /* putc_unlocked — macOS inlines this as a macro accessing FILE* fields.
- * We provide it as a function. After writing, set _w = -1 to prevent
- * the inlined macro from accessing _p (glibc _flags) on the next call.
  * CRITICAL: Call real glibc fputc directly to avoid double write-(-1)
  * corruption from our macify_fputc shim. See __srget for details. */
 int putc_unlocked(int ch, FILE *fp) {
@@ -318,8 +321,11 @@ int putc_unlocked(int ch, FILE *fp) {
     macify_restore_read_ptr(fp);
     int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
-        macify_clear_serr_flag(fp);
-        *(int *)((char *)fp + 0x0c) = -1;  /* _w = -1 */
+        extern FILE *__stdoutp, *__stderrp;
+        if (fp == __stdoutp || fp == __stderrp) {
+            macify_clear_serr_flag(fp);
+            *(int *)((char *)fp + 0x0c) = -1;
+        }
     }
     return r;
 }
@@ -339,7 +345,7 @@ int getc_unlocked(FILE *fp) {
         *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(fp);
-        macify_sync_stdio_flags(fp);
+        /* skip — caller detects EOF via return value */
     }
     return c;
 }
@@ -371,7 +377,7 @@ int getchar_unlocked(void) {
         *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(__stdinp);
-        macify_sync_stdio_flags(__stdinp);
+        /* skip */
     }
     return c;
 }
@@ -401,23 +407,21 @@ int getchar_unlocked(void) {
 #define MACOS_SEOF  0x20
 #define MACOS_SERR  0x40
 
-/* macify_sync_stdio_flags — sync glibc EOF/error to macOS _flags.
- * CRITICAL: On glibc, offset 0x10 is _IO_read_end (a pointer), NOT
- * _flags. Writing to it corrupts the pointer and breaks buffer management.
- * We must NOT write to offset 0x10.
- *
- * Instead, we only sync flags when the stream is at EOF (buffer empty).
- * At EOF, _IO_read_end == _IO_read_ptr, so corrupting _IO_read_end is
- * safe (both are NULL or equal). But to be completely safe, we skip
- * the sync entirely — the __srget/fread shims already handle EOF by
- * returning -1/0, which the macOS binary interprets correctly. */
+/* macify_sync_stdio_flags — called on EOF/error paths only.
+ * Sets macOS __SEOF/__SERR bits at offset 0x10 (low byte of glibc's
+ * _IO_read_end). Only called when fread/fgetc returns 0/EOF, at which
+ * point the buffer is empty and modifying _IO_read_end is safe. */
 static inline void macify_sync_stdio_flags(FILE *fp) {
-    /* Do nothing — don't corrupt _IO_read_end (offset 0x10).
-     * macOS code checks _flags at offset 0x10 for EOF/error, but
-     * since we force every getc through __srget (which returns -1
-     * on EOF), the macOS binary detects EOF correctly without
-     * needing _flags to be set. */
-    (void)fp;
+    unsigned int glibc_flags = *(unsigned int *)((char *)fp + 0);
+    unsigned char *p10 = (unsigned char *)fp + 0x10;
+    if (glibc_flags & 0x10)  /* _IO_EOF_SEEN */
+        *p10 |= 0x20;   /* Set __SEOF */
+    else
+        *p10 &= ~0x20;  /* Clear __SEOF */
+    if (glibc_flags & 0x20)  /* _IO_ERR_SEEN */
+        *p10 |= 0x40;   /* Set __SERR */
+    else
+        *p10 &= ~0x40;  /* Clear __SERR */
 }
 
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fread");
@@ -427,23 +431,22 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     /* Restore saved _IO_read_ptr before calling fread (like __srget) */
     macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
-    if (getenv("MACIFY_TRACE_FREAD")) {
-        char b[256];
-        int n = snprintf(b, sizeof(b), "macify: fread(%p, %zu, %zu, %p) = %zu\n",
-                ptr, size, nmemb, (void*)stream, r);
-        (void)write(2, b, n);
-    }
     if (r == 0) {
-        /* EOF or error — buffer is empty, safe to sync flags */
+        /* EOF or error — just restore _IO_read_ptr.
+         * Don't write to offset 0x10 (_IO_read_end) — it corrupts
+         * the pointer. The caller detects EOF via fread returning 0. */
         macify_restore_read_ptr(stream);
-        macify_sync_stdio_flags(stream);
     } else {
         /* Data was read. Save _IO_read_ptr and set _r = -1 to prevent
          * inlined getc from dereferencing _p (glibc _flags) → SIGSEGV.
-         * Also clear macOS error flag (bit 0x40) at offset 0x10. */
-        macify_save_read_ptr(stream);
-        *(int *)((char *)stream + 8) = -1;
-        unsigned char *p10 = (unsigned char *)stream + 0x10;
+         * Only do this for stdin (where inlined getc is used).
+         * For file streams (opened via fopen), sort uses fread directly,
+         * so _r = -1 is not needed and corrupts _IO_read_ptr. */
+        extern FILE *__stdinp;
+        if (stream == __stdinp) {
+            macify_save_read_ptr(stream);
+            *(int *)((char *)stream + 8) = -1;
+        }
     }
     return r;
 }
@@ -461,7 +464,7 @@ int macify_fgetc(FILE *stream) {
         *(int *)((char *)stream + 8) = -1;
     } else {
         macify_restore_read_ptr(stream);
-        macify_sync_stdio_flags(stream);
+        /* skip */
     }
     return r;
 }
@@ -590,10 +593,14 @@ int macify_fputc(int ch, FILE *stream) {
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc(ch, stream);
     if (r != EOF) {
-        *(int *)((char *)stream + 0x0c) = -1;  /* _w = -1 */
-        /* Clear bit 0x40 of _IO_read_end (offset 0x10) — macOS checks
-         * this for __SERR after writes. See __srget for details. */
-        *((unsigned char *)stream + 0x10) &= ~0x40;
+        /* Only set _w=-1 and clear SERR for stdout/stderr.
+         * For other streams (temp files), writing to offset 0x0c
+         * corrupts _IO_read_ptr and crashes glibc. */
+        extern FILE *__stdoutp, *__stderrp;
+        if (stream == __stdoutp || stream == __stderrp) {
+            *(int *)((char *)stream + 0x0c) = -1;  /* _w = -1 */
+            macify_clear_serr_flag(stream);
+        }
     }
     return r;
 }
@@ -604,7 +611,7 @@ size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
     size_t r = real_fwrite(ptr, size, nmemb, stream);
     if (r > 0) {
-        *((unsigned char *)stream + 0x10) &= ~0x40;
+        macify_clear_serr_flag(stream);
     }
     return r;
 }
@@ -619,25 +626,24 @@ int macify_printf(const char *fmt, ...) {
     int r = real_vfprintf(stdout, fmt, ap);
     va_end(ap);
     if (r >= 0) {
-        *((unsigned char *)stdout + 0x10) &= ~0x40;
+        macify_clear_serr_flag(stdout);
     }
     return r;
 }
 
-/* vfprintf — unwrap and clear __SERR. CRITICAL: macOS code checks
- * [stdout+0x10] & 0x40 for errors after vfprintf returns. */
+/* vfprintf — clear __SERR. */
 int macify_vfprintf(FILE *stream, const char *fmt, va_list ap) __asm__("vfprintf");
 int macify_vfprintf(FILE *stream, const char *fmt, va_list ap) {
     static int (*real_vfprintf)(FILE *, const char *, va_list) = NULL;
     if (!real_vfprintf) real_vfprintf = dlsym(RTLD_NEXT, "vfprintf");
     int r = real_vfprintf(stream, fmt, ap);
     if (r >= 0) {
-        *((unsigned char *)stream + 0x10) &= ~0x40;
+        macify_clear_serr_flag(stream);
     }
     return r;
 }
 
-/* fprintf — unwrap and clear __SERR */
+/* fprintf — clear __SERR */
 int macify_fprintf(FILE *stream, const char *fmt, ...) __asm__("fprintf");
 int macify_fprintf(FILE *stream, const char *fmt, ...) {
     static int (*real_vfprintf)(FILE *, const char *, va_list) = NULL;
@@ -647,7 +653,7 @@ int macify_fprintf(FILE *stream, const char *fmt, ...) {
     int r = real_vfprintf(stream, fmt, ap);
     va_end(ap);
     if (r >= 0) {
-        *((unsigned char *)stream + 0x10) &= ~0x40;
+        macify_clear_serr_flag(stream);
     }
     return r;
 }
@@ -659,7 +665,7 @@ int macify_fputs(const char *s, FILE *stream) {
     if (!real_fputs) real_fputs = dlsym(RTLD_NEXT, "fputs");
     int r = real_fputs(s, stream);
     if (r >= 0) {
-        *((unsigned char *)stream + 0x10) &= ~0x40;
+        macify_clear_serr_flag(stream);
     }
     return r;
 }
