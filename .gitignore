@@ -45,3 +45,8 @@ upload/
 core
 core.*
 .env
+
+# Stray files from previous development
+shim_pthread.c
+mac-ify/
+download/
