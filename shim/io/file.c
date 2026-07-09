@@ -76,6 +76,9 @@ int macify_isatty(int fd) {
             "macify: isatty(%d) = %d\n", fd, r);
         (void)write(2, b, n);
     }
+    /* isatty returns 0 for non-terminals but glibc's isatty leaves
+     * errno set to ENOTTY. Clear it so Rust doesn't read stale errno. */
+    if (r == 0) errno = 0;
     return r;
 }
 
@@ -213,7 +216,7 @@ int macify___xstat(int ver, const char *path, struct macos_stat *buf) {
             ret == 0 ? ls.st_mode : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -239,7 +242,7 @@ int macify___lxstat(int ver, const char *path, struct macos_stat *buf) {
             path ? path : "(null)", ret, ret ? errno : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -256,7 +259,7 @@ int macify___fxstat(int ver, int fd, struct macos_stat *buf) {
             "macify: __fxstat(%d) = %d errno=%d\n", fd, ret, ret ? errno : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -361,7 +364,14 @@ int macify_stat(const char *path, struct macos_stat *buf) {
             ret == 0 ? ls.st_mode : 0, ret == 0 ? (long)ls.st_size : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) { translate_stat(&ls, buf); }
+    if (ret == 0) {
+        translate_stat(&ls, buf);
+        /* Clear errno on success — glibc may leave stale errno from
+         * a prior failed call (e.g. open of non-existent config file).
+         * Rust binaries like bat read errno via __error() even after
+         * successful calls in some code paths. */
+        errno = 0;
+    }
     return ret;
 }
 
@@ -388,7 +398,7 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
             eff != path ? " [translated]" : "", ret, ret ? errno : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) { translate_stat(&ls, buf); }
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -404,7 +414,7 @@ int macify_fstat(int fd, struct macos_stat *buf) {
             "macify: fstat(%d) = %d errno=%d\n", fd, ret, ret ? errno : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -430,7 +440,7 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
             dirfd, pathname ? pathname : "(null)", flags, linux_flags, ret, ret ? errno : 0);
         (void)write(2, b, n);
     }
-    if (ret == 0) translate_stat(&ls, buf);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
 
@@ -463,7 +473,8 @@ int macify_access(const char *path, int mode) __asm__("access");
 int macify_access(const char *path, int mode) {
     static int (*real_access)(const char *, int) = NULL;
     if (!real_access) real_access = dlsym(RTLD_NEXT, "access");
-    if (!macify_caller_is_macos_text(__builtin_return_address(0)))
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    if (!is_macos)
         return real_access(path, mode);
     const char *eff = path;
     char tp[4096];
@@ -473,7 +484,15 @@ int macify_access(const char *path, int mode) {
         extern int macify_translate_path(const char *, char *, size_t);
         if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
     }
-    return real_access(eff, mode);
+    int r = real_access(eff, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: access(\"%s\", %d) = %d errno=%d\n",
+            path ? path : "(null)", mode, r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    if (r == 0) errno = 0;
+    return r;
 }
 
 /* ── faccessat ───────────────────────────────────────────────── */
@@ -625,6 +644,11 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
     static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "getpwuid_r");
     if (!real) { errno = ENOSYS; return -1; }
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwuid_r(%u) [enter]\n", uid);
+        (void)write(2, b, n);
+    }
     /* Call real getpwuid_r with a Linux-format struct passwd.
      * Then translate to macOS format in the caller's buffer.
      * CRITICAL: The caller (bat/Rust) expects macOS passwd layout.
@@ -661,6 +685,13 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
     } else {
         *result = NULL;
     }
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwuid_r(%u) = %d result=%p dir=%s\n",
+            uid, r, result ? (void *)*result : NULL,
+            (r == 0 && result && *result) ? ((struct macos_passwd *)*result)->pw_dir : "(null)");
+        (void)write(2, b, n);
+    }
     return r;
 }
 
@@ -685,4 +716,77 @@ struct passwd *macify_getpwnam(const char *name) {
     macos_pw.pw_shell = macos_pw_shell;
     macos_pw.pw_expire = 0;
     return (struct passwd *)&macos_pw;
+}
+
+/* ── unlink / rename / rmdir / chdir / close ─────────────────── */
+/* Tracing shims for path-based functions that can return ENOENT,
+ * to identify which call bat fails on. */
+
+int macify_unlink(const char *path) __asm__("unlink");
+int macify_unlink(const char *path) {
+    static int (*real)(const char *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "unlink");
+    int r = real(path);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: unlink(\"%s\") = %d errno=%d\n",
+            path ? path : "(null)", r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+int macify_rename(const char *old, const char *newp) __asm__("rename");
+int macify_rename(const char *old, const char *newp) {
+    static int (*real)(const char *, const char *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "rename");
+    int r = real(old, newp);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: rename(\"%s\", \"%s\") = %d errno=%d\n",
+            old ? old : "(null)", newp ? newp : "(null)", r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+int macify_rmdir(const char *path) __asm__("rmdir");
+int macify_rmdir(const char *path) {
+    static int (*real)(const char *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "rmdir");
+    int r = real(path);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: rmdir(\"%s\") = %d errno=%d\n",
+            path ? path : "(null)", r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+int macify_chdir(const char *path) __asm__("chdir");
+int macify_chdir(const char *path) {
+    static int (*real)(const char *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "chdir");
+    int r = real(path);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: chdir(\"%s\") = %d errno=%d\n",
+            path ? path : "(null)", r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+int macify_close(int fd) __asm__("close");
+int macify_close(int fd) {
+    static int (*real)(int) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "close");
+    int r = real(fd);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: close(%d) = %d errno=%d\n", fd, r, r ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return r;
 }

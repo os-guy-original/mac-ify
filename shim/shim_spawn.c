@@ -264,6 +264,23 @@ static int do_posix_spawn(pid_t *pid, const char *path,
         }
     }
 
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: posix_spawn%s(\"%s\") = %d%s\n",
+            use_path ? "p" : "",
+            path ? path : "(null)",
+            ret,
+            (argv && argv[0]) ? "" : "");
+        (void)write(2, b, n);
+        if (argv) {
+            int i;
+            for (i = 0; argv[i] && i < 8; i++) {
+                n = snprintf(b, sizeof(b), "  argv[%d] = \"%s\"\n", i, argv[i]);
+                (void)write(2, b, n);
+            }
+        }
+    }
+
     /* Call glibc's real destroy functions, NOT our overrides.
      * Our overrides expect macOS-format buffers; these are glibc structs. */
     {
@@ -289,4 +306,36 @@ int macify_posix_spawnp(void *pid, const char *file, const void *fa,
 int macify_posix_spawnp(void *pid, const char *file, const void *fa,
                         const void *attrp, char *const argv[], char *const envp[]) {
     return do_posix_spawn((pid_t *)pid, file, fa, attrp, argv, envp, 1);
+}
+
+/* execvp — execute a program using PATH search.
+ * macOS binaries call this to spawn subprocesses (e.g., bat spawning a pager).
+ * Without a shim, execvp goes directly to glibc, which is fine functionally,
+ * but we add a trace to catch ENOENT from missing programs. */
+int macify_execvp(const char *file, char *const argv[], char *const envp[]) __asm__("execvpe");
+int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
+    static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
+    if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
+    int ret = real_execvpe ? real_execvpe(file, argv, envp) : -1;
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: execvpe(\"%s\") = %d errno=%d\n",
+            file ? file : "(null)", ret, ret < 0 ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return ret;
+}
+
+int macify_execvp2(const char *file, char *const argv[]) __asm__("execvp");
+int macify_execvp2(const char *file, char *const argv[]) {
+    static int (*real_execvp)(const char *, char *const []) = NULL;
+    if (!real_execvp) real_execvp = dlsym(RTLD_NEXT, "execvp");
+    int ret = real_execvp ? real_execvp(file, argv) : -1;
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: execvp(\"%s\") = %d errno=%d\n",
+            file ? file : "(null)", ret, ret < 0 ? errno : 0);
+        (void)write(2, b, n);
+    }
+    return ret;
 }

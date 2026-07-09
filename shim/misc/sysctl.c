@@ -286,6 +286,12 @@ int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
     (void)newp; (void)newlen;
     if (!name) return -1;
 
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: sysctlbyname(\"%s\")\n", name);
+        (void)write(2, b, n);
+    }
+
     /* Handle common Rust runtime queries */
     if (strcmp(name, "hw.ncpu") == 0 || strcmp(name, "hw.logicalcpu") == 0 ||
         strcmp(name, "hw.physicalcpu") == 0) {
@@ -398,6 +404,11 @@ int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
         return 0;
     }
 
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: sysctlbyname(\"%s\") = -1 ENOENT (UNKNOWN)\n", name);
+        (void)write(2, b, n);
+    }
     errno = ENOENT;
     return -1;
 }

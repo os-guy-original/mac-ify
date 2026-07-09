@@ -457,12 +457,22 @@ int macify_should_hide_path(const char *path) {
     /* Hide ~/.config/bat/ — bat should use ~/Library/Caches/bat instead */
     if (strncmp(rest, ".config/bat", 11) == 0 &&
         (rest[11] == '\0' || rest[11] == '/')) {
+        if (getenv("MACIFY_TRACE_OPEN")) {
+            char b[512]; int n = snprintf(b, sizeof(b),
+                "macify: HIDE \"%s\" (returning ENOENT)\n", path);
+            (void)write(2, b, n);
+        }
         return 1;
     }
 
     /* Hide ~/.cache/bat/ — same reason */
     if (strncmp(rest, ".cache/bat", 10) == 0 &&
         (rest[10] == '\0' || rest[10] == '/')) {
+        if (getenv("MACIFY_TRACE_OPEN")) {
+            char b[512]; int n = snprintf(b, sizeof(b),
+                "macify: HIDE \"%s\" (returning ENOENT)\n", path);
+            (void)write(2, b, n);
+        }
         return 1;
     }
 

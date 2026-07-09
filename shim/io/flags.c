@@ -161,6 +161,7 @@ int open(const char *pathname, int flags, ...) {
                 flags, linux_flags, fd);
         (void)write(2, b, n);
     }
+    if (fd >= 0) errno = 0;  /* Clear stale errno on success */
     return fd;
 }
 
@@ -211,6 +212,7 @@ int macify_open64(const char *pathname, int flags, ...) {
                 flags, linux_flags, fd);
         (void)write(2, b, n);
     }
+    if (fd >= 0) errno = 0;  /* Clear stale errno on success */
     return fd;
 }
 
@@ -272,6 +274,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
             flags, linux_flags, fd);
         (void)write(2, b, n);
     }
+    if (fd >= 0) errno = 0;  /* Clear stale errno on success */
     return fd;
 }
 
