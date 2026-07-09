@@ -69,6 +69,7 @@ extern int    (*real_open)(const char *, int, ...);
 extern int    (*real_madvise)(void *, size_t, int);
 extern int    (*real_fcntl)(int, int, ...);
 extern int    (*real_mprotect)(void *, size_t, int);
+extern long   (*real_sysconf)(int);
 
 void init_real_io_funcs(void);
 

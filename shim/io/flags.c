@@ -63,6 +63,7 @@ int    (*real_open)(const char *, int, ...);
 int    (*real_madvise)(void *, size_t, int);
 int    (*real_fcntl)(int, int, ...);
 int    (*real_mprotect)(void *, size_t, int);
+long   (*real_sysconf)(int);
 
 void init_real_io_funcs(void) {
     real_mmap     = dlsym(RTLD_NEXT, "mmap");
@@ -70,6 +71,7 @@ void init_real_io_funcs(void) {
     real_madvise  = dlsym(RTLD_NEXT, "madvise");
     real_fcntl    = dlsym(RTLD_NEXT, "fcntl");
     real_mprotect = dlsym(RTLD_NEXT, "mprotect");
+    real_sysconf  = dlsym(RTLD_NEXT, "sysconf");
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {

@@ -790,3 +790,61 @@ int macify_close(int fd) {
     }
     return r;
 }
+
+/* ── sysconf ─────────────────────────────────────────────────── */
+/* macOS _SC_* constants differ from Linux _SC_* constants.
+ * Without translation, macOS binaries call sysconf(macOS_value) which
+ * glibc interprets as a DIFFERENT parameter, returning -1 or wrong data.
+ *
+ * Key mappings:
+ *   macOS _SC_NPROCESSORS_ONLN (58) → Linux _SC_NPROCESSORS_ONLN (84)
+ *   macOS _SC_NPROCESSORS_CONF (57) → Linux _SC_NPROCESSORS_CONF (83)
+ *   macOS _SC_PAGESIZE (29)         → Linux _SC_PAGESIZE (30)
+ *   macOS _SC_CLK_TCK (3)           → Linux _SC_CLK_TCK (2)
+ *   macOS _SC_ARG_MAX (1)           → Linux _SC_ARG_MAX (0)
+ *   macOS _SC_OPEN_MAX (5)          → Linux _SC_OPEN_MAX (4)
+ *   macOS _SC_PHYS_PAGES (200)      → Linux _SC_PHYS_PAGES (85)
+ *
+ * IMPORTANT: Only translate for macOS callers. glibc internally calls
+ * sysconf (e.g. during dlsym, getpwuid_r), and those must use Linux
+ * parameter numbers directly. */
+long macify_sysconf(int name) __asm__("sysconf");
+long macify_sysconf(int name) {
+    LAZY_INIT_IO();
+
+    /* Only translate for macOS callers — glibc's internal sysconf calls
+     * use Linux parameter numbers and must not be translated. */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        return real_sysconf(name);
+    }
+
+    /* Translate macOS _SC_* to Linux _SC_* */
+    int linux_name = name;
+    switch (name) {
+        case 1:  linux_name = _SC_ARG_MAX; break;             /* macOS _SC_ARG_MAX */
+        case 2:  linux_name = _SC_CHILD_MAX; break;           /* macOS _SC_CHILD_MAX */
+        case 3:  linux_name = _SC_CLK_TCK; break;             /* macOS _SC_CLK_TCK */
+        case 4:  linux_name = _SC_NGROUPS_MAX; break;         /* macOS _SC_NGROUPS_MAX */
+        case 5:  linux_name = _SC_OPEN_MAX; break;            /* macOS _SC_OPEN_MAX */
+        case 6:  linux_name = _SC_JOB_CONTROL; break;         /* macOS _SC_JOB_CONTROL */
+        case 7:  linux_name = _SC_SAVED_IDS; break;           /* macOS _SC_SAVED_IDS */
+        case 8:  linux_name = _SC_VERSION; break;             /* macOS _SC_VERSION */
+        case 26: linux_name = _SC_STREAM_MAX; break;          /* macOS _SC_STREAM_MAX */
+        case 27: linux_name = _SC_TZNAME_MAX; break;          /* macOS _SC_TZNAME_MAX */
+        case 29: linux_name = _SC_PAGESIZE; break;            /* macOS _SC_PAGESIZE */
+        case 57: linux_name = _SC_NPROCESSORS_CONF; break;    /* macOS _SC_NPROCESSORS_CONF */
+        case 58: linux_name = _SC_NPROCESSORS_ONLN; break;    /* macOS _SC_NPROCESSORS_ONLN */
+        case 200: linux_name = _SC_PHYS_PAGES; break;         /* macOS _SC_PHYS_PAGES */
+        default: linux_name = name; break;  /* pass through for unknown */
+    }
+
+    long r = real_sysconf(linux_name);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: sysconf(%d->%d) = %ld errno=%d\n",
+            name, linux_name, r, r == -1 ? errno : 0);
+        (void)write(2, b, n);
+    }
+    if (r != -1) errno = 0;
+    return r;
+}
