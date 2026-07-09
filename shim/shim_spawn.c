@@ -162,6 +162,51 @@ int macify_posix_spawn_file_actions_addopen(void *fa, int fd, const char *path, 
     return 0;
 }
 
+/* posix_spawn_file_actions_addinherit_np — macOS-specific function
+ * to mark an fd as inheritable by the spawned process.
+ * On Linux, fds are inheritable by default (unless O_CLOEXEC is set).
+ * This is a no-op on Linux. */
+int macify_posix_spawn_file_actions_addinherit_np(void *fa, int fd) __asm__("posix_spawn_file_actions_addinherit_np");
+int macify_posix_spawn_file_actions_addinherit_np(void *fa, int fd) {
+    (void)fa; (void)fd;
+    return 0;  /* no-op — Linux fds are inheritable by default */
+}
+
+/* posix_spawn_file_actions_addchdir_np — macOS-specific chdir action */
+int macify_posix_spawn_file_actions_addchdir_np(void *fa, const char *path) __asm__("posix_spawn_file_actions_addchdir_np");
+int macify_posix_spawn_file_actions_addchdir_np(void *fa, const char *path) {
+    if (!fa || !path) return EINVAL;
+    macify_file_actions_t *mfa = *(macify_file_actions_t **)fa;
+    if (!mfa) return EINVAL;
+    macify_spawn_action_t *act = calloc(1, sizeof(macify_spawn_action_t));
+    if (!act) return ENOMEM;
+    act->type = 3;  /* chdir */
+    act->path = strdup(path);
+    if (!act->path) { free(act); return ENOMEM; }
+    if (mfa->tail) mfa->tail->next = act;
+    else mfa->head = act;
+    mfa->tail = act;
+    mfa->count++;
+    return 0;
+}
+
+/* posix_spawn_file_actions_addfchdir_np — macOS-specific fchdir action */
+int macify_posix_spawn_file_actions_addfchdir_np(void *fa, int fd) __asm__("posix_spawn_file_actions_addfchdir_np");
+int macify_posix_spawn_file_actions_addfchdir_np(void *fa, int fd) {
+    if (!fa) return EINVAL;
+    macify_file_actions_t *mfa = *(macify_file_actions_t **)fa;
+    if (!mfa) return EINVAL;
+    macify_spawn_action_t *act = calloc(1, sizeof(macify_spawn_action_t));
+    if (!act) return ENOMEM;
+    act->type = 4;  /* fchdir */
+    act->fd = fd;
+    if (mfa->tail) mfa->tail->next = act;
+    else mfa->head = act;
+    mfa->tail = act;
+    mfa->count++;
+    return 0;
+}
+
 static int do_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions, const void *attrp,
                           char *const argv[], char *const envp[],

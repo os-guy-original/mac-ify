@@ -1,4 +1,14 @@
 #include "macify.h"
+#include <errno.h>
+
+/* Stub function for unresolved macOS symbols.
+ * Returns -1 with errno=ENOSYS. Safe for most functions that
+ * return int/ssize_t/void*. Not safe for functions returning
+ * pointers (returns -1 cast to pointer). */
+long macify_unresolved_stub(void) {
+    errno = ENOSYS;
+    return -1;
+}
 
 /* ULEB128 / SLEB128 readers — used by LC_DYLD_INFO bind/rebase bytecode. */
 
@@ -167,9 +177,13 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                  * extra handles (libz, libncurses, etc.) → $-suffix strip */
                 void *addr = resolve_symbol(ordinal - 1, sym);
                 if (!addr) {
-                    fprintf(stderr, "macify: cannot resolve symbol '%s' from %s\n",
-                            sym, g_dylibs[ordinal - 1].name);
-                    return -1;
+                    /* For unresolved symbols, provide a stub that returns -1/NULL. */
+                    extern long macify_unresolved_stub(void);
+                    addr = (void *)macify_unresolved_stub;
+                    if (getenv("MACIFY_VERBOSE")) {
+                        fprintf(stderr, "macify: stubbing unresolved symbol '%s' from %s\n",
+                                sym, g_dylibs[ordinal - 1].name);
+                    }
                 }
 
                 /* Compute target address */
@@ -217,8 +231,8 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                     if (sym[0] == '_') sym++;
                     void *addr = resolve_symbol(ordinal - 1, sym);
                     if (!addr) {
-                        fprintf(stderr, "macify: cannot resolve '%s' in DO_BIND_ULEB_TIMES\n", sym);
-                        return -1;
+                        extern long macify_unresolved_stub(void);
+                        addr = (void *)macify_unresolved_stub;
                     }
 
                     uint64_t target = g_segments[seg_index].vmaddr + seg_offset;
@@ -566,8 +580,12 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                                 if (getenv("MACIFY_VERBOSE")) fflush(stderr);
                             }
                         } else {
+                            /* Stub unresolved symbols instead of leaving GOT as NULL */
+                            extern long macify_unresolved_stub(void);
+                            addr = (void *)macify_unresolved_stub;
+                            *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
                             if (getenv("MACIFY_TRACE_FIXUPS")) {
-                                fprintf(stderr, "macify: chained fixup UNRESOLVED: sym=%s lib_ordinal=%d\n",
+                                fprintf(stderr, "macify: chained fixup STUBBED: sym=%s lib_ordinal=%d\n",
                                         sym, lib_ordinal);
                             }
                         }
