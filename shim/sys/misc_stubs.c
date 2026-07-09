@@ -413,72 +413,27 @@ int connectx(int socket, const void *endpoints, unsigned int endpointslen,
  * and makecontext so OpenSSL's async init doesn't fail. The async API
  * won't actually work (contexts are invalid), but SSL_CTX_new succeeds
  */
-/* OpenSSL OSSL_LIB_CTX stubs ---------------------------------
- * curl 8.x uses SSL_CTX_new_ex(libctx, ...) which requires an OSSL_LIB_CTX.
- * On macOS, curl is built with its own copy of OpenSSL, so OSSL_LIB_CTX
- * is an opaque struct allocated by OSSL_LIB_CTX_new(). We provide a
- * minimal stub: OSSL_LIB_CTX_new returns a non-NULL sentinel, and
- * OSSL_LIB_CTX_free is a no-op. SSL_CTX_new_ex then uses this libctx
- * to create the SSL context.
+/* OpenSSL OSSL_LIB_CTX functions -------------------------------
+ * REMOVED: Previously we provided stub implementations of OSSL_LIB_CTX_new,
+ * OSSL_LIB_CTX_free, OPENSSL_init_crypto, OPENSSL_init_ssl, etc.
  *
- * The actual OpenSSL library on the system (libssl.so) has its own
- * internal OSSL_LIB_CTX, but since curl was compiled expecting the
- * macOS OpenSSL symbols, we provide these stubs. The system's libssl
- * will use its own internal default context when SSL_CTX_new_ex is
- * called with our stub libctx (it ignores the libctx parameter if
- * OPENSSL_init_crypto hasn't been called with it). */
-
-static char macify_ossl_lib_ctx_sentinel[64] __attribute__((aligned(16))) = {0};
-
-void *OSSL_LIB_CTX_new(void) {
-    return macify_ossl_lib_ctx_sentinel;
-}
-void OSSL_LIB_CTX_free(void *ctx) {
-    (void)ctx;
-}
-void *OSSL_LIB_CTX_get0_global_default(void) {
-    return macify_ossl_lib_ctx_sentinel;
-}
-void *OSSL_LIB_CTX_get_data(void *ctx, int idx) {
-    (void)ctx; (void)idx;
-    return NULL;
-}
-int OSSL_LIB_CTX_load_config(void *ctx, const char *config) {
-    (void)ctx; (void)config;
-    return 1;  /* success */
-}
-int OSSL_LIB_CTX_get_conf_diagnostics(void *ctx) {
-    (void)ctx;
-    return 0;
-}
-
-/* OPENSSL_init_crypto - curl's internal OpenSSL calls this to initialize
- * crypto subsystems. We wrap it to debug failures: if it returns 0
- * (failure), we print the ossl_init_*_ret_ globals to see which init
- * step failed.
+ * These stubs were HARMFUL: resolve_symbol() checks the shim first, so
+ * our stubs were called INSTEAD of the real ones from libcrypto.so.3 /
+ * libssl.so.3. This meant OpenSSL's default provider was never loaded
+ * and cipher tables were never initialized, causing TLS handshake
+ * failures ("illegal parameter" alert after Server Hello).
  *
- * However, curl's OPENSSL_init_crypto is STATICALLY LINKED into the curl
- * binary, so our shim's OPENSSL_init_crypto is NOT called by curl's
- * internal code. It may be called by other code though. We just pass
- * through to... well, there's nothing to pass through to. We return 1
- * (success) since we can't actually initialize curl's internal OpenSSL. */
-int OPENSSL_init_crypto(uint64_t settings, void *opts) {
-    (void)settings; (void)opts;
-    if (getenv("MACIFY_SSL_DEBUG")) {
-        const char msg[] = "SSL_DEBUG: OPENSSL_init_crypto called (returning 1)\n";
-        (void)write(2, msg, sizeof(msg)-1);
-    }
-    return 1;
-}
-
-int OPENSSL_init_ssl(uint64_t settings, void *opts) {
-    (void)settings; (void)opts;
-    if (getenv("MACIFY_SSL_DEBUG")) {
-        const char msg[] = "SSL_DEBUG: OPENSSL_init_ssl called (returning 1)\n";
-        (void)write(2, msg, sizeof(msg)-1);
-    }
-    return 1;
-}
+ * The macOS curl binary dynamically links against libssl.3.dylib /
+ * libcrypto.3.dylib, which our loader maps to libssl.so.3 /
+ * libcrypto.so.3. By NOT providing these symbols in the shim,
+ * resolve_symbol() finds the real implementations from the loaded
+ * libssl.so.3 / libcrypto.so.3 libraries (via the extra handle
+ * mechanism), ensuring proper OpenSSL initialization.
+ *
+ * If a macOS binary uses OpenSSL but libcrypto.so.3 / libssl.so.3 are
+ * not available on the system, the binary will fail to load — which
+ * is the correct behavior (better than silently using stubs that
+ * return success without doing anything). */
 
 /* proc_* functions are implemented in shim_mach.c with real /proc reading */
 

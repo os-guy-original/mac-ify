@@ -354,7 +354,19 @@ int main(int argc, char **argv, char **envp) {
                 /* libintl is part of glibc on Linux — no separate library */
                 extra1 = NULL;
             }
-            if (extra1) register_extra_handle(extra1);
+            if (extra1) {
+                register_extra_handle(extra1);
+                if (g_verbose)
+                    fprintf(stderr, "macify:   extra1 loaded for \"%s\"\n", name);
+            } else if (g_verbose) {
+                /* Check if this dylib should have had an extra but didn't */
+                if (strstr(name, "libssl") || strstr(name, "libcrypto") ||
+                    strstr(name, "libcurl") || strstr(name, "libssh2") ||
+                    strstr(name, "libnghttp") || strstr(name, "libzstd") ||
+                    strstr(name, "libpsl") || strstr(name, "libz") ||
+                    strstr(name, "libiconv") || strstr(name, "libresolv"))
+                    fprintf(stderr, "macify:   WARNING: no extra1 loaded for \"%s\"\n", name);
+            }
 
             if (!shim_handle || !libc_handle) {
                 fprintf(stderr, "macify: failed to load shim/libc for %s: shim=%p libc=%p: %s\n",
