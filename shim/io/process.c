@@ -112,7 +112,7 @@ ssize_t macify_write(int fd, const void *buf, size_t count) {
         char b[256]; int n = snprintf(b, sizeof(b),
             "macify: write(%d, %p, %zu) = %zd\n",
             fd, buf, count, r);
-        syscall(1, 2, b, n);  /* raw write(2, b, n) to avoid recursion */
+        syscall(1, 2, b, n);
     }
     if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
         errno = macify_linux_to_macos_errno(errno);

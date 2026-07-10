@@ -373,9 +373,6 @@ int main(int argc, char **argv, char **envp) {
                    cmd == LC_REEXPORT_DYLIB || cmd == LC_LAZY_LOAD_DYLIB) {
             dylib_command *dc = (dylib_command *)(void *)lc;
             const char *name = (const char *)(lc + dc->name_offset);
-            if (g_verbose) {
-                fprintf(stderr, "macify: processing LC_LOAD_DYLIB cmd=%u name=%s\n", cmd, name ? name : "(null)");
-            }
             const char *cmd_name =
                 (cmd == LC_LOAD_DYLIB)       ? "LC_LOAD_DYLIB" :
                 (cmd == LC_LOAD_WEAK_DYLIB)  ? "LC_LOAD_WEAK_DYLIB" :
@@ -426,15 +423,15 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: too many dylibs (max %d)\n", MAX_DYLIBS);
                 return 1;
             }
-            if (g_verbose) fprintf(stderr, "macify:   about to dlopen shim\n");
+            /* Load shim and libc. The shim provides macOS-specific functions
+             * (__errno, _NSGetEnviron, mach_*, objc_*, dispatch_*, etc.) that
+             * glibc lacks; libc.so.6 provides standard C functions. We store
+             * both handles — the bind interpreter tries the shim first, then
+             * libc, then libm. RTLD_GLOBAL makes shim symbols visible to
+             * subsequently-loaded libraries. */
             void *shim_handle = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
-            if (g_verbose) fprintf(stderr, "macify:   shim=%p\n", shim_handle);
-            if (g_verbose) fprintf(stderr, "macify:   about to dlopen libc\n");
             void *libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
-            if (g_verbose) fprintf(stderr, "macify:   libc=%p\n", libc_handle);
-            if (g_verbose) fprintf(stderr, "macify:   about to dlopen libm\n");
             void *libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
-            if (g_verbose) fprintf(stderr, "macify:   dlopen done: shim=%p libc=%p libm=%p\n", shim_handle, libc_handle, libm_handle);
 
             /* Map macOS library names to Linux equivalents.
              * IMPORTANT: @@HOMEBREW_PREFIX@@ and resolved (@rpath/@loader_path)
@@ -456,7 +453,6 @@ int main(int argc, char **argv, char **envp) {
                     rest = name + strlen("@@HOMEBREW_PREFIX@@");
                     snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
                 }
-                if (g_verbose) fprintf(stderr, "macify:   loading dylib: %s -> %s\n", name, real_path);
                 /* Load as Mach-O dylib (not dlopen which expects ELF) */
                 int rc = macho_load_dylib(real_path);
                 if (g_verbose) {
@@ -659,6 +655,11 @@ int main(int argc, char **argv, char **envp) {
      * pointer, whose low byte can have bits 0x20/0x40 set, causing false
      * EOF/error detection.
      *
+     * SKIP for large/complex binaries (text > 100KB) — the pattern matching
+     * is too aggressive and can corrupt unrelated code. The 0xfbad2000 page
+     * mapping (in the shim constructor) handles the crash case safely.
+     * Enable with MACIFY_PATCH_EOF=1 for binaries that need it.
+     *
      * FIX (only when BOTH patterns are found):
      *   1. NOP the getc macro's _r store (prevents _IO_read_ptr corruption)
      *   2. Change getc's jle to jmp (always call __srget for correct data)
@@ -672,6 +673,16 @@ int main(int argc, char **argv, char **envp) {
         if (text_sec) {
             uint8_t *text = (uint8_t *)(uintptr_t)text_sec->addr;
             size_t size = text_sec->size;
+
+            /* Skip EOF/getc patching for large binaries or when disabled.
+             * The pattern matching is too aggressive for complex programs
+             * like bash — it corrupts unrelated code. The 0xfbad2000 page
+             * mapping handles the crash case safely. */
+            if (size > 100000 && !getenv("MACIFY_PATCH_EOF")) {
+                if (g_verbose)
+                    fprintf(stderr, "macify: skipping __SEOF/__SERR patching (text=%zu bytes > 100KB)\n", size);
+                goto skip_eof_patch;
+            }
 
             /* Step 1: Count __SEOF/__SERR checks */
             int eof_check_count = 0;
@@ -804,6 +815,7 @@ int main(int argc, char **argv, char **envp) {
             }
         }
     }
+    skip_eof_patch: ;
 
     /* Patch close_stdout to return 0 immediately.
      * macOS close_stdout checks [FILE* + 0x10] & 0x40 for __SERR (error).

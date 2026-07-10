@@ -544,21 +544,17 @@ int atexit(void (*func)(void)) {
  * exit() from libSystem, we catch it here. */
 void macify_print_ret_globals(void);  /* defined in shim_pthread.c */
 void exit(int status) {
-    /* When MACIFY_SSL_DEBUG is set, print OpenSSL's ossl_init_*_ret_
-     * globals so we can see which RUN_ONCE init function returned 0
-     * (causing OPENSSL_init_crypto to fail). Must run before fflush
-     * so the output isn't reordered. */
-    if (getenv("MACIFY_SSL_DEBUG")) {
-        macify_print_ret_globals();
-    }
-    /* Skip atexit handlers - the macify loader calls SYS_exit_group
-     * directly, so atexit handlers (including close_stdout) are not
-     * expected to run. This prevents false "write error" from
-     * close_stdout's FILE* layout incompatibility. */
-    /* extern void __cxa_finalize(void *); */
-    /* __cxa_finalize(NULL); */
     fflush(NULL);  /* Flush all stdio streams */
     _exit(status);
+}
+
+/* _exit — raw system exit. macOS binaries call _exit when they want to
+ * exit immediately without flushing stdio. We must NOT resolve _exit to
+ * exit() — that would cause double-flushing and incorrect behavior.
+ * Export _exit so chained fixups find it directly instead of finding exit(). */
+void _exit(int status) {
+    syscall(231, status);  /* SYS_exit_group */
+    __builtin_unreachable();
 }
 /* macOS asprintf (glibc may not export it on all versions). */
 #include <stdarg.h>
