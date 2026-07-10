@@ -296,11 +296,11 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         struct k_sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.handler = crash_handler;
-        /* SA_SIGINFO=4 | SA_NODEFER=0x40000000 | SA_RESTORER=0x01000000
+        /* SA_SIGINFO=0x4 | SA_NODEFER=0x40000000 | SA_RESTORER=0x04000000
          * SA_ONSTACK=0x08000000 — always use sigaltstack so the handler
          * runs on a valid stack even if the main stack is corrupted. */
         extern uint64_t g_tls_g_addr;
-        sa.flags = 0x49000004;  /* SA_SIGINFO | SA_NODEFER | SA_RESTORER | SA_ONSTACK */
+        sa.flags = 0x4C000004;  /* SA_SIGINFO | SA_NODEFER | SA_RESTORER | SA_ONSTACK */
         sa.restorer = local_restore_rt;
         memset(sa.mask, 0, sizeof(sa.mask));
         /* Raw rt_sigaction syscall: syscall(13, signum, act, oldact, sigsetsize) */

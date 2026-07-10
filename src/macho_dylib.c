@@ -291,7 +291,18 @@ static void process_dylib_rebases(uint8_t *file_data, size_t file_size,
 
 /* Process chained fixups for a dylib.
  * Chained fixups use a linked-list format within each page.
- * Each fixup is either a REBASE (add slide) or BIND (resolve symbol). */
+ * Each fixup is either a REBASE (add slide) or BIND (resolve symbol).
+ *
+ * Bit layout for DYLD_CHAINED_PTR_64_OFFSET (ptr_format=6, the most common):
+ *   bit  63      : bind flag (0=rebase, 1=bind)
+ *   bits 51-62   : next (12 bits, in units of 4 bytes)
+ *   bits 43-50   : high8 (rebase only, extends target above 2^43)
+ *   bits 0-42    : target/offset (43 bits)
+ *
+ * Rebase:  runtime = ((high8 << 43) | target) + load_base
+ *          where load_base = first non-PAGEZERO segment's slid vmaddr
+ * Bind:    bits 0-15 = ordinal (import index)
+ *          bits 16-31 = addend */
 static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
                                          int64_t slide,
                                          uint32_t fixups_off, uint32_t fixups_size,
@@ -312,23 +323,44 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
     uint8_t *imports_base = fixup_data + hdr->imports_offset;
     uint8_t *symbols_base = hdr->symbols_offset ? (fixup_data + hdr->symbols_offset) : NULL;
 
+    /* Compute load_base = first non-PAGEZERO segment's slid vmaddr.
+     * For non-PIE dylibs (vmaddr=0), load_base = slide.
+     * For PIE dylibs, load_base = first_seg_vmaddr + slide. */
+    uint64_t load_base = 0;
+    for (int i = 0; i < nsegs; i++) {
+        /* Skip __PAGEZERO (vmaddr=0 with huge vmsize) */
+        if (segs[i].vmaddr == 0 && segs[i].vmsize > 0x80000000) continue;
+        load_base = segs[i].vmaddr + slide;
+        break;
+    }
+    /* Fallback: if all segments are PAGEZERO (shouldn't happen), use slide */
+    if (load_base == 0) load_base = slide;
+
+    if (g_verbose)
+        fprintf(stderr, "macify:   dylib chained fixups: %u segs, %u imports, load_base=0x%lx\n",
+                n_image_segs, hdr->imports_count, (unsigned long)load_base);
+
     for (uint32_t si = 0; si < n_image_segs && si < (uint32_t)nsegs; si++) {
         if (seg_offsets[si] == 0) continue;
 
         uint8_t *seg_starts = starts_base + seg_offsets[si];
+        /* dyld_chained_starts_in_segment layout:
+         *   size(4) page_size(2) ptr_format(2) seg_offset(8) max_valid(4) page_count(2) page_start[](2 each)
+         *   Total header = 22 bytes, page_start[] starts at offset 22 */
         uint32_t seg_size = *(uint32_t *)seg_starts;
         uint16_t page_size = *(uint16_t *)(seg_starts + 4);
         uint16_t ptr_format = *(uint16_t *)(seg_starts + 6);
         uint64_t seg_offset = *(uint64_t *)(seg_starts + 8);
+        uint32_t max_valid = *(uint32_t *)(seg_starts + 16);
         uint16_t page_count = *(uint16_t *)(seg_starts + 20);
         uint16_t *page_starts = (uint16_t *)(seg_starts + 22);
 
-        (void)seg_size;
+        (void)seg_size; (void)max_valid; (void)seg_offset;
 
         for (uint16_t pi = 0; pi < page_count; pi++) {
             uint16_t page_start = page_starts[pi];
             if (page_start == 0xFFFF) continue;  /* DYLD_CHAINED_PTR_START_NONE */
-            if (page_start == 0 && page_count > 1 && pi > 0) continue;  /* skip empty pages */
+            /* page_start=0 means fixups start at beginning of page (valid) */
 
             /* Page base in mapped memory */
             uint8_t *page_base = (uint8_t *)(uintptr_t)(segs[si].vmaddr + slide) +
@@ -344,7 +376,7 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
             while (chain_iter < 16384) {
                 uint64_t value = *(uint64_t *)chain_ptr;
                 bool is_bind = (value >> 63) & 1;
-                uint32_t next = (value >> 51) & 0xFFF;  /* bits 48-59 */
+                uint32_t next = (value >> 51) & 0xFFF;  /* bits 51-62 */
 
                 if (is_bind) {
                     uint32_t ordinal = value & 0xFFFF;
@@ -361,23 +393,39 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
                         const char *sym = sym_name;
                         if (sym[0] == '_') sym++;
 
-                        void *addr;
-                        if (lib_ordinal == 0 || lib_ordinal >= 0xFB)
-                            addr = resolve_symbol(-1, sym);
-                        else
-                            addr = resolve_symbol(lib_ordinal - 1, sym);
+                        /* Handle special ordinals:
+                         *   0x00 (0)   = flat lookup (search all libraries)
+                         *   0xFB-0xFF  = flat lookup / main exec / self
+                         * For all special ordinals, use flat namespace lookup.
+                         *
+                         * NOTE: For non-special ordinals, we ALSO use flat lookup
+                         * because the dylib's dependencies may not be registered
+                         * in g_dylibs yet (they're registered AFTER macho_load_dylib
+                         * returns). Flat lookup via dlsym(RTLD_DEFAULT) finds
+                         * symbols in the shim/libc which are loaded with
+                         * RTLD_GLOBAL. */
+                        void *addr = resolve_symbol(-1, sym);
 
                         if (addr) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
+                        } else {
+                            /* Stub unresolved symbols */
+                            extern long macify_unresolved_stub(void);
+                            *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)macify_unresolved_stub;
+                            if (g_verbose)
+                                fprintf(stderr, "macify:   dylib chained STUBBED: %s\n", sym);
                         }
                     }
                 } else {
-                    /* REBASE: target is offset from image base, add slide */
-                    uint64_t target = value & 0xFFFFFFFFF;  /* 36 bits */
-                    uint8_t high8 = (value >> 36) & 0xFF;
-                    uint64_t full_target = ((uint64_t)high8 << 36) | target;
-                    /* For non-PIE dylibs, vmaddr=0, so full_target is the offset */
-                    *(uint64_t *)chain_ptr = full_target + slide;
+                    /* REBASE: target is offset from image base, add load_base.
+                     * Bit layout for DYLD_CHAINED_PTR_64_OFFSET (ptr_format=6):
+                     *   bits 0-42  = target (43 bits)
+                     *   bits 43-50 = high8 (extends target above 2^43)
+                     * runtime = ((high8 << 43) | target) + load_base */
+                    uint64_t target = value & 0x7FFFFFFFFFFULL;  /* 43 bits */
+                    uint8_t high8 = (value >> 43) & 0xFF;
+                    uint64_t static_offset = ((uint64_t)high8 << 43) | target;
+                    *(uint64_t *)chain_ptr = static_offset + load_base;
                 }
 
                 if (next == 0) break;

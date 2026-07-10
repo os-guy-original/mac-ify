@@ -490,8 +490,6 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
         /* Process each page */
         for (uint16_t page_idx = 0; page_idx < page_count; page_idx++) {
             uint16_t page_start = page_starts[page_idx];
-            if (g_verbose) fprintf(stderr, "macify:   page %u: start=0x%x\n", page_idx, page_start);
-            if (getenv("MACIFY_VERBOSE")) fflush(stderr);
             if (page_start == 0xFFFF) continue;  /* DYLD_CHAINED_PTR_START_NONE */
             /* page_start=0 means fixups start at beginning of page (valid) */
 
@@ -615,6 +613,24 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                 chain_ptr += (size_t)next * 4;  /* stride = 4 bytes */
                 if (chain_ptr + 8 > page_end) break;
                 chain_iter++;
+            }
+        }
+    }
+
+    /* Debug: dump all GOT entries after fixup */
+    if (getenv("MACIFY_DUMP_GOT")) {
+        for (int si = 0; si < g_nsegments; si++) {
+            if (strcmp(g_segments[si].name, "__DATA_CONST") != 0) continue;
+            /* Find __got section */
+            for (int sec_i = 0; sec_i < g_nsections; sec_i++) {
+                if (strcmp(g_sections[sec_i].segname, "__DATA_CONST") != 0) continue;
+                if (strcmp(g_sections[sec_i].sectname, "__got") != 0) continue;
+                uint64_t *got = (uint64_t *)g_sections[sec_i].addr;
+                size_t n = g_sections[sec_i].size / 8;
+                fprintf(stderr, "macify: GOT dump (%zu entries at %p):\n", n, (void*)got);
+                for (size_t i = 0; i < n; i++) {
+                    fprintf(stderr, "  GOT[%zu] = 0x%016lx\n", i, (unsigned long)got[i]);
+                }
             }
         }
     }

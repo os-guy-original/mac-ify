@@ -362,8 +362,7 @@ int main(int argc, char **argv, char **envp) {
                 /* Homebrew bottle placeholder paths — these are Mach-O dylibs
                  * that need to be loaded through our own Mach-O dylib loader,
                  * not Linux's dlopen (which expects ELF format). */
-                const char *mprefix = getenv("MACIFY_PREFIX");
-                if (!mprefix) mprefix = "/.macify";
+                const char *mprefix = macify_get_prefix();
                 char real_path[4096];
                 const char *rest;
                 if (strstr(name, "@@HOMEBREW_CELLAR@@")) {
@@ -691,23 +690,8 @@ int main(int argc, char **argv, char **envp) {
 
     /* Execute chained fixups (modern macOS 11+ format; replaces LC_DYLD_INFO
      * bind/rebase opcodes for newer binaries). */
-    if (g_verbose) { const char m[] = "BEFORE CHAINED\n"; write(2, m, sizeof(m)-1); }
     if (g_has_chained_fixups) {
         if (execute_chained_fixups(file_data, file_size) < 0) return 1;
-    }
-    if (g_verbose) { const char m[] = "AFTER CHAINED\n"; write(2, m, sizeof(m)-1); }
-    /* Skip __DATA_CONST reprotect for now */
-    /* Verify malloc_size GOT entry (debug only) */
-    if (g_verbose) {
-        for (int i = 0; i < g_nsegments; i++) {
-            if (strcmp(g_segments[i].name, "__DATA_CONST") == 0) {
-                uint64_t *got = (uint64_t *)(g_segments[i].vmaddr + 0x2b0);
-                char b[128];
-                int n = snprintf(b, sizeof(b), "macify: GOT[86] after fixups = 0x%lx\n", (unsigned long)*got);
-                write(2, b, n);
-                break;
-            }
-        }
     }
 
     /* Set up TLV (Thread-Local Variable) info in the shim. Find __thread_data
@@ -903,7 +887,6 @@ int main(int argc, char **argv, char **envp) {
             sigaction(SIGFPE,  &sa2, NULL);   /* reinstall for SIGFPE so div-by-zero
                                                * gets the full crash dump too */
         }
-        if (g_verbose) { const char m[] = "CHAINED FIXUPS DONE\n"; write(2, m, sizeof(m)-1); }
     /* Verify SIGSEGV handler is still installed */
     {
         struct sigaction check_sa;

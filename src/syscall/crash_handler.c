@@ -1,5 +1,6 @@
 /* crash_handler.c — crash handler for SIGSEGV/SIGBUS/SIGFPE */
 #include "syscall_internal.h"
+#include <fcntl.h>
 
 /* SIGILL handler — slow path.
  * 

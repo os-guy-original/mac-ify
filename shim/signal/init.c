@@ -139,7 +139,7 @@ static void macify_init_stdio(void) {
     struct k_sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.handler = macify_crash_handler;
-    sa.flags = 0x09000004;  /* SA_SIGINFO | SA_ONSTACK | SA_RESTORER */
+    sa.flags = 0x0C000004;  /* SA_SIGINFO(0x4) | SA_ONSTACK(0x08000000) | SA_RESTORER(0x04000000) */
     sa.restorer = macify_sa_restorer ? macify_sa_restorer : macify_restore_rt;
     memset(sa.mask, 0xff, sizeof(sa.mask));
     long r;

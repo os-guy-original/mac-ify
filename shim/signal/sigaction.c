@@ -28,8 +28,8 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
          * normally does this, but we're bypassing it. */
         if (act) {
             struct sigaction modified_act = *act;
-            if (!(modified_act.sa_flags & 0x01000000) && macify_sa_restorer) {
-                modified_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
+            if (!(modified_act.sa_flags & 0x04000000) && macify_sa_restorer) {
+                modified_act.sa_flags |= 0x04000000;  /* SA_RESTORER */
                 modified_act.sa_restorer = macify_sa_restorer;
             }
             return syscall(13, signum, &modified_act, oldact, 8);
@@ -111,7 +111,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         if (macos_flags & 0x0010) linux_flags |= 0x40000000;  /* SA_NODEFER */
         if (macos_flags & 0x0020) linux_flags |= 0x00000002;  /* SA_NOCLDWAIT */
         if (macos_flags & 0x0040) linux_flags |= 0x00000004;  /* SA_SIGINFO */
-        if (macos_flags & 0x0080) linux_flags |= 0x01000000;  /* SA_RESTORER (not used on macOS, but just in case) */
+        if (macos_flags & 0x0080) linux_flags |= 0x04000000;  /* SA_RESTORER (not used on macOS, but just in case) */
         linux_act.sa_flags = linux_flags;
 
         if (getenv("MACIFY_TRACE_SIGNAL")) {
@@ -147,7 +147,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
                 linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK;
                 /* Add SA_RESTORER — required on modern Linux kernels */
                 if (macify_sa_restorer) {
-                    linux_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
+                    linux_act.sa_flags |= 0x04000000;  /* SA_RESTORER */
                     linux_act.sa_restorer = macify_sa_restorer;
                 }
             }
@@ -189,7 +189,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
             }
             /* CRITICAL: Add SA_RESTORER and set sa_restorer. */
             if (macify_sa_restorer) {
-                linux_act.sa_flags |= 0x01000000;  /* SA_RESTORER */
+                linux_act.sa_flags |= 0x04000000;  /* SA_RESTORER */
                 linux_act.sa_restorer = macify_sa_restorer;
             }
             p_linux_act = &linux_act;
@@ -228,7 +228,7 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
         sa.sa_sigaction = macify_crash_handler;
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
         if (macify_sa_restorer) {
-            sa.sa_flags |= 0x01000000;  /* SA_RESTORER */
+            sa.sa_flags |= 0x04000000;  /* SA_RESTORER */
             sa.sa_restorer = macify_sa_restorer;
         }
         sigemptyset(&sa.sa_mask);
@@ -246,7 +246,7 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
     sa.sa_handler = handler;
     sa.sa_flags = SA_ONSTACK;
     if (macify_sa_restorer) {
-        sa.sa_flags |= 0x01000000;  /* SA_RESTORER */
+        sa.sa_flags |= 0x04000000;  /* SA_RESTORER */
         sa.sa_restorer = macify_sa_restorer;
     }
     sigemptyset(&sa.sa_mask);
