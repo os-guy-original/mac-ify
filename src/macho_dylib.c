@@ -106,8 +106,8 @@ static void parse_dylib_exports(macho_dylib *md, uint8_t *file_data, size_t file
         if (name[0] == '_') name++;
 
         /* Store: name → address (with slide applied) */
-        strncpy(md->exports[md->n_exports].name, name, 127);
-        md->exports[md->n_exports].name[127] = '\0';
+        strncpy(md->exports[md->n_exports].name, name, 255);
+        md->exports[md->n_exports].name[255] = '\0';
         md->exports[md->n_exports].addr = (void *)(uintptr_t)(nl->n_value + md->slide);
         md->n_exports++;
     }
@@ -663,6 +663,58 @@ int macho_load_dylib(const char *path) {
     if (g_verbose)
         fprintf(stderr, "macify: dylib %s mapped at slide=0x%lx\n", path, (unsigned long)slide);
 
+    /* Recursively load this dylib's OWN dependencies (LC_LOAD_DYLIB commands).
+     * This is critical: a dylib like libicui18n depends on libicuuc and libicudata,
+     * and its chained fixups need those dependencies' symbols to be available.
+     * We resolve @loader_path/ to the dylib's own directory, @rpath/ is not
+     * supported here (the main binary's rpaths don't apply to dylibs). */
+    {
+        /* Compute this dylib's directory for @loader_path resolution */
+        char dylib_dir[4096];
+        strncpy(dylib_dir, path, sizeof(dylib_dir) - 1);
+        dylib_dir[sizeof(dylib_dir) - 1] = '\0';
+        char *slash = strrchr(dylib_dir, '/');
+        if (slash) *slash = '\0';
+        else { dylib_dir[0] = '.'; dylib_dir[1] = '\0'; }
+
+        load_command *lc_dep = (load_command *)(file_data + sizeof(mach_header_64));
+        for (uint32_t i = 0; i < hdr->ncmds; i++) {
+            if (lc_dep->cmd == LC_LOAD_DYLIB || lc_dep->cmd == LC_LOAD_WEAK_DYLIB) {
+                dylib_command *dc = (dylib_command *)lc_dep;
+                const char *dep_name = (const char *)((uint8_t *)lc_dep + dc->name_offset);
+                char dep_path[4096];
+                /* Resolve @loader_path/ */
+                if (strncmp(dep_name, "@loader_path/", 13) == 0) {
+                    snprintf(dep_path, sizeof(dep_path), "%s/%s", dylib_dir, dep_name + 13);
+                } else if (strncmp(dep_name, "@rpath/", 7) == 0) {
+                    /* Try @loader_path as fallback for @rpath */
+                    snprintf(dep_path, sizeof(dep_path), "%s/%s", dylib_dir, dep_name + 7);
+                } else if (dep_name[0] == '/') {
+                    /* Absolute path — check if it's a Homebrew path we can redirect */
+                    if (strncmp(dep_name, "/usr/local/", 11) == 0) {
+                        const char *mprefix = macify_get_prefix();
+                        snprintf(dep_path, sizeof(dep_path), "%s/usr/local/%s", mprefix, dep_name + 11);
+                    } else {
+                        strncpy(dep_path, dep_name, sizeof(dep_path) - 1);
+                        dep_path[sizeof(dep_path) - 1] = '\0';
+                    }
+                } else {
+                    strncpy(dep_path, dep_name, sizeof(dep_path) - 1);
+                    dep_path[sizeof(dep_path) - 1] = '\0';
+                }
+                /* Only load if it's a .dylib file that exists */
+                if (strstr(dep_path, ".dylib") && access(dep_path, R_OK) == 0) {
+                    /* macho_load_dylib checks for duplicates, so safe to call
+                     * even if already loaded */
+                    int rc = macho_load_dylib(dep_path);
+                    if (g_verbose && rc == 0)
+                        fprintf(stderr, "macify:   loaded dependency: %s -> %s\n", dep_name, dep_path);
+                }
+            }
+            lc_dep = (load_command *)((uint8_t *)lc_dep + lc_dep->cmdsize);
+        }
+    }
+
     /* Collect dylib's own segments for rebase processing */
     dylib_segment dsegs[MAX_DYLIB_SEGS];
     int ndsegs = 0;
@@ -690,6 +742,16 @@ int macho_load_dylib(const char *path) {
         }
         lc = (load_command *)((uint8_t *)lc + lc->cmdsize);
     }
+
+    /* Parse the dylib's exported symbol table BEFORE processing fixups.
+     * This is critical: the dylib's chained fixup BINDs may reference the
+     * dylib's OWN symbols (e.g., libada references ada::parse which is
+     * defined in libada itself). By parsing exports first, the symbols are
+     * available via macho_dylib_lookup() during fixup processing.
+     * However, we must register the dylib (g_n_macho_dylibs++) so that
+     * macho_dylib_lookup can find it. */
+    parse_dylib_exports(md, file_data, file_size);
+    g_n_macho_dylibs++;  /* register early so fixups can find our exports */
 
     /* Apply rebase fixups (LC_DYLD_INFO format) */
     if (rebase_off > 0 && rebase_size > 0) {
@@ -739,9 +801,6 @@ int macho_load_dylib(const char *path) {
                 fprintf(stderr, "macify: dylib %s: %u lazy bind bytes processed\n", path, lazy_size2);
         }
     }
-
-    /* Parse the dylib's exported symbol table */
-    parse_dylib_exports(md, file_data, file_size);
 
     /* Resolve __la_symbol_ptr and __got entries using the indirect symbol table.
      * First pass: find LC_SYMTAB and LC_DYSYMTAB to get table offsets.
@@ -825,17 +884,25 @@ int macho_load_dylib(const char *path) {
     if (g_verbose)
         fprintf(stderr, "macify: dylib %s: %d exported symbols\n", path, md->n_exports);
 
-    g_n_macho_dylibs++;
     return 0;
 }
 
 /* Look up a symbol in loaded Mach-O dylibs.
- * Returns the symbol address or NULL. */
+ * Returns the symbol address or NULL.
+ * Tries matching both with and without leading underscore, because
+ * C++ mangled symbols start with _Z and the underscore stripping is
+ * ambiguous (macOS adds a leading _ to ALL symbols, but C++ symbols
+ * already start with _Z, so after stripping the macOS _, a C++ symbol
+ * becomes _Z... while the export table stores Z...). */
 void *macho_dylib_lookup(const char *sym) {
     for (int i = 0; i < g_n_macho_dylibs; i++) {
         macho_dylib *md = &g_macho_dylibs[i];
         for (int j = 0; j < md->n_exports; j++) {
             if (strcmp(md->exports[j].name, sym) == 0) {
+                return md->exports[j].addr;
+            }
+            /* If sym starts with '_' (e.g. C++ _Z...), also try without it */
+            if (sym[0] == '_' && strcmp(md->exports[j].name, sym + 1) == 0) {
                 return md->exports[j].addr;
             }
         }

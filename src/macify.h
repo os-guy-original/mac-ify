@@ -48,6 +48,7 @@
 #define LC_DYSYMTAB         0x0Bu
 #define LC_DYLD_CHAINED_FIXUPS 0x80000034u
 #define LC_DYLD_EXPORTS_TRIE 0x80000033u
+#define LC_RPATH             0x8000001Cu  /* runpath additions */
 #define x86_THREAD_STATE64  0x04u
 
 #define VM_PROT_READ        0x01
@@ -208,7 +209,7 @@ typedef struct {
  * Unlike loaded_dylib (which tracks ELF .so handles), this tracks
  * Mach-O dylibs that we load into memory ourselves. */
 #define MAX_MACHO_DYLIBS 64
-#define MAX_DYLIB_SYMS   4096
+#define MAX_DYLIB_SYMS   16384
 
 typedef struct {
     char     name[256];      /* dylib name/path */
@@ -217,7 +218,7 @@ typedef struct {
     uint64_t slide;          /* ASLR slide applied to this dylib */
     int      n_exports;      /* number of exported symbols */
     struct {
-        char    name[128];   /* symbol name (without leading _) */
+        char    name[256];   /* symbol name (without leading _) */
         void   *addr;        /* resolved address */
     } exports[MAX_DYLIB_SYMS];
 } macho_dylib;

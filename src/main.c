@@ -253,6 +253,90 @@ int main(int argc, char **argv, char **envp) {
     uint64_t main_entryoff = 0;
     int have_main = 0;
 
+    /* Pre-pass: collect LC_RPATH entries and compute the executable's
+     * directory. We need these for resolving @rpath/, @loader_path/, and
+     * @executable_path/ in LC_LOAD_DYLIB paths. */
+    #define MAX_RPATHS 16
+    char *g_rpaths[MAX_RPATHS];
+    int g_nrpaths = 0;
+    /* Deferred dylibs: @rpath/@loader_path-resolved Mach-O dylibs that
+     * need their dependencies loaded first. We load them after the main
+     * walk so all @@HOMEBREW_PREFIX@@ dylibs are already registered. */
+    #define MAX_DEFERRED_DYLIBS 8
+    char g_deferred_dylibs[MAX_DEFERRED_DYLIBS][4096];
+    int g_ndeferred_dylibs = 0;
+    char exec_dir[4096];
+    char exec_abs[4096];
+    /* Get the absolute path of the executable */
+    if (realpath(path, exec_abs)) {
+        /* exec_dir = dirname(exec_abs) */
+        strncpy(exec_dir, exec_abs, sizeof(exec_dir) - 1);
+        exec_dir[sizeof(exec_dir) - 1] = '\0';
+        char *slash = strrchr(exec_dir, '/');
+        if (slash) {
+            *slash = '\0';
+        } else {
+            exec_dir[0] = '.'; exec_dir[1] = '\0';
+        }
+    } else {
+        exec_dir[0] = '.'; exec_dir[1] = '\0';
+    }
+    /* Walk load commands for LC_RPATH */
+    {
+        uint8_t *lc_r = file_data + sizeof(mach_header_64);
+        for (uint32_t i = 0; i < hdr->ncmds && lc_r + 8 <= lc_end; i++) {
+            uint32_t cmd_r = *(uint32_t *)(void *)lc_r;
+            uint32_t cmdsize_r = *(uint32_t *)(void *)(lc_r + 4);
+            if (cmd_r == LC_RPATH && g_nrpaths < MAX_RPATHS) {
+                /* LC_RPATH layout: cmd(4), cmdsize(4), path_offset(4), path... */
+                uint32_t path_off = *(uint32_t *)(void *)(lc_r + 8);
+                const char *rp = (const char *)(lc_r + path_off);
+                /* Expand @loader_path and @executable_path to exec_dir */
+                char expanded[4096];
+                if (strncmp(rp, "@loader_path", 12) == 0) {
+                    snprintf(expanded, sizeof(expanded), "%s%s", exec_dir, rp + 12);
+                } else if (strncmp(rp, "@executable_path", 16) == 0) {
+                    snprintf(expanded, sizeof(expanded), "%s%s", exec_dir, rp + 16);
+                } else {
+                    strncpy(expanded, rp, sizeof(expanded) - 1);
+                    expanded[sizeof(expanded) - 1] = '\0';
+                }
+                g_rpaths[g_nrpaths++] = strdup(expanded);
+                if (g_verbose)
+                    fprintf(stderr, "macify: LC_RPATH %s -> %s\n", rp, expanded);
+            }
+            lc_r += cmdsize_r;
+        }
+    }
+
+    /* Pre-load libc++ (LLVM C++ standard library) so that all subsequently
+     * loaded Mach-O dylibs can resolve their C++ symbols via flat lookup.
+     * macOS binaries use libc++ (std::__1 namespace), which is ABI-incompatible
+     * with Linux's libstdc++ (std::__cxx11 namespace). We provide prebuilt
+     * libc++.so.1, libc++abi.so.1, and libunwind.so.1 in the macify prefix. */
+    {
+        const char *mprefix = macify_get_prefix();
+        char lib_path[4096];
+        /* Load libunwind first (libc++abi depends on it) */
+        snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libunwind.so.1", mprefix);
+        void *unwind_h = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+        if (!unwind_h) unwind_h = dlopen("libunwind.so.1", RTLD_NOW | RTLD_GLOBAL);
+        if (unwind_h) register_extra_handle(unwind_h);
+        /* Load libc++abi (depends on libunwind) */
+        snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libc++abi.so.1", mprefix);
+        void *cxxabi = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+        if (!cxxabi) cxxabi = dlopen("libc++abi.so.1", RTLD_NOW | RTLD_GLOBAL);
+        if (cxxabi) register_extra_handle(cxxabi);
+        /* Load libc++ (depends on libc++abi) */
+        snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libc++.so.1", mprefix);
+        void *libcxx = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+        if (!libcxx) libcxx = dlopen("libc++.so.1", RTLD_NOW | RTLD_GLOBAL);
+        if (libcxx) register_extra_handle(libcxx);
+        if (g_verbose)
+            fprintf(stderr, "macify: preloaded libc++ unwind=%p abi=%p libcxx=%p\n",
+                    unwind_h, cxxabi, libcxx);
+    }
+
     for (uint32_t i = 0; i < hdr->ncmds && lc + 8 <= lc_end; i++) {
         uint32_t cmd     = *(uint32_t *)(void *)lc;
         uint32_t cmdsize = *(uint32_t *)(void *)(lc + 4);
@@ -293,6 +377,47 @@ int main(int argc, char **argv, char **envp) {
                 (cmd == LC_LOAD_WEAK_DYLIB)  ? "LC_LOAD_WEAK_DYLIB" :
                 (cmd == LC_REEXPORT_DYLIB)   ? "LC_REEXPORT_DYLIB" :
                                                "LC_LAZY_LOAD_DYLIB";
+
+            /* Resolve @rpath/, @loader_path/, @executable_path/ prefixes.
+             * @rpath/X — try each LC_RPATH entry as prefix for X
+             * @loader_path/X — replace with executable's directory + X
+             * @executable_path/X — same as @loader_path for the main binary
+             * Returns a malloc'd resolved path, or NULL if not resolvable.
+             * Sets `name` to point to the resolved path so the rest of the
+             * logic uses it. */
+            char *resolved_name = NULL;
+            char resolved_buf[4096];
+            if (strncmp(name, "@rpath/", 7) == 0) {
+                const char *rest = name + 7;
+                /* Try each rpath */
+                for (int ri = 0; ri < g_nrpaths && !resolved_name; ri++) {
+                    snprintf(resolved_buf, sizeof(resolved_buf), "%s/%s", g_rpaths[ri], rest);
+                    if (access(resolved_buf, R_OK) == 0) {
+                        resolved_name = resolved_buf;
+                    }
+                }
+                if (!resolved_name && g_verbose) {
+                    fprintf(stderr, "macify: @rpath not resolved for %s (tried %d rpaths)\n", name, g_nrpaths);
+                    for (int ri = 0; ri < g_nrpaths; ri++) {
+                        fprintf(stderr, "  rpath[%d]: %s\n", ri, g_rpaths[ri]);
+                    }
+                }
+            } else if (strncmp(name, "@loader_path/", 13) == 0) {
+                snprintf(resolved_buf, sizeof(resolved_buf), "%s/%s", exec_dir, name + 13);
+                if (access(resolved_buf, R_OK) == 0)
+                    resolved_name = resolved_buf;
+            } else if (strncmp(name, "@executable_path/", 17) == 0) {
+                snprintf(resolved_buf, sizeof(resolved_buf), "%s/%s", exec_dir, name + 17);
+                if (access(resolved_buf, R_OK) == 0)
+                    resolved_name = resolved_buf;
+            }
+            if (resolved_name) {
+                /* Use resolved path (still need to load as Mach-O if it's a .dylib) */
+                name = resolved_name;
+                if (g_verbose)
+                    fprintf(stderr, "macify: resolved dylib path -> %s\n", name);
+            }
+
             if (g_ndylibs >= MAX_DYLIBS) {
                 fprintf(stderr, "macify: too many dylibs (max %d)\n", MAX_DYLIBS);
                 return 1;
@@ -352,11 +477,32 @@ int main(int argc, char **argv, char **envp) {
                 extra1 = NULL;  /* no Linux equivalent, skip */
             } else if (strstr(name, "libzstd")) {
                 extra1 = dlopen("libzstd.so.1", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libbrotli")) {
-                extra1 = NULL;  /* may not be available, skip */
             } else if (strstr(name, "libintl")) {
                 /* libintl is part of glibc on Linux — no separate library */
                 extra1 = NULL;
+            } else if (strstr(name, "libc++") || strstr(name, "libc++abi") ||
+                       strstr(name, "libunwind")) {
+                /* macOS C++ standard library (LLVM libc++ with std::__1 namespace).
+                 * Linux's libstdc++ uses std::__cxx11 namespace (ABI-incompatible).
+                 * We provide prebuilt libc++.so.1, libc++abi.so.1, and libunwind.so.1
+                 * in the macify prefix. Load order: libunwind → libc++abi → libc++.
+                 * All loaded with RTLD_GLOBAL so symbols are visible to dylibs. */
+                const char *mprefix = macify_get_prefix();
+                char lib_path[4096];
+                /* Load libunwind first (libc++abi depends on it) */
+                snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libunwind.so.1", mprefix);
+                void *unwind_h = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+                if (!unwind_h) unwind_h = dlopen("libunwind.so.1", RTLD_NOW | RTLD_GLOBAL);
+                if (unwind_h) register_extra_handle(unwind_h);
+                /* Load libc++abi (depends on libunwind) */
+                snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libc++abi.so.1", mprefix);
+                void *cxxabi = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+                if (!cxxabi) cxxabi = dlopen("libc++abi.so.1", RTLD_NOW | RTLD_GLOBAL);
+                if (cxxabi) register_extra_handle(cxxabi);
+                /* Load libc++ (depends on libc++abi) */
+                snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libc++.so.1", mprefix);
+                extra1 = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+                if (!extra1) extra1 = dlopen("libc++.so.1", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "@@HOMEBREW_CELLAR@@") ||
                        strstr(name, "@@HOMEBREW_PREFIX@@")) {
                 /* Homebrew bottle placeholder paths — these are Mach-O dylibs
@@ -382,6 +528,19 @@ int main(int argc, char **argv, char **envp) {
                 }
                 /* extra1 stays NULL — the dylib's symbols are available
                  * via macho_dylib_lookup() in resolve_symbol() */
+                extra1 = NULL;
+            } else if (resolved_name) {
+                /* The path was resolved via @rpath/@loader_path/@executable_path
+                 * and points to a real Mach-O .dylib file. Defer loading until
+                 * after all other dylibs (which may be its dependencies) are
+                 * loaded and registered. We collect these in a list and load
+                 * them after the main load-command walk completes. */
+                if (g_ndeferred_dylibs < MAX_DEFERRED_DYLIBS) {
+                    strncpy(g_deferred_dylibs[g_ndeferred_dylibs], resolved_name,
+                            sizeof(g_deferred_dylibs[0]) - 1);
+                    g_deferred_dylibs[g_ndeferred_dylibs][sizeof(g_deferred_dylibs[0]) - 1] = '\0';
+                    g_ndeferred_dylibs++;
+                }
                 extra1 = NULL;
             }
             if (extra1) {
@@ -458,6 +617,19 @@ int main(int argc, char **argv, char **envp) {
             }
         }
         lc += cmdsize;
+    }
+
+    /* Now load deferred dylibs (those resolved via @rpath/@loader_path).
+     * These are loaded AFTER all @@HOMEBREW_PREFIX@@ and system dylibs so
+     * their dependencies are available via flat lookup. */
+    for (int di = 0; di < g_ndeferred_dylibs; di++) {
+        int rc = macho_load_dylib(g_deferred_dylibs[di]);
+        if (g_verbose) {
+            if (rc == 0)
+                fprintf(stderr, "macify:   loaded deferred Mach-O dylib: %s\n", g_deferred_dylibs[di]);
+            else
+                fprintf(stderr, "macify:   WARNING: failed to load deferred Mach-O dylib: %s\n", g_deferred_dylibs[di]);
+        }
     }
 
     /* Compute entry from LC_MAIN if present. */

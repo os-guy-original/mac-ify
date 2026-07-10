@@ -81,12 +81,30 @@ install_bottle() {
     mkdir -p "$dest"
     cp -r "$src_dir"/* "$dest/"
     
+    # Some bottles extract to a nested <version>/<version> structure.
+    # If we see that, flatten it so $dest is directly the package dir.
+    if [ -d "$dest/${version}" ] && [ ! -f "$dest/bin" ] && [ ! -d "$dest/lib" ]; then
+        # Move the nested contents up one level
+        local nested="$dest/${version}"
+        mv "$nested"/* "$nested"/.* "$dest/" 2>/dev/null || true
+        rmdir "$nested" 2>/dev/null || true
+    fi
+    
     # Create symlinks
     symlink_binaries "$formula" "$version" "$dest"
     symlink_libs "$formula" "$version" "$dest"
+    symlink_opt "$formula" "$version"
     
     echo -e "${GREEN}  Installed: ${formula} ${version}${RESET}"
     rm -rf "$tmpdir"
+}
+
+# Create /usr/local/opt/<formula> -> ../Cellar/<formula>/<version>
+# macOS binaries reference @rpath/@@HOMEBREW_PREFIX@@/opt/<formula>/lib/...
+symlink_opt() {
+    local formula="$1" version="$2"
+    mkdir -p "$PREFIX/usr/local/opt"
+    ln -sf "../Cellar/${formula}/${version}" "$PREFIX/usr/local/opt/${formula}"
 }
 
 # Symlink binaries from Cellar to /usr/local/bin
