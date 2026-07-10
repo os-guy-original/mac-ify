@@ -212,10 +212,19 @@ void macify_init_prefix(void) {
     snprintf(path, sizeof(path), "%s/usr/lib", prefix);
     ensure_dir(path);
 
+    snprintf(path, sizeof(path), "%s/usr/bin", prefix);
+    ensure_dir(path);
+
+    snprintf(path, sizeof(path), "%s/usr/sbin", prefix);
+    ensure_dir(path);
+
     snprintf(path, sizeof(path), "%s/usr/local", prefix);
     ensure_dir(path);
 
     snprintf(path, sizeof(path), "%s/usr/local/lib", prefix);
+    ensure_dir(path);
+
+    snprintf(path, sizeof(path), "%s/usr/local/bin", prefix);
     ensure_dir(path);
 
     snprintf(path, sizeof(path), "%s/usr/share", prefix);
