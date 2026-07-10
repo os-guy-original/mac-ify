@@ -11,7 +11,15 @@ char *macify_realpath(const char *path, char *resolved) __asm__("realpath");
 char *macify_realpath(const char *path, char *resolved) {
     static char *(*real)(const char *, char *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "realpath");
-    char *r = real(path, resolved);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return NULL; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    char *r = real(eff, resolved);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: realpath(\"%s\") = %s errno=%d\n",
@@ -26,7 +34,15 @@ ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) __asm__("rea
 ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) {
     static ssize_t (*real)(const char *, char *, size_t) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "readlink");
-    ssize_t r = real(path, buf, bufsiz);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    ssize_t r = real(eff, buf, bufsiz);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: readlink(\"%s\") = %zd errno=%d\n",
@@ -55,7 +71,15 @@ int macify_mkdir(const char *path, mode_t mode) __asm__("mkdir");
 int macify_mkdir(const char *path, mode_t mode) {
     static int (*real)(const char *, mode_t) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "mkdir");
-    int r = real(path, mode);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    int r = real(eff, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: mkdir(\"%s\", 0%o) = %d errno=%d\n",
@@ -432,8 +456,16 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (flags & 0x0400) linux_flags |= 0x0400;
     if (flags & 0x0800) linux_flags |= 0x0200;
     if (flags & 0x1000) linux_flags |= 0x0200;
+    const char *eff = pathname;
+    char tp[4096];
+    if (pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, tp, sizeof(tp)) == 0) eff = tp;
+    }
     struct stat ls;
-    int ret = real_fstatat(dirfd, pathname, &ls, linux_flags);
+    int ret = real_fstatat(dirfd, eff, &ls, linux_flags);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: fstatat(%d, \"%s\", 0x%x->0x%x) = %d errno=%d\n",
@@ -509,7 +541,15 @@ int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     if (dirfd == -2) dirfd = -100;  /* AT_FDCWD */
     int linux_flags = 0;
     if (flags & 0x0010) linux_flags |= 0x0200;  /* AT_EACCESS */
-    return real_faccessat(dirfd, pathname, mode, linux_flags);
+    const char *eff = pathname;
+    char tp[4096];
+    if (pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    return real_faccessat(dirfd, eff, mode, linux_flags);
 }
 
 /* ── unlinkat / linkat / symlinkat / readlinkat ────────────────
@@ -525,7 +565,15 @@ int macify_unlinkat(int dirfd, const char *pathname, int flags) {
     if (dirfd == -2) dirfd = -100;  /* AT_FDCWD */
     int linux_flags = 0;
     if (flags & 0x0200) linux_flags |= 0x0100;  /* AT_REMOVEDIR */
-    return real_unlinkat(dirfd, pathname, linux_flags);
+    const char *eff = pathname;
+    char tp[4096];
+    if (pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    return real_unlinkat(dirfd, eff, linux_flags);
 }
 
 int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int flags) __asm__("linkat");
@@ -538,7 +586,12 @@ int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int fl
     if (tofd == -2) tofd = -100;
     int linux_flags = 0;
     if (flags & 0x0400) linux_flags |= 0x0200;  /* AT_SYMLINK_FOLLOW */
-    return real_linkat(fromfd, from, tofd, to, linux_flags);
+    const char *eff_from = from, *eff_to = to;
+    char tp_from[4096], tp_to[4096];
+    extern int macify_translate_path(const char *, char *, size_t);
+    if (from && macify_translate_path(from, tp_from, sizeof(tp_from)) == 0) eff_from = tp_from;
+    if (to && macify_translate_path(to, tp_to, sizeof(tp_to)) == 0) eff_to = tp_to;
+    return real_linkat(fromfd, eff_from, tofd, eff_to, linux_flags);
 }
 
 int macify_symlinkat(const char *target, int dirfd, const char *linkpath) __asm__("symlinkat");
@@ -548,7 +601,13 @@ int macify_symlinkat(const char *target, int dirfd, const char *linkpath) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_symlinkat(target, dirfd, linkpath);
     if (dirfd == -2) dirfd = -100;
-    return real_symlinkat(target, dirfd, linkpath);
+    const char *eff = linkpath;
+    char tp[4096];
+    if (linkpath) {
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(linkpath, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    return real_symlinkat(target, dirfd, eff);
 }
 
 ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) __asm__("readlinkat");
@@ -558,7 +617,15 @@ ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t buf
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_readlinkat(dirfd, pathname, buf, bufsiz);
     if (dirfd == -2) dirfd = -100;
-    return real_readlinkat(dirfd, pathname, buf, bufsiz);
+    const char *eff = pathname;
+    char tp[4096];
+    if (pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    return real_readlinkat(dirfd, eff, buf, bufsiz);
 }
 
 /* utimensat — set file timestamps with nanosecond precision.
@@ -576,12 +643,20 @@ int macify_utimensat(int dirfd, const char *pathname, const struct timespec time
      * Only translate known flags; ignore unknown macOS-specific bits. */
     int linux_flags = 0;
     if (flags & 0x0200) linux_flags |= 0x0100;  /* AT_SYMLINK_NOFOLLOW */
-    int r = real_utimensat(dirfd, pathname, times, linux_flags);
+    const char *eff = pathname;
+    char tp[4096];
+    if (pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    int r = real_utimensat(dirfd, eff, times, linux_flags);
     if (r < 0 && errno == EINVAL) {
         /* If utimensat fails with EINVAL, the times array may have
          * macOS-specific UTIME_NOW/UTIME_OMIT values. Try with NULL
          * times (sets both to current time). */
-        r = real_utimensat(dirfd, pathname, NULL, linux_flags);
+        r = real_utimensat(dirfd, eff, NULL, linux_flags);
     }
     return r;
 }
@@ -726,7 +801,15 @@ int macify_unlink(const char *path) __asm__("unlink");
 int macify_unlink(const char *path) {
     static int (*real)(const char *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "unlink");
-    int r = real(path);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    int r = real(eff);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: unlink(\"%s\") = %d errno=%d\n",
@@ -740,7 +823,12 @@ int macify_rename(const char *old, const char *newp) __asm__("rename");
 int macify_rename(const char *old, const char *newp) {
     static int (*real)(const char *, const char *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "rename");
-    int r = real(old, newp);
+    const char *eff_old = old, *eff_new = newp;
+    char tp_old[4096], tp_new[4096];
+    extern int macify_translate_path(const char *, char *, size_t);
+    if (old && macify_translate_path(old, tp_old, sizeof(tp_old)) == 0) eff_old = tp_old;
+    if (newp && macify_translate_path(newp, tp_new, sizeof(tp_new)) == 0) eff_new = tp_new;
+    int r = real(eff_old, eff_new);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: rename(\"%s\", \"%s\") = %d errno=%d\n",
@@ -754,7 +842,13 @@ int macify_rmdir(const char *path) __asm__("rmdir");
 int macify_rmdir(const char *path) {
     static int (*real)(const char *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "rmdir");
-    int r = real(path);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    int r = real(eff);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: rmdir(\"%s\") = %d errno=%d\n",
@@ -768,7 +862,13 @@ int macify_chdir(const char *path) __asm__("chdir");
 int macify_chdir(const char *path) {
     static int (*real)(const char *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "chdir");
-    int r = real(path);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    int r = real(eff);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: chdir(\"%s\") = %d errno=%d\n",

@@ -137,7 +137,15 @@ FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
-    FILE *fp = real_fopen(path, mode);
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return NULL; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    FILE *fp = real_fopen(eff, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: fopen(\"%s\", \"%s\") = %p errno=%d\n",
