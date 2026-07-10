@@ -49,3 +49,4 @@ core.*
 shim_pthread.c
 mac-ify/
 download/
+.fetch-memory.md

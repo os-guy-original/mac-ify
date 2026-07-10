@@ -5,25 +5,25 @@
 all: shim build binaries
 
 shim:
-        $(MAKE) -C shim
+	$(MAKE) -C shim
 
 build:
-        $(MAKE) -C src
+	$(MAKE) -C src
 
 binaries:
-        python3 scripts/gen_macho.py
+	python3 scripts/gen_macho.py
 
 test: build binaries shim
-        LD_LIBRARY_PATH=build python3 tests/run_tests.py
+	LD_LIBRARY_PATH=build python3 tests/run_tests.py
 
 test-real: build shim
-        @bash scripts/test_real.sh
+	@bash scripts/test_real.sh
 
 shell: build shim
-        @bash scripts/macify-shell
+	@bash scripts/macify-shell
 
 clean:
-        $(MAKE) -C src clean
-        $(MAKE) -C shim clean
-        rm -f tests/binaries/*.bin
-        rm -f /tmp/macify-test.txt
+	$(MAKE) -C src clean
+	$(MAKE) -C shim clean
+	rm -f tests/binaries/*.bin
+	rm -f /tmp/macify-test.txt
