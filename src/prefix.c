@@ -463,26 +463,46 @@ int macify_should_hide_path(const char *path) {
 
     const char *rest = path + home_len + 1;
 
-    /* Hide ~/.config/bat/ — bat should use ~/Library/Caches/bat instead */
-    if (strncmp(rest, ".config/bat", 11) == 0 &&
-        (rest[11] == '\0' || rest[11] == '/')) {
-        if (getenv("MACIFY_TRACE_OPEN")) {
-            char b[512]; int n = snprintf(b, sizeof(b),
-                "macify: HIDE \"%s\" (returning ENOENT)\n", path);
-            (void)write(2, b, n);
-        }
-        return 1;
-    }
+    /* Hide Linux XDG directories — macOS binaries must use ~/Library/ instead.
+     * If a macOS binary reads ~/.config/foo, it gets Linux-format config that
+     * can crash or produce wrong results. By hiding these, the binary falls
+     * back to macOS-style paths (~/Library/Preferences/, ~/Library/Caches/,
+     * ~/Library/Application Support/) which are translated to the prefix.
+     *
+     * Hidden:
+     *   ~/.config/       — Linux XDG config (macOS: ~/Library/Preferences/)
+     *   ~/.cache/        — Linux XDG cache (macOS: ~/Library/Caches/)
+     *   ~/.local/        — Linux XDG data (macOS: ~/Library/Application Support/)
+     *   ~/.local/share/  — Linux XDG shared data
+     *   ~/.local/state/  — Linux XDG state data
+     *   ~/.pki/          — Linux certificate store (macOS: keychain)
+     *   ~/.gnupg/        — Linux GPG (macOS: different layout)
+     *
+     * NOT hidden (needed by both platforms):
+     *   ~/.ssh/          — SSH config is compatible across platforms
+     *   ~/.macify/       — our own prefix
+     */
+    static const char *hidden_dirs[] = {
+        ".config",
+        ".cache",
+        ".local",
+        ".pki",
+        ".gnupg",
+        NULL
+    };
 
-    /* Hide ~/.cache/bat/ — same reason */
-    if (strncmp(rest, ".cache/bat", 10) == 0 &&
-        (rest[10] == '\0' || rest[10] == '/')) {
-        if (getenv("MACIFY_TRACE_OPEN")) {
-            char b[512]; int n = snprintf(b, sizeof(b),
-                "macify: HIDE \"%s\" (returning ENOENT)\n", path);
-            (void)write(2, b, n);
+    for (int i = 0; hidden_dirs[i]; i++) {
+        const char *dir = hidden_dirs[i];
+        size_t dlen = strlen(dir);
+        if (strncmp(rest, dir, dlen) == 0 &&
+            (rest[dlen] == '\0' || rest[dlen] == '/')) {
+            if (getenv("MACIFY_TRACE_OPEN")) {
+                char b[512]; int n = snprintf(b, sizeof(b),
+                    "macify: HIDE \"%s\" (returning ENOENT)\n", path);
+                (void)write(2, b, n);
+            }
+            return 1;
         }
-        return 1;
     }
 
     return 0;
