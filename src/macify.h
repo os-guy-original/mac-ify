@@ -204,6 +204,24 @@ typedef struct {
     void *libm_handle;
 } loaded_dylib;
 
+/* A loaded Mach-O shared library (dylib).
+ * Unlike loaded_dylib (which tracks ELF .so handles), this tracks
+ * Mach-O dylibs that we load into memory ourselves. */
+#define MAX_MACHO_DYLIBS 64
+#define MAX_DYLIB_SYMS   4096
+
+typedef struct {
+    char     name[256];      /* dylib name/path */
+    uint8_t *file_data;      /* mmap'd file data (kept for fixup processing) */
+    size_t   file_size;
+    uint64_t slide;          /* ASLR slide applied to this dylib */
+    int      n_exports;      /* number of exported symbols */
+    struct {
+        char    name[128];   /* symbol name (without leading _) */
+        void   *addr;        /* resolved address */
+    } exports[MAX_DYLIB_SYMS];
+} macho_dylib;
+
 /* ============================================================
  * Global state
  * ============================================================ */
@@ -214,6 +232,8 @@ extern loaded_section g_sections[MAX_SECTIONS];
 extern int g_nsections;
 extern loaded_dylib g_dylibs[MAX_DYLIBS];
 extern int g_ndylibs;
+extern macho_dylib g_macho_dylibs[MAX_MACHO_DYLIBS];
+extern int g_n_macho_dylibs;
 
 /* Text range of the loaded macOS binary, for SIGSEGV recovery. */
 extern uintptr_t g_macos_text_lo;
@@ -270,6 +290,10 @@ int execute_lazy_binds(uint8_t *file_data, size_t file_size);
 int execute_chained_fixups(uint8_t *file_data, size_t file_size);
 void *resolve_symbol(int ordinal_idx, const char *sym);
 void register_extra_handle(void *handle);
+
+/* macho_dylib.c — Mach-O shared library loader */
+int macho_load_dylib(const char *path);
+void *macho_dylib_lookup(const char *sym);
 
 /* runtime.c */
 uint64_t setup_stack(int argc, char **argv, char **envp, void **stack_base, size_t *stack_size);

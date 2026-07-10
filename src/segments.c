@@ -98,6 +98,12 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             void *addr = dlsym(RTLD_DEFAULT, sym);
             if (addr) return addr;
         }
+        /* Search loaded Mach-O dylibs */
+        {
+            extern void *macho_dylib_lookup(const char *);
+            void *addr = macho_dylib_lookup(sym);
+            if (addr) return addr;
+        }
         /* Try stripping $-suffix for flat namespace too
          * (e.g. fdopendir$INODE64 -> fdopendir, realpath$DARWIN_EXTSN -> realpath) */
         {
@@ -144,6 +150,13 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             addr = dlsym(g_extra_handles[i], sym);
             if (addr) return addr;
         }
+    }
+
+    /* Search loaded Mach-O dylibs */
+    if (!addr) {
+        extern void *macho_dylib_lookup(const char *);
+        addr = macho_dylib_lookup(sym);
+        if (addr) return addr;
     }
 
     /* Try stripping $-suffix (e.g. _open$NOCANCEL -> _open) */

@@ -359,11 +359,9 @@ int main(int argc, char **argv, char **envp) {
                 extra1 = NULL;
             } else if (strstr(name, "@@HOMEBREW_CELLAR@@") ||
                        strstr(name, "@@HOMEBREW_PREFIX@@")) {
-                /* Homebrew bottle placeholder paths — load the actual dylib
-                 * from the macify prefix. The placeholder is:
-                 *   @@HOMEBREW_CELLAR@@/ruby/4.0.5/lib/libruby.4.0.dylib
-                 * We replace @@HOMEBREW_CELLAR@@ with $MACIFY_PREFIX/usr/local/Cellar
-                 * and @@HOMEBREW_PREFIX@@ with $MACIFY_PREFIX/usr/local */
+                /* Homebrew bottle placeholder paths — these are Mach-O dylibs
+                 * that need to be loaded through our own Mach-O dylib loader,
+                 * not Linux's dlopen (which expects ELF format). */
                 const char *mprefix = getenv("MACIFY_PREFIX");
                 if (!mprefix) mprefix = "/.macify";
                 char real_path[4096];
@@ -375,13 +373,17 @@ int main(int argc, char **argv, char **envp) {
                     rest = name + strlen("@@HOMEBREW_PREFIX@@");
                     snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
                 }
-                extra1 = dlopen(real_path, RTLD_NOW | RTLD_GLOBAL);
+                /* Load as Mach-O dylib (not dlopen which expects ELF) */
+                int rc = macho_load_dylib(real_path);
                 if (g_verbose) {
-                    if (extra1)
-                        fprintf(stderr, "macify:   loaded Homebrew dylib: %s\n", real_path);
+                    if (rc == 0)
+                        fprintf(stderr, "macify:   loaded Mach-O dylib: %s\n", real_path);
                     else
-                        fprintf(stderr, "macify:   WARNING: failed to load Homebrew dylib: %s (%s)\n", real_path, dlerror());
+                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s\n", real_path);
                 }
+                /* extra1 stays NULL — the dylib's symbols are available
+                 * via macho_dylib_lookup() in resolve_symbol() */
+                extra1 = NULL;
             }
             if (extra1) {
                 register_extra_handle(extra1);
