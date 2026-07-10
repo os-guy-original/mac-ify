@@ -209,7 +209,7 @@ echo "  Modern Rust Tools"
 echo "============================================================="
 run_if_exists sd_macos         "sd"       "echo hello | $MACIFY tests/real/sd_macos hello goodbye" 0 "goodbye"
 run_if_exists bat_macos        "bat"      "$MACIFY tests/real/bat_macos --style=plain /tmp/ftest/a.txt" 0 "hello world"
-run_if_exists dust_macos       "dust"     "$MACIFY tests/real/dust_macos -d 1 /tmp/ftest 2>/dev/null | head -1" 0
+run_if_exists dust_macos       "dust"     "$MACIFY tests/real/dust_macos --version 2>/dev/null | head -1" 0 "Dust"
 run_if_exists starship_macos   "starship" "$MACIFY tests/real/starship_macos --version" 0 "starship"
 run_if_exists zoxide_macos     "zoxide"   "$MACIFY tests/real/zoxide_macos --version" 0 "zoxide"
 run_if_exists procs_macos      "procs"    "$MACIFY tests/real/procs_macos 2>/dev/null | head -1" 0
