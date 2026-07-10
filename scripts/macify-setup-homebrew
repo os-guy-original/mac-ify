@@ -81,13 +81,16 @@ install_bottle() {
     mkdir -p "$dest"
     cp -r "$src_dir"/* "$dest/"
     
-    # Some bottles extract to a nested <version>/<version> structure.
-    # If we see that, flatten it so $dest is directly the package dir.
-    if [ -d "$dest/${version}" ] && [ ! -f "$dest/bin" ] && [ ! -d "$dest/lib" ]; then
-        # Move the nested contents up one level
-        local nested="$dest/${version}"
-        mv "$nested"/* "$nested"/.* "$dest/" 2>/dev/null || true
-        rmdir "$nested" 2>/dev/null || true
+    # Some bottles extract to a nested structure (e.g., <version>/<version> or
+    # <version>/<version>_1). If $dest doesn't have a lib/ or bin/ directly but
+    # has a single subdirectory, flatten it.
+    if [ ! -d "$dest/lib" ] && [ ! -d "$dest/bin" ]; then
+        local nested
+        nested=$(find "$dest" -maxdepth 1 -mindepth 1 -type d | head -1)
+        if [ -n "$nested" ] && [ -d "$nested/lib" -o -d "$nested/bin" ]; then
+            mv "$nested"/* "$nested"/.* "$dest/" 2>/dev/null || true
+            rmdir "$nested" 2>/dev/null || true
+        fi
     fi
     
     # Create symlinks

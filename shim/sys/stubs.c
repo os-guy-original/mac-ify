@@ -192,3 +192,189 @@ int macify_unw_get_proc_name(unw_cursor_t *c, char *b, size_t l, unsigned long *
     (void)c; if (b && l > 0) b[0] = '\0'; if (o) *o = 0; return -1;
 }
 
+/* ── os_log / os_signpost stubs ──────────────────────────────── */
+
+/* macOS unified logging (os_log) — return dummy log objects.
+ * os_log_create returns a non-NULL opaque pointer; we use a static. */
+static char macify_dummy_log_obj[32];
+void *macify_os_log_create(const char *subsystem, const char *category) __asm__("os_log_create");
+void *macify_os_log_create(const char *subsystem, const char *category) {
+    (void)subsystem; (void)category; return macify_dummy_log_obj;
+}
+
+int macify_os_log_type_enabled(void *log, int type) __asm__("os_log_type_enabled");
+int macify_os_log_type_enabled(void *log, int type) { (void)log; (void)type; return 0; }
+
+int macify_os_signpost_enabled(void *log) __asm__("os_signpost_enabled");
+int macify_os_signpost_enabled(void *log) { (void)log; return 0; }
+
+void macify_os_signpost_emit_with_name_impl(void *log, int type, const char *name, ...) __asm__("_os_signpost_emit_with_name_impl");
+void macify_os_signpost_emit_with_name_impl(void *log, int type, const char *name, ...) {
+    (void)log; (void)type; (void)name;
+}
+
+/* ── Mach VM stubs ───────────────────────────────────────────── */
+
+/* mach_make_memory_entry_64 — returns a send right (mach port).
+ * Return MACH_PORT_NULL (0) to indicate failure. */
+unsigned int macify_mach_make_memory_entry_64(int target, unsigned long *size,
+    unsigned long offset, int permission, int *entry_handle, int parent_entry)
+    __asm__("mach_make_memory_entry_64");
+unsigned int macify_mach_make_memory_entry_64(int target, unsigned long *size,
+    unsigned long offset, int permission, int *entry_handle, int parent_entry) {
+    (void)target; (void)size; (void)offset; (void)permission;
+    (void)entry_handle; (void)parent_entry; return 0;
+}
+
+/* mach_vm_map — maps memory at a specific address.
+ * Returns KERN_SUCCESS (0) on success, KERN_FAILURE (1) on failure. */
+int macify_mach_vm_map(int target, unsigned long *address, unsigned long size,
+    unsigned long mask, int flags, int object, unsigned long offset,
+    int copy, int cur_protection, int max_protection)
+    __asm__("mach_vm_map");
+int macify_mach_vm_map(int target, unsigned long *address, unsigned long size,
+    unsigned long mask, int flags, int object, unsigned long offset,
+    int copy, int cur_protection, int max_protection) {
+    (void)target; (void)mask; (void)flags; (void)object;
+    (void)offset; (void)copy; (void)cur_protection; (void)max_protection;
+    /* Fall back to mmap */
+    void *p = mmap((void*)(address ? *address : 0), size,
+                   PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 1;
+    if (address) *address = (unsigned long)p;
+    return 0;
+}
+
+/* mach_vm_remap — remaps memory from one address to another. */
+int macify_mach_vm_remap(int target, unsigned long *dst, unsigned long size,
+    unsigned long mask, int flags, int src_task, unsigned long src,
+    int copy, int *cur_protection, int *max_protection)
+    __asm__("mach_vm_remap");
+int macify_mach_vm_remap(int target, unsigned long *dst, unsigned long size,
+    unsigned long mask, int flags, int src_task, unsigned long src,
+    int copy, int *cur_protection, int *max_protection) {
+    (void)target; (void)mask; (void)flags; (void)src_task;
+    (void)src; (void)copy;
+    /* Fall back to memcpy via mmap */
+    void *p = mmap((void*)(dst ? *dst : 0), size,
+                   PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 1;
+    memcpy(p, (void*)src, size);
+    if (dst) *dst = (unsigned long)p;
+    if (cur_protection) *cur_protection = PROT_READ | PROT_WRITE;
+    if (max_protection) *max_protection = PROT_READ | PROT_WRITE;
+    return 0;
+}
+
+/* ── Thread/QoS stubs ────────────────────────────────────────── */
+
+/* pthread_mach_thread_np — returns the mach thread port for a pthread.
+ * On Linux, we return the tid as a stand-in. */
+unsigned int macify_pthread_mach_thread_np(void *thread) __asm__("pthread_mach_thread_np");
+unsigned int macify_pthread_mach_thread_np(void *thread) {
+    (void)thread; return (unsigned int)syscall(186); /* SYS_gettid */
+}
+
+int macify_pthread_set_qos_class_self_np(int qos, int relpri) __asm__("pthread_set_qos_class_self_np");
+int macify_pthread_set_qos_class_self_np(int qos, int relpri) {
+    (void)qos; (void)relpri; return 0;
+}
+
+/* ── sys_icache stub ─────────────────────────────────────────── */
+
+/* sys_icache_invalidate — flush instruction cache.
+ * On x86_64, the instruction cache is coherent, so this is a no-op. */
+void macify_sys_icache_invalidate(void *addr, size_t size) __asm__("sys_icache_invalidate");
+void macify_sys_icache_invalidate(void *addr, size_t size) { (void)addr; (void)size; }
+
+/* ── getsectiondata stub ─────────────────────────────────────── */
+
+/* getsectiondata — returns pointer to section data in a loaded image.
+ * Returns NULL if section not found. We can't easily implement this
+ * without tracking all loaded images, so return NULL. */
+void *macify_getsectiondata(void *mhdr, const char *segname, const char *sectname, unsigned long *size)
+    __asm__("getsectiondata");
+void *macify_getsectiondata(void *mhdr, const char *segname, const char *sectname, unsigned long *size) {
+    (void)mhdr; (void)segname; (void)sectname;
+    if (size) *size = 0;
+    return NULL;
+}
+
+/* ── __floattidf stub (compiler-rt soft-float for __int128 → double) ── */
+
+double macify___floattidf(__int128 x) __asm__("__floattidf");
+double macify___floattidf(__int128 x) {
+    /* Convert __int128 to double via signed long long (lossy but safe) */
+    return (double)(long long)x;
+}
+
+/* ── Network stubs (macOS-specific sendmsg_x/recvmsg_x) ──────── */
+
+/* recvmsg_x / sendmsg_x — macOS batch send/recv syscalls.
+ * Not available on Linux; return -1 with ENOSYS. */
+long macify_recvmsg_x(int fd, void *msg, unsigned int cnt, int flags) __asm__("recvmsg_x");
+long macify_recvmsg_x(int fd, void *msg, unsigned int cnt, int flags) {
+    (void)fd; (void)msg; (void)cnt; (void)flags; errno = ENOSYS; return -1;
+}
+
+long macify_sendmsg_x(int fd, void *msg, unsigned int cnt, int flags) __asm__("sendmsg_x");
+long macify_sendmsg_x(int fd, void *msg, unsigned int cnt, int flags) {
+    (void)fd; (void)msg; (void)cnt; (void)flags; errno = ENOSYS; return -1;
+}
+
+/* ── CoreFoundation stubs (additional) ───────────────────────── */
+
+/* CFArraySetValueAtIndex — sets a value in a CFArray. We don't have CFArray,
+ * so this is a no-op. */
+void macify_CFArraySetValueAtIndex(void *array, long idx, void *value) __asm__("CFArraySetValueAtIndex");
+void macify_CFArraySetValueAtIndex(void *array, long idx, void *value) {
+    (void)array; (void)idx; (void)value;
+}
+
+int macify_CFDictionaryContainsKey(void *dict, const void *key) __asm__("CFDictionaryContainsKey");
+int macify_CFDictionaryContainsKey(void *dict, const void *key) {
+    (void)dict; (void)key; return 0;
+}
+
+void *macify_CFDictionaryCreate(void *alloc, const void **keys, const void **values,
+    long count, const void *cb) __asm__("CFDictionaryCreate");
+void *macify_CFDictionaryCreate(void *alloc, const void **keys, const void **values,
+    long count, const void *cb) {
+    (void)alloc; (void)keys; (void)values; (void)count; (void)cb;
+    return NULL; /* caller should check for NULL */
+}
+
+void *macify_CFTimeZoneCopyDefault(void) __asm__("CFTimeZoneCopyDefault");
+void *macify_CFTimeZoneCopyDefault(void) { return NULL; }
+
+/* CFType dictionary key/value callbacks — return as NULL (caller should check) */
+static char macify_cf_callbacks[64];
+const void *macify_kCFTypeDictionaryKeyCallBacks_ptr __asm__("kCFTypeDictionaryKeyCallBacks") = macify_cf_callbacks;
+const void *macify_kCFTypeDictionaryValueCallBacks_ptr __asm__("kCFTypeDictionaryValueCallBacks") = macify_cf_callbacks;
+
+/* ── Security framework stubs ────────────────────────────────── */
+
+/* SecItemCopyMatching — searches the keychain. Returns errSecItemNotFound. */
+int macify_SecItemCopyMatching(void *query, void *result) __asm__("SecItemCopyMatching");
+int macify_SecItemCopyMatching(void *query, void *result) {
+    (void)query; (void)result; return -25300; /* errSecItemNotFound */
+}
+
+void *macify_SecPolicyCopyProperties(void *policy) __asm__("SecPolicyCopyProperties");
+void *macify_SecPolicyCopyProperties(void *policy) { (void)policy; return NULL; }
+
+int macify_SecTrustSettingsCopyTrustSettings(void *cert, int domain, void **settings) __asm__("SecTrustSettingsCopyTrustSettings");
+int macify_SecTrustSettingsCopyTrustSettings(void *cert, int domain, void **settings) {
+    (void)cert; (void)domain; if (settings) *settings = NULL; return -25300;
+}
+
+/* Security framework constants — return as NULL (they're CFStrings on macOS) */
+static char macify_sec_dummy[16];
+const void *macify_kSecClass_ptr __asm__("kSecClass") = macify_sec_dummy;
+const void *macify_kSecClassCertificate_ptr __asm__("kSecClassCertificate") = macify_sec_dummy;
+const void *macify_kSecMatchLimit_ptr __asm__("kSecMatchLimit") = macify_sec_dummy;
+const void *macify_kSecMatchLimitAll_ptr __asm__("kSecMatchLimitAll") = macify_sec_dummy;
+const void *macify_kSecPolicyAppleSSL_ptr __asm__("kSecPolicyAppleSSL") = macify_sec_dummy;
+const void *macify_kSecPolicyOid_ptr __asm__("kSecPolicyOid") = macify_sec_dummy;
+const void *macify_kSecReturnRef_ptr __asm__("kSecReturnRef") = macify_sec_dummy;
+

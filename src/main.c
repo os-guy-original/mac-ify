@@ -432,9 +432,56 @@ int main(int argc, char **argv, char **envp) {
             void *libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
             void *libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
 
-            /* Map macOS library names to Linux equivalents */
+            /* Map macOS library names to Linux equivalents.
+             * IMPORTANT: @@HOMEBREW_PREFIX@@ and resolved (@rpath/@loader_path)
+             * paths are checked FIRST — they're Mach-O dylibs that need our
+             * Mach-O loader, not Linux's dlopen (which expects ELF). */
             void *extra1 = NULL;
-            if (strstr(name, "libncurses")) {
+            if (strstr(name, "@@HOMEBREW_CELLAR@@") ||
+                       strstr(name, "@@HOMEBREW_PREFIX@@")) {
+                /* Homebrew bottle placeholder paths — these are Mach-O dylibs
+                 * that need to be loaded through our own Mach-O dylib loader,
+                 * not Linux's dlopen (which expects ELF format). */
+                const char *mprefix = macify_get_prefix();
+                char real_path[4096];
+                const char *rest;
+                if (strstr(name, "@@HOMEBREW_CELLAR@@")) {
+                    rest = name + strlen("@@HOMEBREW_CELLAR@@");
+                    snprintf(real_path, sizeof(real_path), "%s/usr/local/Cellar%s", mprefix, rest);
+                } else {
+                    rest = name + strlen("@@HOMEBREW_PREFIX@@");
+                    snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
+                }
+                /* Load as Mach-O dylib (not dlopen which expects ELF) */
+                int rc = macho_load_dylib(real_path);
+                if (g_verbose) {
+                    if (rc == 0)
+                        fprintf(stderr, "macify:   loaded Mach-O dylib: %s\n", real_path);
+                    else
+                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s\n", real_path);
+                }
+                /* extra1 stays NULL — the dylib's symbols are available
+                 * via macho_dylib_lookup() in resolve_symbol() */
+                extra1 = NULL;
+            } else if (resolved_name) {
+                /* The path was resolved via @rpath/@loader_path/@executable_path
+                 * and points to a real Mach-O .dylib file. Defer loading until
+                 * after all other dylibs (which may be its dependencies) are
+                 * loaded and registered. We collect these in a list and load
+                 * them after the main load-command walk completes. */
+                if (g_ndeferred_dylibs < MAX_DEFERRED_DYLIBS) {
+                    strncpy(g_deferred_dylibs[g_ndeferred_dylibs], resolved_name,
+                            sizeof(g_deferred_dylibs[0]) - 1);
+                    g_deferred_dylibs[g_ndeferred_dylibs][sizeof(g_deferred_dylibs[0]) - 1] = '\0';
+                    g_ndeferred_dylibs++;
+                }
+                extra1 = NULL;
+            } else if (strstr(name, "libc++") || strstr(name, "libc++abi") ||
+                       strstr(name, "libunwind")) {
+                /* macOS C++ standard library — already preloaded before the
+                 * main walk. Nothing to do here. */
+                extra1 = NULL;
+            } else if (strstr(name, "libncurses")) {
                 extra1 = dlopen("libncursesw.so.6", RTLD_NOW | RTLD_GLOBAL);
                 if (!extra1) extra1 = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libz")) {
@@ -473,74 +520,10 @@ int main(int argc, char **argv, char **envp) {
                 extra1 = dlopen("libnghttp3.so.9", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libnghttp2")) {
                 extra1 = dlopen("libnghttp2.so.14", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libngtcp2")) {
-                extra1 = NULL;  /* no Linux equivalent, skip */
             } else if (strstr(name, "libzstd")) {
                 extra1 = dlopen("libzstd.so.1", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libintl")) {
                 /* libintl is part of glibc on Linux — no separate library */
-                extra1 = NULL;
-            } else if (strstr(name, "libc++") || strstr(name, "libc++abi") ||
-                       strstr(name, "libunwind")) {
-                /* macOS C++ standard library (LLVM libc++ with std::__1 namespace).
-                 * Linux's libstdc++ uses std::__cxx11 namespace (ABI-incompatible).
-                 * We provide prebuilt libc++.so.1, libc++abi.so.1, and libunwind.so.1
-                 * in the macify prefix. Load order: libunwind → libc++abi → libc++.
-                 * All loaded with RTLD_GLOBAL so symbols are visible to dylibs. */
-                const char *mprefix = macify_get_prefix();
-                char lib_path[4096];
-                /* Load libunwind first (libc++abi depends on it) */
-                snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libunwind.so.1", mprefix);
-                void *unwind_h = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
-                if (!unwind_h) unwind_h = dlopen("libunwind.so.1", RTLD_NOW | RTLD_GLOBAL);
-                if (unwind_h) register_extra_handle(unwind_h);
-                /* Load libc++abi (depends on libunwind) */
-                snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libc++abi.so.1", mprefix);
-                void *cxxabi = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
-                if (!cxxabi) cxxabi = dlopen("libc++abi.so.1", RTLD_NOW | RTLD_GLOBAL);
-                if (cxxabi) register_extra_handle(cxxabi);
-                /* Load libc++ (depends on libc++abi) */
-                snprintf(lib_path, sizeof(lib_path), "%s/usr/local/lib/libc++.so.1", mprefix);
-                extra1 = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
-                if (!extra1) extra1 = dlopen("libc++.so.1", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "@@HOMEBREW_CELLAR@@") ||
-                       strstr(name, "@@HOMEBREW_PREFIX@@")) {
-                /* Homebrew bottle placeholder paths — these are Mach-O dylibs
-                 * that need to be loaded through our own Mach-O dylib loader,
-                 * not Linux's dlopen (which expects ELF format). */
-                const char *mprefix = macify_get_prefix();
-                char real_path[4096];
-                const char *rest;
-                if (strstr(name, "@@HOMEBREW_CELLAR@@")) {
-                    rest = name + strlen("@@HOMEBREW_CELLAR@@");
-                    snprintf(real_path, sizeof(real_path), "%s/usr/local/Cellar%s", mprefix, rest);
-                } else {
-                    rest = name + strlen("@@HOMEBREW_PREFIX@@");
-                    snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
-                }
-                /* Load as Mach-O dylib (not dlopen which expects ELF) */
-                int rc = macho_load_dylib(real_path);
-                if (g_verbose) {
-                    if (rc == 0)
-                        fprintf(stderr, "macify:   loaded Mach-O dylib: %s\n", real_path);
-                    else
-                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s\n", real_path);
-                }
-                /* extra1 stays NULL — the dylib's symbols are available
-                 * via macho_dylib_lookup() in resolve_symbol() */
-                extra1 = NULL;
-            } else if (resolved_name) {
-                /* The path was resolved via @rpath/@loader_path/@executable_path
-                 * and points to a real Mach-O .dylib file. Defer loading until
-                 * after all other dylibs (which may be its dependencies) are
-                 * loaded and registered. We collect these in a list and load
-                 * them after the main load-command walk completes. */
-                if (g_ndeferred_dylibs < MAX_DEFERRED_DYLIBS) {
-                    strncpy(g_deferred_dylibs[g_ndeferred_dylibs], resolved_name,
-                            sizeof(g_deferred_dylibs[0]) - 1);
-                    g_deferred_dylibs[g_ndeferred_dylibs][sizeof(g_deferred_dylibs[0]) - 1] = '\0';
-                    g_ndeferred_dylibs++;
-                }
                 extra1 = NULL;
             }
             if (extra1) {

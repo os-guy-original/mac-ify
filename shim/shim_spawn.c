@@ -83,6 +83,37 @@ int macify_posix_spawnattr_setsigdefault(void *attr, const void *sigdefault) {
     return 0;
 }
 
+/* posix_spawnattr_setbinpref — macOS-specific, sets the binary preference
+ * (architecture). Not applicable on Linux; accept and ignore. */
+int macify_posix_spawnattr_setbinpref(void *attr, size_t count, const void *pref, size_t *ocount) __asm__("posix_spawnattr_setbinpref");
+int macify_posix_spawnattr_setbinpref(void *attr, size_t count, const void *pref, size_t *ocount) {
+    (void)attr; (void)pref;
+    /* macOS API: returns 0 on success and sets *ocount to the number of
+     * cpu types actually copied. Python checks that *ocount == count. */
+    if (ocount) *ocount = count;
+    if (getenv("MACIFY_TRACE_SPAWN")) fprintf(stderr, "macify: posix_spawnattr_setbinpref called (count=%zu, stub returns 0)\n", count);
+    return 0;
+}
+
+/* posix_spawnattr_setbinpref_np — same as setbinpref but with _np suffix.
+ * Some macOS binaries reference this variant. */
+int macify_posix_spawnattr_setbinpref_np(void *attr, size_t count, const void *pref, size_t *ocount) __asm__("posix_spawnattr_setbinpref_np");
+int macify_posix_spawnattr_setbinpref_np(void *attr, size_t count, const void *pref, size_t *ocount) {
+    return macify_posix_spawnattr_setbinpref(attr, count, pref, ocount);
+}
+
+/* posix_spawnattr_setprocinfo_mask / setcpumonitor — macOS-specific,
+ * not applicable on Linux. */
+int macify_posix_spawnattr_setprocinfo_mask(void *attr, uint32_t mask) __asm__("posix_spawnattr_setprocinfo_mask");
+int macify_posix_spawnattr_setprocinfo_mask(void *attr, uint32_t mask) {
+    (void)attr; (void)mask; return 0;
+}
+
+int macify_posix_spawnattr_setcpumonitor(void *attr, uint32_t quota, uint32_t interval) __asm__("posix_spawnattr_setcpumonitor");
+int macify_posix_spawnattr_setcpumonitor(void *attr, uint32_t quota, uint32_t interval) {
+    (void)attr; (void)quota; (void)interval; return 0;
+}
+
 int macify_posix_spawn_file_actions_init(void *fa) __asm__("posix_spawn_file_actions_init");
 int macify_posix_spawn_file_actions_init(void *fa) {
     if (!fa) return EINVAL;
@@ -211,6 +242,20 @@ static int do_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions, const void *attrp,
                           char *const argv[], char *const envp[],
                           int use_path) {
+    /* If path is NULL, return 0 (success) with pid=0. Python probes
+     * posix_spawn with NULL path during initialization. If we return an
+     * error, Python aborts. Returning 0 with pid=0 makes the probe
+     * succeed (Python won't use the invalid pid). */
+    if (!path) {
+        if (pid) *pid = 0;
+        if (getenv("MACIFY_TRACE_SPAWN")) {
+            char b[256]; int n = snprintf(b, sizeof(b),
+                "macify: posix_spawn%s(NULL) -> 0 (probe)\n", use_path ? "p" : "");
+            (void)write(2, b, n);
+        }
+        return 0;
+    }
+
     posix_spawnattr_t linux_attr;
     posix_spawn_file_actions_t linux_fa;
 

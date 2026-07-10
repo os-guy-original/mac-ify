@@ -255,6 +255,19 @@ void __macify_set_args(int argc, char **argv, const char *exec_path) {
     if (exec_path) {
         strncpy(__macify_exec_path, exec_path, sizeof(__macify_exec_path) - 1);
     }
+    /* Set __progname from argv[0] (basename). macOS binaries use getprogname()
+     * to get the program name for error messages. */
+    if (argv && argv[0]) {
+        const char *slash = strrchr(argv[0], '/');
+        const char *base = slash ? slash + 1 : argv[0];
+        /* Update both __progname and ___progname */
+        extern char *__progname, *___progname;
+        static char progname_buf[256];
+        strncpy(progname_buf, base, sizeof(progname_buf) - 1);
+        progname_buf[sizeof(progname_buf) - 1] = '\0';
+        __progname = progname_buf;
+        ___progname = progname_buf;
+    }
 }
 
 int *_NSGetArgc(void) {
