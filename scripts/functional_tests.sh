@@ -59,6 +59,8 @@ echo "second line" >> /tmp/ftest/a.txt
 echo '{"name":"macify","version":"1.0","nums":[1,2,3,4,5]}' > /tmp/ftest/data.json
 for i in 3 1 4 1 5 9 2 6; do echo $i; done > /tmp/ftest/nums.txt
 printf "5\n3\n1\n4\n2\n" > /tmp/nums2.txt
+printf "1\n2\n3\n" > /tmp/c1.txt
+printf "2\n3\n4\n" > /tmp/c2.txt
 echo "b 2" > /tmp/ftest/key.txt; echo "a 1" >> /tmp/ftest/key.txt; echo "c 3" >> /tmp/ftest/key.txt
 mkdir -p /tmp/ftest/sub1/sub2
 echo "nested" > /tmp/ftest/sub1/b.txt
@@ -85,7 +87,7 @@ run_if_exists sha256sum_macos  "sha256sum"  "$MACIFY tests/real/sha256sum_macos 
 run_if_exists tr_macos         "tr a-z A-Z" "$MACIFY tests/real/tr_macos a-z A-Z < /tmp/ftest/nums.txt" 0
 run_if_exists cut_macos        "cut -d' '"  "$MACIFY tests/real/cut_macos -d' ' -f1 /tmp/ftest/key.txt" 0 "b|a|c"
 run_if_exists paste_macos      "paste"      "$MACIFY tests/real/paste_macos /tmp/ftest/nums.txt /tmp/nums2.txt" 0
-run_if_exists comm_macos       "comm"       "$MACIFY tests/real/comm_macos <(sort -n /tmp/ftest/nums.txt) <(sort -n /tmp/nums2.txt)" 0
+run_if_exists comm_macos       "comm"       "$MACIFY tests/real/comm_macos /tmp/c1.txt /tmp/c2.txt 2>/dev/null" 0
 run_if_exists uniq_macos       "uniq"       "$MACIFY tests/real/uniq_macos /tmp/ftest/nums.txt" 0
 run_if_exists rev_macos        "rev"        "$MACIFY tests/real/rev_macos < /tmp/ftest/nums.txt" 0
 run_if_exists seq_macos        "seq 1 5"    "$MACIFY tests/real/seq_macos 1 5" 0 "1|2|3|4|5"

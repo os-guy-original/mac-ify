@@ -138,10 +138,21 @@ FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
     FILE *fp = real_fopen(path, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: fopen(\"%s\", \"%s\") = %p errno=%d\n",
+            path ? path : "(null)", mode ? mode : "(null)",
+            (void *)fp, fp ? 0 : errno);
+        (void)write(2, b, n);
+    }
     if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
         if (strchr(mode, 'r') && !strchr(mode, '+')) {
-            macify_save_read_ptr(fp);
-            *(int *)((char *)fp + 8) = -1;
+            /* Don't save read ptr or corrupt _r at fopen time.
+             * glibc's getline manages the buffer internally and
+             * accessing _IO_read_ptr after fopen but before the first
+             * read gives a stale/NULL value. The save/restore mechanism
+             * is only needed when macOS code uses fgetc/fread directly,
+             * and those shims handle it themselves. */
         }
     }
     return fp;
@@ -246,29 +257,29 @@ static void macify_sync_stdio_flags(FILE *fp);
 int __srget(FILE *fp) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
-    macify_restore_read_ptr(fp);
+    int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
+    /* Only restore read ptr for macOS callers — glibc callers (like getline)
+     * manage _IO_read_ptr themselves and restoring a stale value would
+     * rewind the read position, causing data to be re-read or skipped. */
+    if (is_macos) macify_restore_read_ptr(fp);
     int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (getenv("MACIFY_TRACE_SRGET")) {
         void *rp = *(void **)((char *)fp + 8);
         void *re = *(void **)((char *)fp + 0x10);
         char b[256];
         int n = snprintf(b, sizeof(b),
-            "macify: __srget(fp=%p) c=%d read_ptr=%p read_end=%p diff=%ld\n",
-            (void*)fp, c, rp, re, (long)((char*)re - (char*)rp));
+            "macify: __srget(fp=%p) c=%d read_ptr=%p read_end=%p diff=%ld %s\n",
+            (void*)fp, c, rp, re, (long)((char*)re - (char*)rp),
+            is_macos ? "[macOS]" : "[glibc]");
         (void)write(2, b, n);
     }
+    /* Only corrupt _r = -1 for macOS callers. glibc callers (like getline)
+     * access _IO_read_ptr directly and will crash if we corrupt it. */
     if (c != EOF) {
-        macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = -1;
-        /* Don't write to offset 0x10 (_IO_read_end) during reads.
-         * It corrupts the pointer and crashes glibc's buffer management.
-         * The 0x40 (__SERR) check by macOS code is handled by the
-         * write shims (fputc/fwrite/vfprintf) which clear 0x40 after
-         * writes to stdout. For read streams, macOS code checks
-         * __srget's return value (-1 = EOF) not _flags. */
-    } else {
-        macify_restore_read_ptr(fp);
-        /* skip — caller detects EOF via return value */
+        if (is_macos) {
+            macify_save_read_ptr(fp);
+            *(int *)((char *)fp + 8) = -1;
+        }
     }
     return c;
 }
