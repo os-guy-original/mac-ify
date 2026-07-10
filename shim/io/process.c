@@ -108,6 +108,12 @@ ssize_t macify_write(int fd, const void *buf, size_t count) {
     static ssize_t (*real_write)(int, const void *, size_t) = NULL;
     if (!real_write) real_write = dlsym(RTLD_NEXT, "write");
     ssize_t r = real_write(fd, buf, count);
+    if (getenv("MACIFY_TRACE_WRITE") && fd <= 2) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: write(%d, %p, %zu) = %zd\n",
+            fd, buf, count, r);
+        syscall(1, 2, b, n);  /* raw write(2, b, n) to avoid recursion */
+    }
     if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
         errno = macify_linux_to_macos_errno(errno);
     return r;
@@ -664,6 +670,11 @@ size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) _
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fwrite)(const void *, size_t, size_t, FILE *) = NULL;
     if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
+    if (getenv("MACIFY_TRACE_WRITE") && stream == stdout) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: fwrite(%p, %zu, %zu, %p)\n", ptr, size, nmemb, stream);
+        syscall(1, 2, b, n);
+    }
     size_t r = real_fwrite(ptr, size, nmemb, stream);
     if (r > 0) {
         macify_clear_serr_flag(stream);

@@ -389,6 +389,18 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
     );
     /* Flush stdio buffers before exiting — macOS binaries use buffered I/O */
     fflush(NULL);
+    /* Also write directly to stdout/stderr fds in case the macOS binary
+     * uses its own buffered I/O that glibc's fflush doesn't know about.
+     * glibc's stdout buffer is at _IO_write_base (offset 0x28) with
+     * _IO_write_ptr at offset 0x30. */
+    {
+        extern FILE *stdout;
+        char **base = (char **)((char *)stdout + 0x28);
+        char **ptr = (char **)((char *)stdout + 0x30);
+        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            syscall(1, 1, *base, *ptr - *base);  /* raw write(1, base, len) */
+        }
+    }
     __asm__ volatile (
         "mov %[code], %%edi\n\t"
         "mov $231, %%eax\n\t"             /* SYS_exit_group */

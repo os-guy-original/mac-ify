@@ -259,15 +259,28 @@ int map_segment(segment_command_64 *seg,
     int initial_prot = PROT_READ | PROT_WRITE;
     if (seg->initprot & VM_PROT_EXECUTE) initial_prot |= PROT_EXEC;
 
-    void *r = mmap((void *)(uintptr_t)slid_vmaddr, seg->vmsize,
-                   initial_prot,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
-                   -1, 0);
-    if (r == MAP_FAILED) {
-        fprintf(stderr, "macify: mmap segment %s at %#lx (size %#lx): %s\n",
-                seg->segname, (unsigned long)slid_vmaddr,
-                (unsigned long)seg->vmsize, strerror(errno));
-        return -1;
+    /* Use mprotect + memcpy instead of MAP_FIXED to avoid overwriting
+     * other mappings (ld-linux, libc, etc.) when the macOS binary's
+     * segments have large BSS sections. The reservation was already
+     * made during slide computation; we just need to change protection
+     * and copy data. */
+    /* Round vmsize up to page size */
+    size_t map_size = (seg->vmsize + 4095) & ~4095UL;
+
+    /* Change protection from PROT_NONE (reserved) to RWX/RW */
+    if (mprotect((void *)(uintptr_t)slid_vmaddr, map_size, initial_prot) != 0) {
+        /* mprotect failed — the reservation might have been freed.
+         * Fall back to MAP_FIXED. */
+        void *r = mmap((void *)(uintptr_t)slid_vmaddr, map_size,
+                       initial_prot,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                       -1, 0);
+        if (r == MAP_FAILED) {
+            fprintf(stderr, "macify: mmap segment %s at %#lx (size %#lx): %s\n",
+                    seg->segname, (unsigned long)slid_vmaddr,
+                    (unsigned long)map_size, strerror(errno));
+            return -1;
+        }
     }
 
     if (seg->filesize > 0) {
@@ -278,6 +291,12 @@ int map_segment(segment_command_64 *seg,
         memcpy((void *)(uintptr_t)slid_vmaddr,
                file_data + seg->fileoff,
                seg->filesize);
+    }
+
+    /* Zero-fill the BSS part (vmsize > filesize) */
+    if (seg->vmsize > seg->filesize) {
+        memset((void *)(uintptr_t)(slid_vmaddr + seg->filesize), 0,
+               seg->vmsize - seg->filesize);
     }
 
     loaded_segment *s = &g_segments[g_nsegments++];

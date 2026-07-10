@@ -188,7 +188,9 @@ int main(int argc, char **argv, char **envp) {
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (base != MAP_FAILED) {
                 g_slide = (int64_t)(uintptr_t)base - (int64_t)min_vmaddr;
-                munmap(base, span);  /* free reservation; segments will MAP_FIXED */
+                /* Keep the reservation! Don't munmap. The segments will be
+                 * mapped into this reserved region using mprotect+memcpy
+                 * (NOT MAP_FIXED, which can overwrite other mappings). */
                 if (g_verbose) {
                     fprintf(stderr, "macify: PIE binary — slide=%#lx (static base=%#lx, random base=%#lx, span=%#lx)\n",
                             (unsigned long)g_slide, (unsigned long)min_vmaddr,
@@ -234,16 +236,15 @@ int main(int argc, char **argv, char **envp) {
                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                 if (base != MAP_FAILED) {
                     g_slide = (int64_t)(uintptr_t)base - (int64_t)min_vmaddr;
-                    munmap(base, span);
+                    /* Keep the reservation — don't munmap */
                     if (g_verbose) {
                         fprintf(stderr, "macify: non-PIE binary — static base unavailable, using slide=%#lx\n",
                                 (unsigned long)g_slide);
                     }
                 }
-            } else {
-                /* Static address available — unmap probe, slide stays 0 */
-                munmap(probe, span);
             }
+            /* If probe succeeded, the reservation is already at the right place.
+             * Don't munmap — keep it for mprotect+memcpy. */
         }
     }
 
@@ -904,6 +905,33 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: image header set to %#lx\n",
                         (unsigned long)header);
             }
+        }
+
+        /* Set the macOS binary's text range so the shim knows which calls
+         * come from macOS code (and need flag/path translation) vs macify's
+         * own code (which should pass through). Without this, ALL shim
+         * overrides treat callers as non-macOS, skipping flag translation
+         * and path translation — causing open() with macOS flags to fail. */
+        {
+            void (*set_text_range)(uint64_t, uint64_t) =
+                (void (*)(uint64_t, uint64_t))dlsym(g_dylibs[0].handle,
+                                                     "__macify_set_text_range");
+            if (set_text_range) {
+                for (int si = 0; si < g_nsegments; si++) {
+                    if (strcmp(g_segments[si].name, "__TEXT") == 0) {
+                        set_text_range(g_segments[si].vmaddr,
+                                       g_segments[si].vmaddr + g_segments[si].vmsize);
+                        if (g_verbose) {
+                            fprintf(stderr, "macify: text range set to [%#lx, %#lx)\n",
+                                    (unsigned long)g_segments[si].vmaddr,
+                                    (unsigned long)(g_segments[si].vmaddr + g_segments[si].vmsize));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
             /* Pre-resolve shim symbols for the SIGILL handler.
              * This avoids calling dlsym() inside the signal handler
              * (dlsym is not async-signal-safe). */
@@ -918,7 +946,6 @@ int main(int argc, char **argv, char **envp) {
                                           "macify_force_ssl_init_success");
                 if (force_ssl) force_ssl();
             }
-        }
     }
 
     /* Run module initializers (__mod_init_func section). These function

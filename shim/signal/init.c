@@ -106,7 +106,6 @@ static void macify_init_stdio(void) {
     if (!macify_sa_restorer) {
         macify_sa_restorer = macify_restore_rt;
     }
-
     /* Print shim load address for debugging */
     if (getenv("MACIFY_SHIM_DEBUG")) {
         Dl_info info;
