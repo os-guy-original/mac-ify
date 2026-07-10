@@ -456,6 +456,122 @@ int main(int argc, char **argv, char **envp) {
                 g_fast_path_sites, g_slow_path_sites);
     }
 
+    /* Patch macOS getc macros AND __SEOF/__SERR checks together.
+     *
+     * ROOT PROBLEM: macOS FILE struct has _r (int, 4 bytes) at offset 8
+     * and __SEOF/__SERR flags (bits 0x20/0x40) at offset 0x10. glibc has
+     * _IO_read_ptr (char*, 8 bytes) at offset 8 and _IO_read_end (char*)
+     * at offset 0x10. They overlap.
+     *
+     * The macOS getc macro does: --_r; if (_r >= 0) read *_p. The "--_r"
+     * store corrupts _IO_read_ptr. macOS code also checks [fp+0x10] & 0x20
+     * for EOF and [fp+0x10] & 0x40 for error — these are glibc's _IO_read_end
+     * pointer, whose low byte can have bits 0x20/0x40 set, causing false
+     * EOF/error detection.
+     *
+     * FIX (only when BOTH patterns are found):
+     *   1. NOP the getc macro's _r store (prevents _IO_read_ptr corruption)
+     *   2. Change getc's jle to jmp (always call __srget for correct data)
+     *   3. NOP the __SEOF/__SERR check's conditional jump (prevent false EOF)
+     *   4. Set macify_getc_patched=1 so __srget doesn't set _r = -1
+     *
+     * If only getc macros are found (no EOF checks), the old _r = -1
+     * approach is used — it's safer for binaries that don't check __SEOF. */
+    {
+        loaded_section *text_sec = find_section("__TEXT", "__text");
+        if (text_sec) {
+            uint8_t *text = (uint8_t *)(uintptr_t)text_sec->addr;
+            size_t size = text_sec->size;
+
+            /* Step 1: Count __SEOF/__SERR checks */
+            int eof_check_count = 0;
+            for (size_t i = 0; i + 7 < size; i++) {
+                size_t off = i;
+                int has_rex = 0;
+                if (text[off] == 0x41) { has_rex = 1; off++; }
+                if (text[off] != 0xf6) continue;
+                if ((text[off+1] & 0xF8) != 0x40) continue;
+                if (text[off+2] != 0x10) continue;
+                if (text[off+3] != 0x20 && text[off+3] != 0x40) continue;
+                size_t after = i + 4 + has_rex;
+                if (text[after] == 0x75 || text[after] == 0x74 ||
+                    (text[after] == 0x0f && (text[after+1] == 0x85 || text[after+1] == 0x84)))
+                    eof_check_count++;
+            }
+
+            /* Step 2: Only patch getc macros if EOF checks are also present */
+            if (eof_check_count > 0) {
+                /* Patch __SEOF/__SERR checks first */
+                int eof_patched = 0;
+                for (size_t i = 0; i + 7 < size; i++) {
+                    size_t off = i;
+                    int has_rex = 0;
+                    if (text[off] == 0x41) { has_rex = 1; off++; }
+                    if (text[off] != 0xf6) continue;
+                    if ((text[off+1] & 0xF8) != 0x40) continue;
+                    if (text[off+2] != 0x10) continue;
+                    if (text[off+3] != 0x20 && text[off+3] != 0x40) continue;
+                    size_t after = i + 4 + has_rex;
+                    if (text[after] == 0x75 || text[after] == 0x74) {
+                        uintptr_t page = (uintptr_t)(text + after) & ~0xfffUL;
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+                        text[after] = 0x90; text[after + 1] = 0x90;
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
+                        eof_patched++;
+                    } else if (text[after] == 0x0f && (text[after+1] == 0x85 || text[after+1] == 0x84)) {
+                        uintptr_t page = (uintptr_t)(text + after) & ~0xfffUL;
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+                        for (int s = 0; s < 6; s++) text[after + s] = 0x90;
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
+                        eof_patched++;
+                    }
+                }
+
+                /* Patch getc macros */
+                int getc_patched = 0;
+                for (size_t i = 3; i + 16 < size; i++) {
+                    if (text[i] != 0x8d || text[i+1] != 0x48 || text[i+2] != 0xff) continue;
+                    int load_rex = 0, load_rm = -1;
+                    if (i >= 4 && text[i-4] == 0x41 && text[i-3] == 0x8b && text[i-1] == 0x08) {
+                        load_rex = 1; load_rm = text[i-2] & 0x07;
+                    } else if (i >= 3 && text[i-3] == 0x8b && text[i-1] == 0x08) {
+                        load_rex = 0; load_rm = text[i-2] & 0x07;
+                    }
+                    if (load_rm < 0) continue;
+                    int store_start = -1, store_len = 0;
+                    for (size_t j = i + 3; j < i + 8 && j + 3 < size; j++) {
+                        int has_rex = 0; size_t off = j;
+                        if (text[off] == 0x41) { has_rex = 1; off++; }
+                        if (text[off] == 0x89 && (text[off+1] & 0xF8) == 0x48 && text[off+2] == 0x08) {
+                            if ((text[off+1] & 0x07) == load_rm && has_rex == load_rex) {
+                                store_start = (int)j; store_len = 3 + has_rex; break;
+                            }
+                        }
+                    }
+                    if (store_start < 0) continue;
+                    size_t after = (size_t)store_start + store_len;
+                    if (after + 3 >= size) continue;
+                    if (text[after] != 0x85 || text[after+1] != 0xc0 || text[after+2] != 0x7e) continue;
+                    uintptr_t page = (uintptr_t)(text + store_start) & ~0xfffUL;
+                    mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+                    for (int s = 0; s < store_len; s++) text[store_start + s] = 0x90;
+                    text[after + 2] = 0xeb;
+                    mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
+                    getc_patched++;
+                }
+
+                if (g_verbose && (eof_patched || getc_patched)) {
+                    fprintf(stderr, "macify: patched %d __SEOF/__SERR check(s), %d getc macro(s)\n",
+                            eof_patched, getc_patched);
+                }
+                if (eof_patched > 0 && getc_patched > 0) {
+                    int *flag = (int *)dlsym(g_dylibs[0].handle, "macify_getc_patched");
+                    if (flag) *flag = 1;
+                }
+            }
+        }
+    }
+
     /* Patch close_stdout to return 0 immediately.
      * macOS close_stdout checks [FILE* + 0x10] & 0x40 for __SERR (error).
      * Glibc stores _IO_read_end (buffer pointer) at offset 0x10, which

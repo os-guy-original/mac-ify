@@ -147,12 +147,8 @@ FILE *macify_fopen(const char *path, const char *mode) {
     }
     if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
         if (strchr(mode, 'r') && !strchr(mode, '+')) {
-            /* Don't save read ptr or corrupt _r at fopen time.
-             * glibc's getline manages the buffer internally and
-             * accessing _IO_read_ptr after fopen but before the first
-             * read gives a stale/NULL value. The save/restore mechanism
-             * is only needed when macOS code uses fgetc/fread directly,
-             * and those shims handle it themselves. */
+            /* No special buffering needed — the EOF/error check patching
+             * in main.c handles the macOS __SEOF/__SERR flag issue. */
         }
     }
     return fp;
@@ -254,32 +250,39 @@ static void macify_restore_read_ptr(FILE *fp) {
 }
 
 static void macify_sync_stdio_flags(FILE *fp);
+
+/* Global flag: set to 1 by the loader when getc macros have been patched
+ * to always call __srget (NOP'd the _r store + changed jle to jmp).
+ * When patched, __srget does NOT need to corrupt _r = -1, which prevents
+ * breaking glibc functions that access _IO_read_ptr (ftello, fseeko,
+ * fpurge, getline, etc.). */
+int macify_getc_patched = 0;
+
 int __srget(FILE *fp) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
-    /* Only restore read ptr for macOS callers — glibc callers (like getline)
-     * manage _IO_read_ptr themselves and restoring a stale value would
-     * rewind the read position, causing data to be re-read or skipped. */
-    if (is_macos) macify_restore_read_ptr(fp);
+    /* Restore _IO_read_ptr before calling fgetc, but ONLY when the getc
+     * macro is NOT patched. When patched, the store was NOP'd so
+     * _IO_read_ptr is never corrupted and no restore is needed. */
+    if (is_macos && !macify_getc_patched) macify_restore_read_ptr(fp);
     int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (getenv("MACIFY_TRACE_SRGET")) {
         void *rp = *(void **)((char *)fp + 8);
         void *re = *(void **)((char *)fp + 0x10);
         char b[256];
         int n = snprintf(b, sizeof(b),
-            "macify: __srget(fp=%p) c=%d read_ptr=%p read_end=%p diff=%ld %s\n",
+            "macify: __srget(fp=%p) c=%d read_ptr=%p read_end=%p diff=%ld %s%s\n",
             (void*)fp, c, rp, re, (long)((char*)re - (char*)rp),
-            is_macos ? "[macOS]" : "[glibc]");
+            is_macos ? "[macOS]" : "[glibc]",
+            macify_getc_patched ? " [patched]" : "");
         (void)write(2, b, n);
     }
-    /* Only corrupt _r = -1 for macOS callers. glibc callers (like getline)
-     * access _IO_read_ptr directly and will crash if we corrupt it. */
-    if (c != EOF) {
-        if (is_macos) {
-            macify_save_read_ptr(fp);
-            *(int *)((char *)fp + 8) = -1;
-        }
+    /* Set _r = -1 to force the next getc to call __srget again.
+     * SKIP this when getc is patched. */
+    if (c != EOF && is_macos && !macify_getc_patched) {
+        macify_save_read_ptr(fp);
+        *(int *)((char *)fp + 8) = -1;
     }
     return c;
 }
@@ -343,7 +346,7 @@ int getc_unlocked(FILE *fp) {
     int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (c != EOF) {
         macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+        if (!macify_getc_patched) *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(fp);
         /* skip — caller detects EOF via return value */
@@ -375,7 +378,7 @@ int getchar_unlocked(void) {
     int c = real_fgetc ? real_fgetc(__stdinp) : EOF;
     if (c != EOF) {
         macify_save_read_ptr(__stdinp);
-        *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
+        if (!macify_getc_patched) *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(__stdinp);
         /* skip */
@@ -429,7 +432,7 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
-    macify_restore_read_ptr(stream);
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
@@ -439,7 +442,7 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
             (flags_before & 0x20) ? 1 : 0, (flags_before & 0x10) ? 1 : 0);
         (void)write(2, b, n);
     }
-    if (r > 0) {
+    if (r > 0 && !macify_getc_patched) {
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
         /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte).
@@ -458,17 +461,14 @@ int macify_fgetc(FILE *stream) __asm__("fgetc");
 int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
-    /* Restore saved _IO_read_ptr before calling fgetc (like __srget) */
-    macify_restore_read_ptr(stream);
+    /* Restore _IO_read_ptr before calling fgetc, unless getc is patched. */
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
-    if (r != EOF) {
+    if (r != EOF && !macify_getc_patched) {
         /* Save _IO_read_ptr and set _r = -1 to prevent inlined getc
          * from dereferencing _p (glibc _flags = 0xfbad2084) → SIGSEGV. */
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
-    } else {
-        macify_restore_read_ptr(stream);
-        /* skip */
     }
     return r;
 }
@@ -480,9 +480,9 @@ int macify_ungetc(int c, FILE *stream) __asm__("ungetc");
 int macify_ungetc(int c, FILE *stream) {
     static int (*real_ungetc)(int, FILE *) = NULL;
     if (!real_ungetc) real_ungetc = dlsym(RTLD_NEXT, "ungetc");
-    macify_restore_read_ptr(stream);
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_ungetc(c, stream);
-    if (r != EOF) {
+    if (r != EOF && !macify_getc_patched) {
         /* Re-save and re-corrupt _r = -1 */
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
@@ -723,7 +723,7 @@ FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
     FILE *fp = real_fdopen(fd, mode);
-    if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
+    if (fp && !macify_getc_patched && macify_caller_is_macos_text(__builtin_return_address(0))) {
         /* Save _IO_read_ptr and set _r = -1 (see fopen for details). */
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
