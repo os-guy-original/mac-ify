@@ -925,6 +925,7 @@ int main(int argc, char **argv, char **envp) {
          * constructor code (sigaction, dladdr, etc.) may set errno,
          * and macOS binaries expect errno to be 0 at program start. */
         errno = 0;
+        if (g_verbose) { const char m[] = "ENTERING MAIN\n"; write(2, m, sizeof(m)-1); }
         call_main_and_exit(g_entry_rip, stack_top);
     } else {
         errno = 0;

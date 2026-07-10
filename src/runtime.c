@@ -296,13 +296,11 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         struct k_sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.handler = crash_handler;
-        /* SA_SIGINFO=4 | SA_NODEFER=0x40000000 | SA_RESTORER=0x01000000 */
+        /* SA_SIGINFO=4 | SA_NODEFER=0x40000000 | SA_RESTORER=0x01000000
+         * SA_ONSTACK=0x08000000 — always use sigaltstack so the handler
+         * runs on a valid stack even if the main stack is corrupted. */
         extern uint64_t g_tls_g_addr;
-        if (g_tls_g_addr) {
-            sa.flags = 0x49000004;  /* +SA_ONSTACK=0x08000000 for Go */
-        } else {
-            sa.flags = 0x41000004;  /* no SA_ONSTACK for non-Go */
-        }
+        sa.flags = 0x49000004;  /* SA_SIGINFO | SA_NODEFER | SA_RESTORER | SA_ONSTACK */
         sa.restorer = local_restore_rt;
         memset(sa.mask, 0, sizeof(sa.mask));
         /* Raw rt_sigaction syscall: syscall(13, signum, act, oldact, sigsetsize) */
@@ -381,10 +379,29 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         "1: add $8, %%rcx\n\t"
         "cmpq $0, -8(%%rcx)\n\t"
         "jne 1b\n\t"
+        /* Debug: write 'B' before calling main */
+        "push %%rdi\n\t"
+        "push %%rsi\n\t"
+        "push %%rdx\n\t"
+        "push %%rcx\n\t"
+        "push %%r11\n\t"
+        "mov $1, %%rax\n\t"               /* write */
+        "mov $2, %%rdi\n\t"               /* stderr */
+        "lea 3f(%%rip), %%rsi\n\t"        /* message */
+        "mov $2, %%rdx\n\t"               /* length */
+        "syscall\n\t"
+        "pop %%r11\n\t"
+        "pop %%rcx\n\t"
+        "pop %%rdx\n\t"
+        "pop %%rsi\n\t"
+        "pop %%rdi\n\t"
         /* Call main(argc, argv, envp, apple) */
         "call *%%r11\n\t"
         /* main() returned; save return value */
         "mov %%eax, %[ret]\n\t"
+        "jmp 4f\n\t"
+        "3: .ascii \"B\\n\"\n\t"
+        "4: .text\n\t"
         : [ret] "=r"(ret)
         : [entry] "r"(entry), [stk] "r"(stack_top)
         : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"

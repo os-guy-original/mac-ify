@@ -178,7 +178,12 @@ static int64_t map_dylib_segments(uint8_t *file_data, size_t file_size, macho_dy
                        seg->vmsize - seg->filesize);
             }
 
-            /* Set correct protection */
+            /* Set correct protection.
+             * For __DATA_CONST: macOS makes this read-only after fixups.
+             * We keep it writable during fixup processing (GOT resolution
+             * needs to write to it), then make it read-only AFTER all
+             * fixups are done. For now, keep it writable — the GOT
+             * resolution happens after segment mapping. */
             mprotect((void *)(uintptr_t)target, map_size, prot);
         }
         lc = (load_command *)((uint8_t *)lc + lc->cmdsize);
@@ -680,6 +685,11 @@ int macho_load_dylib(const char *path) {
                         if ((sec_type == 7 || sec_type == 6) && s->reserved1 > 0) {
                             uint32_t start_idx = s->reserved1;
                             uint32_t n_entries = s->size / 8;
+                            if (g_verbose)
+                                fprintf(stderr, "macify: dylib section %s.%s type=%u addr=0x%lx size=%lu r1=%u n_entries=%u\n",
+                                        seg->segname, s->sectname, sec_type,
+                                        (unsigned long)s->addr, (unsigned long)s->size,
+                                        s->reserved1, n_entries);
                             uint32_t *indirect = (uint32_t *)(file_data + indirectsym_off3);
                             const char *strtab = (const char *)(file_data + strtab_off3);
                             nlist_64 *syms = (nlist_64 *)(file_data + symtab_off3);
