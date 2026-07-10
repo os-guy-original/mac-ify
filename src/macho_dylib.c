@@ -335,6 +335,166 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
     }
 }
 
+/* ── Bind fixup processing for dylibs ────────────────────────── */
+
+/* Bind opcodes (same as main binary) */
+#define BIND_OPCODE_DONE                             0x00
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_IMM            0x10
+#define BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB           0x20
+#define BIND_OPCODE_SET_DYLIB_SPECIAL_IMM            0x30
+#define BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM    0x40
+#define BIND_OPCODE_SET_TYPE_IMM                     0x50
+#define BIND_OPCODE_SET_ADDEND_SLEB                  0x60
+#define BIND_OPCODE_SET_SEGMENT_RELATIVE_OFFSET_ULEB 0x70
+#define BIND_OPCODE_ADD_ADDR_ULEB                    0x80
+#define BIND_OPCODE_DO_BIND                          0x90
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB            0xA0
+#define BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED      0xB0
+#define BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xC0
+#define BIND_TYPE_POINTER 1
+
+/* Process bind opcodes for a dylib.
+ * Resolves the dylib's external imports against shim/libc/libm. */
+static void process_dylib_binds(uint8_t *file_data, size_t file_size,
+                                int64_t slide,
+                                uint32_t bind_off, uint32_t bind_size,
+                                dylib_segment *segs, int nsegs) {
+    if (bind_off == 0 || bind_size == 0) return;
+    if (bind_off + bind_size > file_size) return;
+
+    uint8_t *p = file_data + bind_off;
+    uint8_t *end = p + bind_size;
+
+    int seg_index = -1;
+    uint64_t seg_offset = 0;
+    uint32_t type = 0;
+    int lib_ordinal = 0;
+    char sym_name[256] = "";
+    int64_t addend = 0;
+
+    while (p < end) {
+        uint8_t op = *p++;
+        uint8_t imm = op & 0x0F;
+        op &= 0xF0;
+
+        switch (op) {
+            case BIND_OPCODE_DONE:
+                return;
+
+            case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+                lib_ordinal = imm;
+                break;
+
+            case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+                lib_ordinal = (int)read_uleb128((const uint8_t **)&p, end);
+                break;
+
+            case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+                lib_ordinal = imm ? (int)(imm | 0xF0) : 0;
+                break;
+
+            case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
+                size_t i = 0;
+                while (p < end && *p != 0 && i < sizeof(sym_name) - 1) {
+                    sym_name[i++] = *p++;
+                }
+                sym_name[i] = '\0';
+                if (p < end) p++; /* skip null terminator */
+                break;
+            }
+
+            case BIND_OPCODE_SET_TYPE_IMM:
+                type = imm;
+                break;
+
+            case BIND_OPCODE_SET_ADDEND_SLEB:
+                addend = read_sleb128((const uint8_t **)&p, end);
+                break;
+
+            case BIND_OPCODE_SET_SEGMENT_RELATIVE_OFFSET_ULEB:
+                seg_index = imm;
+                seg_offset = read_uleb128((const uint8_t **)&p, end);
+                break;
+
+            case BIND_OPCODE_ADD_ADDR_ULEB:
+                seg_offset += read_uleb128((const uint8_t **)&p, end);
+                break;
+
+            case BIND_OPCODE_DO_BIND:
+                if (seg_index >= 0 && seg_index < nsegs) {
+                    uint64_t target = segs[seg_index].vmaddr + seg_offset + slide;
+                    const char *sym = sym_name;
+                    if (sym[0] == '_') sym++;
+
+                    /* Resolve symbol: use flat namespace (search all) */
+                    void *addr = resolve_symbol(-1, sym);
+                    if (addr) {
+                        *(uint64_t *)(uintptr_t)target = (uint64_t)(uintptr_t)addr + addend;
+                        if (getenv("MACIFY_TRACE_FIXUPS") && g_verbose)
+                            fprintf(stderr, "macify: dylib bind %s -> %p at 0x%lx\n",
+                                    sym, addr, (unsigned long)target);
+                    } else {
+                        /* Stub unresolved symbols */
+                        extern long macify_unresolved_stub(void);
+                        *(uint64_t *)(uintptr_t)target = (uint64_t)(uintptr_t)macify_unresolved_stub;
+                        if (g_verbose)
+                            fprintf(stderr, "macify: dylib bind STUBBED: %s\n", sym);
+                    }
+                    seg_offset += sizeof(uint64_t);
+                }
+                break;
+
+            case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
+                if (seg_index >= 0 && seg_index < nsegs) {
+                    uint64_t target = segs[seg_index].vmaddr + seg_offset + slide;
+                    const char *sym = sym_name;
+                    if (sym[0] == '_') sym++;
+                    void *addr = resolve_symbol(-1, sym);
+                    if (addr) {
+                        *(uint64_t *)(uintptr_t)target = (uint64_t)(uintptr_t)addr + addend;
+                    }
+                    seg_offset += sizeof(uint64_t) + read_uleb128((const uint8_t **)&p, end);
+                }
+                break;
+
+            case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
+                if (seg_index >= 0 && seg_index < nsegs) {
+                    uint64_t target = segs[seg_index].vmaddr + seg_offset + slide;
+                    const char *sym = sym_name;
+                    if (sym[0] == '_') sym++;
+                    void *addr = resolve_symbol(-1, sym);
+                    if (addr) {
+                        *(uint64_t *)(uintptr_t)target = (uint64_t)(uintptr_t)addr + addend;
+                    }
+                    seg_offset += (uint64_t)imm * sizeof(uint64_t) + sizeof(uint64_t);
+                }
+                break;
+
+            case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB: {
+                uint64_t count = read_uleb128((const uint8_t **)&p, end);
+                uint64_t skip = read_uleb128((const uint8_t **)&p, end);
+                for (uint64_t i = 0; i < count; i++) {
+                    if (seg_index >= 0 && seg_index < nsegs) {
+                        uint64_t target = segs[seg_index].vmaddr + seg_offset + slide;
+                        const char *sym = sym_name;
+                        if (sym[0] == '_') sym++;
+                        void *addr = resolve_symbol(-1, sym);
+                        if (addr) {
+                            *(uint64_t *)(uintptr_t)target = (uint64_t)(uintptr_t)addr + addend;
+                        }
+                    }
+                    seg_offset += skip + sizeof(uint64_t);
+                }
+                break;
+            }
+
+            default:
+                /* Unknown opcode — stop to avoid corrupting state */
+                return;
+        }
+    }
+}
+
 /* ── Public API ─────────────────────────────────────────────── */
 
 /* Load a Mach-O dylib into memory and register its symbols.
@@ -445,8 +605,115 @@ int macho_load_dylib(const char *path) {
             fprintf(stderr, "macify: dylib %s: chained fixups processed\n", path);
     }
 
+    /* Apply bind fixups (LC_DYLD_INFO format) — resolve the dylib's
+     * own external imports (e.g. _pthread_create, _malloc, etc.)
+     * against the already-loaded shim/libc/libm libraries.
+     * Also process lazy bind opcodes (resolved on first call). */
+    {
+        load_command *lc2 = (load_command *)(file_data + sizeof(mach_header_64));
+        uint32_t bind_off2 = 0, bind_size2 = 0;
+        uint32_t lazy_off2 = 0, lazy_size2 = 0;
+        for (uint32_t i = 0; i < hdr->ncmds; i++) {
+            if (lc2->cmd == LC_DYLD_INFO_ONLY || lc2->cmd == LC_DYLD_INFO) {
+                dyld_info_command *di = (dyld_info_command *)lc2;
+                bind_off2 = di->bind_off;
+                bind_size2 = di->bind_size;
+                lazy_off2 = di->lazy_bind_off;
+                lazy_size2 = di->lazy_bind_size;
+                break;
+            }
+            lc2 = (load_command *)((uint8_t *)lc2 + lc2->cmdsize);
+        }
+        if (bind_off2 > 0 && bind_size2 > 0) {
+            process_dylib_binds(file_data, file_size, slide,
+                                bind_off2, bind_size2, dsegs, ndsegs);
+            if (g_verbose)
+                fprintf(stderr, "macify: dylib %s: %u bind bytes processed\n", path, bind_size2);
+        }
+        if (lazy_off2 > 0 && lazy_size2 > 0) {
+            process_dylib_binds(file_data, file_size, slide,
+                                lazy_off2, lazy_size2, dsegs, ndsegs);
+            if (g_verbose)
+                fprintf(stderr, "macify: dylib %s: %u lazy bind bytes processed\n", path, lazy_size2);
+        }
+    }
+
     /* Parse the dylib's exported symbol table */
     parse_dylib_exports(md, file_data, file_size);
+
+    /* Resolve __la_symbol_ptr and __got entries using the indirect symbol table.
+     * First pass: find LC_SYMTAB and LC_DYSYMTAB to get table offsets.
+     * Second pass: find __la_symbol_ptr and __got sections and resolve them. */
+    {
+        load_command *lc3 = (load_command *)(file_data + sizeof(mach_header_64));
+        uint32_t symtab_off3 = 0, symtab_nsyms3 = 0;
+        uint32_t strtab_off3 = 0, strtab_size3 = 0;
+        uint32_t indirectsym_off3 = 0;
+
+        /* First pass: get table offsets */
+        for (uint32_t i = 0; i < hdr->ncmds; i++) {
+            if (lc3->cmd == LC_SYMTAB) {
+                symtab_command *sc = (symtab_command *)lc3;
+                symtab_off3 = sc->symoff;
+                symtab_nsyms3 = sc->nsyms;
+                strtab_off3 = sc->stroff;
+                strtab_size3 = sc->strsize;
+            } else if (lc3->cmd == LC_DYSYMTAB) {
+                dysymtab_command *dc = (dysymtab_command *)lc3;
+                indirectsym_off3 = dc->indirectsymoff;
+            }
+            lc3 = (load_command *)((uint8_t *)lc3 + lc3->cmdsize);
+        }
+
+        /* Second pass: resolve sections */
+        if (indirectsym_off3 > 0 && symtab_off3 > 0 && strtab_off3 > 0) {
+            lc3 = (load_command *)(file_data + sizeof(mach_header_64));
+            for (uint32_t i = 0; i < hdr->ncmds; i++) {
+                if (lc3->cmd == LC_SEGMENT_64) {
+                    segment_command_64 *seg = (segment_command_64 *)lc3;
+                    section_64 *sects = (section_64 *)((uint8_t *)lc3 + sizeof(segment_command_64));
+                    for (uint32_t j = 0; j < seg->nsects; j++) {
+                        section_64 *s = &sects[j];
+                        uint32_t sec_type = s->flags & 0xff;
+
+                        /* Resolve S_LAZY_SYMBOL_POINTERS (7) and S_NON_LAZY_SYMBOL_POINTERS (6) */
+                        if ((sec_type == 7 || sec_type == 6) && s->reserved1 > 0) {
+                            uint32_t start_idx = s->reserved1;
+                            uint32_t n_entries = s->size / 8;
+                            uint32_t *indirect = (uint32_t *)(file_data + indirectsym_off3);
+                            const char *strtab = (const char *)(file_data + strtab_off3);
+                            nlist_64 *syms = (nlist_64 *)(file_data + symtab_off3);
+                            uint64_t sec_base = s->addr + slide;
+                            int resolved = 0;
+
+                            for (uint32_t k = 0; k < n_entries; k++) {
+                                uint32_t sym_idx = indirect[start_idx + k];
+                                if (sym_idx & 0x80000000) continue;
+                                if (sym_idx >= symtab_nsyms3) continue;
+                                nlist_64 *nl = &syms[sym_idx];
+                                if (nl->n_strx >= strtab_size3) continue;
+                                const char *name = strtab + nl->n_strx;
+                                if (name[0] == '_') name++;
+                                void *addr = resolve_symbol(-1, name);
+                                if (addr) {
+                                    *(uint64_t *)(uintptr_t)(sec_base + k * 8) = (uint64_t)(uintptr_t)addr;
+                                    resolved++;
+                                } else if (g_verbose) {
+                                    fprintf(stderr, "macify: dylib UNRESOLVED %s.%s[%u]: %s\n",
+                                            seg->segname, s->sectname, k, name);
+                                }
+                            }
+                            if (g_verbose && resolved > 0)
+                                fprintf(stderr, "macify: dylib %s: %d/%d %s resolved\n",
+                                        path, resolved, n_entries,
+                                        sec_type == 7 ? "la_symbol_ptr" : "GOT");
+                        }
+                    }
+                }
+                lc3 = (load_command *)((uint8_t *)lc3 + lc3->cmdsize);
+            }
+        }
+    }
 
     if (g_verbose)
         fprintf(stderr, "macify: dylib %s: %d exported symbols\n", path, md->n_exports);

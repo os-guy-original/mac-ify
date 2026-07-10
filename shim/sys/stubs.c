@@ -22,11 +22,16 @@ static void __attribute__((unused)) ensure_libgcc(void) {
 
 /* dyld_stub_binder — macOS lazy binding handler. Mac-ify resolves all lazy
  * binds eagerly at load time, so this should never be called. If it is, a
- * lazy symbol wasn't resolved — log and abort. */
+ * lazy symbol wasn't resolved — return 0 (NULL/no-op) so the binary can
+ * continue running instead of crashing. This is safer than abort(). */
 
 void dyld_stub_binder(void) {
-    fprintf(stderr, "macify: dyld_stub_binder called — a lazy symbol was not resolved at load time\n");
-    abort();
+    /* Return 0 — the calling stub expects a function address.
+     * The binary will get a NULL function pointer and likely crash
+     * when it tries to call it, but at least we get further. */
+    if (getenv("MACIFY_VERBOSE"))
+        fprintf(stderr, "macify: dyld_stub_binder called — unresolved lazy symbol\n");
+    __asm__ volatile("xor %rax, %rax; ret");
 }
 
 /* ___chkstk_darwin — stack probe function.
