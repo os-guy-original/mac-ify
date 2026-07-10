@@ -907,6 +907,24 @@ int main(int argc, char **argv, char **envp) {
                     resolved, unresolved);
     }
 
+    /* Switch to macOS FILE structs if the binary uses inlined putc macros.
+     * Detected by text section size > 100KB (bash, node, etc.).
+     * Small binaries (echo, cat, ls) work fine with glibc's FILE. */
+    if (g_ndylibs > 0 && g_dylibs[0].handle) {
+        loaded_section *text_sec = find_section("__TEXT", "__text");
+        if (text_sec && text_sec->size > 100000) {
+            void (*use_macos_stdio)(void) =
+                (void (*)(void))dlsym(g_dylibs[0].handle,
+                                       "macify_use_macos_stdio");
+            if (use_macos_stdio) {
+                use_macos_stdio();
+                if (g_verbose)
+                    fprintf(stderr, "macify: using macOS FILE structs (text=%zu bytes > 100KB)\n",
+                            text_sec->size);
+            }
+        }
+    }
+
     /* Set up TLV (Thread-Local Variable) info in the shim. Find __thread_data
      * and __thread_bss sections and pass them to __macify_set_tlv_info() so
      * the shim can allocate per-thread TLV blocks. Must run before main(). */

@@ -547,7 +547,13 @@ void exit(int status) {
     /* Flush macOS FILE buffers before exiting */
     extern void macify_flush_macos_files(void);
     macify_flush_macos_files();
-    fflush(NULL);  /* Flush all glibc stdio streams */
+    /* Only flush glibc streams if __stdoutp is still glibc's stdout.
+     * If we switched to macOS FILE, glibc's stdout is stale. */
+    extern FILE *__stdoutp;
+    extern FILE *stdout;
+    if (__stdoutp == stdout) {
+        fflush(NULL);
+    }
     _exit(status);
 }
 

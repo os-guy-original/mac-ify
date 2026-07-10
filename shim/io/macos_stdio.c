@@ -124,8 +124,10 @@ size_t macify_fwrite_macos(const void *ptr, size_t size, size_t nmemb, void *fp)
     size_t total = size * nmemb;
     const char *p = (const char *)ptr;
 
+    /* Flush existing buffer contents first */
     macos_flush(f);
 
+    /* Write directly via write() */
     if (total > 0) {
         ssize_t r = write(f->_file, p, total);
         (void)r;
@@ -166,4 +168,36 @@ void macify_init_macos_stdio(void) {
     __stdoutp = (FILE *)(void *)&macos_stdout;
     __stderrp = (FILE *)(void *)&macos_stderr;
     __stdinp = (FILE *)(void *)&macos_stdin;
+}
+
+/* Switch to macOS FILE structs for stdout/stderr.
+ * Called by the macify loader after it detects the binary uses inlined
+ * putc macros (text section > 100KB). This replaces glibc's FILE with
+ * our macOS-format FILE, so the putc macro writes to a real buffer. */
+void macify_use_macos_stdio(void) {
+    extern FILE *__stdoutp, *__stderrp;
+    /* Flush glibc's buffers using raw syscall to avoid glibc's FILE
+     * validation (which would fail after we switch __stdoutp). */
+    extern FILE *stdout, *stderr;
+    {
+        char **base = (char **)((char *)stdout + 0x28);
+        char **ptr = (char **)((char *)stdout + 0x30);
+        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            syscall(1, 1, *base, *ptr - *base);
+            *ptr = *base;
+        }
+    }
+    {
+        char **base = (char **)((char *)stderr + 0x28);
+        char **ptr = (char **)((char *)stderr + 0x30);
+        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            syscall(1, 2, *base, *ptr - *base);
+            *ptr = *base;
+        }
+    }
+    /* Switch to macOS FILE structs */
+    __stdoutp = (FILE *)(void *)&macos_stdout;
+    __stderrp = (FILE *)(void *)&macos_stderr;
+    /* Note: __stdinp stays as glibc's stdin for now — read support
+     * for macOS FILE is not yet implemented. */
 }

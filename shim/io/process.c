@@ -310,14 +310,18 @@ int __srget(FILE *fp) {
  *
  * Fix: After fputc, set _w = -1 to force next putc to call __swbuf. */
 int __swbuf(int ch, FILE *fp) {
-    /* Call real glibc fputc directly (NOT our macify_fputc shim) to
-     * avoid double write-(-1) corruption. See __srget for details. */
+    /* Check if this is a macOS-format FILE (our own struct) */
+    extern int macify_is_macos_file(void *);
+    if (macify_is_macos_file(fp)) {
+        /* Write to the macOS FILE buffer directly */
+        extern int macify_fputc_macos(int, void *);
+        return macify_fputc_macos(ch, fp);
+    }
+    /* glibc FILE — call real fputc, then re-set _w = -1 */
     static int (*real_fputc)(int, FILE *) = NULL;
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
-        /* Only modify stdout/stderr — other streams' _IO_read_ptr
-         * gets corrupted by _w=-1 write. */
         extern FILE *__stdoutp, *__stderrp;
         if (fp == __stdoutp || fp == __stderrp) {
             macify_clear_serr_flag(fp);
@@ -546,6 +550,12 @@ void macify_clearerr(FILE *stream) {
 
 int macify_fclose(FILE *stream) __asm__("fclose");
 int macify_fclose(FILE *stream) {
+    /* If using macOS FILE, just flush and return */
+    extern int macify_is_macos_file(void *);
+    if (macify_is_macos_file(stream)) {
+        extern int macify_fflush_macos(void *);
+        return macify_fflush_macos(stream);
+    }
     static int (*real_fclose)(FILE *) = NULL;
     if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
     /* Restore saved _IO_read_ptr before fclose. */
@@ -575,6 +585,12 @@ int macify_fclose(FILE *stream) {
 int macify_ferror(FILE *stream) __asm__("ferror");
 int macify_ferror(FILE *stream) {
     if (!stream) return 0;
+    extern int macify_is_macos_file(void *);
+    if (macify_is_macos_file(stream)) {
+        /* macOS FILE: check _flags (offset 16, short) bit 0x40 (__SERR) */
+    short *flags = (short *)((char *)stream + 16);
+    return (*flags & 0x40) ? 1 : 0;
+    }
     unsigned int glibc_flags = *(unsigned int *)((char *)stream + 0);
     return (glibc_flags & 0x20) ? 1 : 0;  /* _IO_ERR_SEEN */
 }
@@ -583,6 +599,12 @@ int macify_ferror(FILE *stream) {
 int macify_feof(FILE *stream) __asm__("feof");
 int macify_feof(FILE *stream) {
     if (!stream) return 0;
+    extern int macify_is_macos_file(void *);
+    if (macify_is_macos_file(stream)) {
+        /* macOS FILE: check _flags (offset 16, short) bit 0x20 (__SEOF) */
+    short *flags = (short *)((char *)stream + 16);
+    return (*flags & 0x20) ? 1 : 0;
+    }
     unsigned int glibc_flags = *(unsigned int *)((char *)stream + 0);
     return (glibc_flags & 0x10) ? 1 : 0;  /* _IO_EOF_SEEN */
 }
@@ -594,6 +616,9 @@ int macify_feof(FILE *stream) {
  * detects a write error. We intercept setvbuf to allocate a safe buffer. */
 int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) __asm__("setvbuf");
 int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
+    /* If using macOS FILE, ignore setvbuf — our buffer is already set up */
+    extern int macify_is_macos_file(void *);
+    if (macify_is_macos_file(stream)) return 0;
     static int (*real_setvbuf)(FILE *, char *, int, size_t) = NULL;
     if (!real_setvbuf) real_setvbuf = dlsym(RTLD_NEXT, "setvbuf");
     
@@ -628,11 +653,6 @@ int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
 
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fwrite");
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-    if (getenv("MACIFY_TRACE_WRITE")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            ptr, size, nmemb, stream, 0);
-        syscall(1, 2, b, n);
-    }
     /* Check if this is a macOS-format FILE (our own struct) */
     extern int macify_is_macos_file(void *);
     extern size_t macify_fwrite_macos(const void *, size_t, size_t, void *);
@@ -819,6 +839,11 @@ int macify_fflush(FILE *stream) {
     /* Flush macOS FILEs if flushing all */
     if (stream == NULL) {
         macify_fflush_macos(NULL);
+        /* Only flush glibc streams if __stdoutp is still glibc's stdout.
+         * If we switched to macOS FILE, glibc's stdout is stale. */
+        extern FILE *__stdoutp;
+        extern FILE *stdout;
+        if (__stdoutp != stdout) return 0;
     }
     /* Flush glibc streams normally */
     static int (*real_fflush)(FILE *) = NULL;

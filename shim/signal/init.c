@@ -35,29 +35,12 @@ void macify_restore_rt(void) {
 /* Constructor to initialize the stdio pointers and signal handling. */
 __attribute__((constructor))
 static void macify_init_stdio(void) {
-    /* Use glibc's stdout/stderr/stdin for __stdoutp/__stderrp/__stdinp.
-     * Most macOS binaries work fine with glibc's FILE structs — they call
-     * fwrite/fputs/printf (which we intercept) rather than using inlined
-     * putc macros. The 0xfbad2000 page mapping catches crashes from
-     * binaries that do use inlined macros.
-     *
-     * For bash (which uses inlined putc extensively), we could switch to
-     * macOS FILE structs, but that requires more work to avoid breaking
-     * other binaries. For now, use glibc's FILE for compatibility. */
+    /* Start with glibc's FILE structs. The macify loader will switch to
+     * macOS FILE structs later (via macify_use_macos_stdio) if the binary
+     * uses inlined putc macros (detected by text size > 100KB). */
     __stderrp = stderr;
     __stdinp = stdin;
     __stdoutp = stdout;
-
-    /* Force _w = -1 on stdout/stderr so that macOS's inlined putc macro
-     * always calls __swbuf (which we intercept) instead of writing directly
-     * to *_p (which would corrupt glibc's FILE struct).
-     *
-     * macOS FILE layout: _w is at offset 12 (int).
-     * glibc FILE layout: offset 12 is the upper 4 bytes of _IO_read_ptr.
-     * Setting it to -1 makes putc always call __swbuf.
-     * For write-only streams (stdout/stderr), corrupting _IO_read_ptr is safe. */
-    *(int *)((char *)stdout + 12) = -1;
-    *(int *)((char *)stderr + 12) = -1;
 
     /* Map a zeroed page at 0xfbad2000 so that dereferencing glibc's _flags
      * (0xfbad2084 etc.) as a pointer returns 0 instead of SIGSEGV.
