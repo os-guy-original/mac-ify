@@ -69,6 +69,22 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             extern uintptr_t g_macos_text_hi;
             uintptr_t rip_val = (uintptr_t)regs[REG_RIP];
             if (rip_val >= g_macos_text_lo && rip_val < g_macos_text_hi) {
+                /* Flush stdout buffer before exiting.
+                 * We can't call fflush(NULL) because macOS code may have
+                 * corrupted FILE* structures. Instead, use write(1, ...) to
+                 * flush stdout's glibc buffer directly.
+                 * glibc's FILE struct for stdout has _IO_write_base at
+                 * offset 0x28 and _IO_write_ptr at offset 0x30 (64-bit). */
+                extern FILE *stdout;
+                extern FILE *stderr;
+                /* Only flush if it looks like a valid glibc FILE* */
+                if (stdout) {
+                    char **base = (char **)((char *)stdout + 0x28);
+                    char **ptr = (char **)((char *)stdout + 0x30);
+                    if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                        write(1, *base, *ptr - *base);
+                    }
+                }
                 extern void _exit(int);
                 if (getenv("MACIFY_TRACE_RECOVERY")) {
                     char b[128]; int n = snprintf(b, sizeof(b),

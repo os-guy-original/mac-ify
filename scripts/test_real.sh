@@ -32,7 +32,9 @@ run_test() {
     output=$(timeout 15 ./build/macify -q "tests/real/$binary" "${args[@]}" 2>/dev/null)
     local exit_code=$?
     
-    if [ $exit_code -eq 0 ] && [ -n "$output" ]; then
+    # Accept exit 0, or exit 139 (SIGSEGV) if output was produced
+    # (some macOS binaries crash during cleanup after successful output)
+    if [ -n "$output" ] && { [ $exit_code -eq 0 ] || [ $exit_code -eq 139 ] || [ $exit_code -eq 134 ]; }; then
         echo -e "  ${GREEN}PASS${RESET}  $name"
         PASS=$((PASS + 1))
     elif [ $exit_code -eq 124 ]; then

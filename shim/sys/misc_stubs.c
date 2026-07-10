@@ -650,6 +650,30 @@ int task_info(uint32_t target_task, int flavor, void *task_info_out, uint32_t *c
     return 0;
 }
 
+/* task_policy_set - Mach task policy. Stub, returns 0 (KERN_SUCCESS).
+ * nvim uses this to set thread QoS (quality of service) which has no
+ * Linux equivalent. Returning success lets nvim continue. */
+int task_policy_set(uint32_t task, int policy, int task_info_out, uint32_t count) {
+    (void)task; (void)policy; (void)task_info_out; (void)count;
+    return 0;  /* KERN_SUCCESS */
+}
+
+/* sscanf_l - locale-aware sscanf. We don't have locale-aware scanning,
+ * so just delegate to regular sscanf with the C locale. */
+#include <stdio.h>
+#include <stdarg.h>
+int sscanf_l(const char *str, void *loc, const char *fmt, ...) {
+    (void)loc;
+    va_list ap;
+    va_start(ap, fmt);
+    /* We can't call vsscanf directly because it doesn't exist as a
+     * public symbol. Use sscanf with a trick: parse the format string
+     * to count arguments. For now, just call vsscanf if available. */
+    int r = vsscanf(str, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
 /* proc_regionfilename - get the pathname for a memory region. Stub. */
 int proc_regionfilename(int pid, uint64_t address, void *buffer, uint32_t buffersize) {
     (void)pid; (void)address;

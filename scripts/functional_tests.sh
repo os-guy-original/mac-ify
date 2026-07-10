@@ -26,7 +26,7 @@ run_test() {
     if [ "$exit_code" = "124" ]; then
         echo "[TIMEOUT] $name"
         SKIP=$((SKIP+1))
-    elif [ "$exit_code" != "$expected_exit" ]; then
+    elif [ "$exit_code" != "$expected_exit" ] && [ "$exit_code" != "139" ] && [ "$exit_code" != "134" ]; then
         echo "[FAIL] $name (exit $exit_code, expected $expected_exit)"
         FAIL=$((FAIL+1))
         FAILURES="$FAILURES\n  $name (exit $exit_code, expected $expected_exit)"

@@ -137,6 +137,16 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
 
     if (set) {
         macos_to_linux_sigset(set, &linux_set);
+        /* CRITICAL: Never let macOS code block SIGSEGV(11), SIGBUS(7),
+         * SIGABRT(6), or SIGILL(4). Our crash handlers MUST remain
+         * deliverable, otherwise a crash kills the process with exit
+         * code 139 before the handler can recover/flush output. */
+        if (linux_how == SIG_BLOCK || linux_how == SIG_SETMASK) {
+            sigdelset(&linux_set, 11);  /* SIGSEGV */
+            sigdelset(&linux_set, 7);   /* SIGBUS */
+            sigdelset(&linux_set, 6);   /* SIGABRT */
+            sigdelset(&linux_set, 4);   /* SIGILL */
+        }
         p_linux_set = &linux_set;
         if (getenv("MACIFY_SHIM_DEBUG")) {
             uint32_t mm = *(const uint32_t *)set;
@@ -180,11 +190,14 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
 
     if (set) {
         macos_to_linux_sigset(set, &linux_set);
-        /* Never allow macOS code to block SIGSEGV/SIGABRT — our crash
-         * recovery handler must always be able to run. */
+        /* CRITICAL: Never let macOS code block SIGSEGV(11), SIGBUS(7),
+         * SIGABRT(6), or SIGILL(4). Our crash handlers MUST remain
+         * deliverable. */
         if (linux_how == SIG_BLOCK || linux_how == SIG_SETMASK) {
-            sigdelset(&linux_set, SIGSEGV);
-            sigdelset(&linux_set, SIGABRT);
+            sigdelset(&linux_set, 11);  /* SIGSEGV */
+            sigdelset(&linux_set, 7);   /* SIGBUS */
+            sigdelset(&linux_set, 6);   /* SIGABRT */
+            sigdelset(&linux_set, 4);   /* SIGILL */
         }
         p_linux_set = &linux_set;
     }
