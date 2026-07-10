@@ -357,6 +357,31 @@ int main(int argc, char **argv, char **envp) {
             } else if (strstr(name, "libintl")) {
                 /* libintl is part of glibc on Linux — no separate library */
                 extra1 = NULL;
+            } else if (strstr(name, "@@HOMEBREW_CELLAR@@") ||
+                       strstr(name, "@@HOMEBREW_PREFIX@@")) {
+                /* Homebrew bottle placeholder paths — load the actual dylib
+                 * from the macify prefix. The placeholder is:
+                 *   @@HOMEBREW_CELLAR@@/ruby/4.0.5/lib/libruby.4.0.dylib
+                 * We replace @@HOMEBREW_CELLAR@@ with $MACIFY_PREFIX/usr/local/Cellar
+                 * and @@HOMEBREW_PREFIX@@ with $MACIFY_PREFIX/usr/local */
+                const char *mprefix = getenv("MACIFY_PREFIX");
+                if (!mprefix) mprefix = "/.macify";
+                char real_path[4096];
+                const char *rest;
+                if (strstr(name, "@@HOMEBREW_CELLAR@@")) {
+                    rest = name + strlen("@@HOMEBREW_CELLAR@@");
+                    snprintf(real_path, sizeof(real_path), "%s/usr/local/Cellar%s", mprefix, rest);
+                } else {
+                    rest = name + strlen("@@HOMEBREW_PREFIX@@");
+                    snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
+                }
+                extra1 = dlopen(real_path, RTLD_NOW | RTLD_GLOBAL);
+                if (g_verbose) {
+                    if (extra1)
+                        fprintf(stderr, "macify:   loaded Homebrew dylib: %s\n", real_path);
+                    else
+                        fprintf(stderr, "macify:   WARNING: failed to load Homebrew dylib: %s (%s)\n", real_path, dlerror());
+                }
             }
             if (extra1) {
                 register_extra_handle(extra1);

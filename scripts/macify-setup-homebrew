@@ -1,0 +1,170 @@
+#!/bin/bash
+# macify-setup-homebrew — set up Homebrew in the macify prefix
+#
+# This script downloads macOS Homebrew bottles and installs them
+# into ~/.macify/usr/local/ (like Homebrew's /usr/local on macOS).
+#
+# Currently supported: binaries that don't require loading additional
+# Mach-O dylibs at runtime (statically linked or system-only deps).
+#
+# For Ruby/Homebrew: requires Mach-O dylib loading support (TODO).
+#
+# Usage: macify-setup-homebrew [package ...]
+#   Without arguments, installs the base set (ruby, openssl, libyaml).
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
+CELLAR="$PREFIX/usr/local/Cellar"
+
+# Colors
+GREEN='\033[32m'
+YELLOW='\033[33m'
+RED='\033[31m'
+RESET='\033[0m'
+
+# ── Helpers ────────────────────────────────────────────────────
+
+# Get bottle info from Homebrew API
+get_bottle_url() {
+    local formula="$1"
+    curl -fsSL "https://formulae.brew.sh/api/formula/${formula}.json" 2>/dev/null | \
+        python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+version = data['versions']['stable']
+files = data.get('bottle', {}).get('stable', {}).get('files', {})
+for os_name in ['sonoma', 'ventura', 'monterey', 'all']:
+    if os_name in files:
+        print(f'{version} {files[os_name][\"url\"]} {files[os_name][\"sha256\"]}')
+        break
+else:
+    print('NOT_FOUND', file=sys.stderr)
+"
+}
+
+# Download and extract a bottle
+install_bottle() {
+    local formula="$1"
+    echo -e "${GREEN}=== Installing ${formula} ===${RESET}"
+    
+    local info
+    info=$(get_bottle_url "$formula")
+    if [ -z "$info" ]; then
+        echo -e "${RED}  No macOS bottle found for ${formula}${RESET}"
+        return 1
+    fi
+    
+    local version url sha256
+    read -r version url sha256 <<< "$info"
+    echo "  Version: $version"
+    echo "  URL: $url"
+    
+    # Download
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local archive="$tmpdir/${formula}.tar.gz"
+    curl -L -H "Authorization: Bearer QQ==" "$url" -o "$archive" 2>/dev/null
+    
+    # Extract
+    mkdir -p "$tmpdir/extracted"
+    tar xzf "$archive" -C "$tmpdir/extracted"
+    
+    # Find the extracted directory
+    local src_dir
+    src_dir=$(find "$tmpdir/extracted" -maxdepth 2 -mindepth 1 -type d | head -1)
+    
+    # Install into Cellar
+    local dest="$CELLAR/${formula}/${version}"
+    mkdir -p "$dest"
+    cp -r "$src_dir"/* "$dest/"
+    
+    # Create symlinks
+    symlink_binaries "$formula" "$version" "$dest"
+    symlink_libs "$formula" "$version" "$dest"
+    
+    echo -e "${GREEN}  Installed: ${formula} ${version}${RESET}"
+    rm -rf "$tmpdir"
+}
+
+# Symlink binaries from Cellar to /usr/local/bin
+symlink_binaries() {
+    local formula="$1" version="$2" dest="$3"
+    local bindir="$dest/bin"
+    if [ -d "$bindir" ]; then
+        mkdir -p "$PREFIX/usr/local/bin"
+        for bin in "$bindir"/*; do
+            [ -f "$bin" ] || continue
+            local name
+            name=$(basename "$bin")
+            ln -sf "../Cellar/${formula}/${version}/bin/${name}" "$PREFIX/usr/local/bin/${name}"
+            echo "  /usr/local/bin/${name} → Cellar/${formula}/${version}/bin/${name}"
+        done
+    fi
+}
+
+# Symlink libraries from Cellar to /usr/local/lib
+symlink_libs() {
+    local formula="$1" version="$2" dest="$3"
+    local libdir="$dest/lib"
+    if [ -d "$libdir" ]; then
+        mkdir -p "$PREFIX/usr/local/lib"
+        for lib in "$libdir"/*.dylib; do
+            [ -f "$lib" ] || continue
+            local name
+            name=$(basename "$lib")
+            ln -sf "../Cellar/${formula}/${version}/lib/${name}" "$PREFIX/usr/local/lib/${name}"
+            echo "  /usr/local/lib/${name} → Cellar/${formula}/${version}/lib/${name}"
+        done
+    fi
+}
+
+# ── Main ───────────────────────────────────────────────────────
+
+echo ""
+echo "  macify Homebrew setup"
+echo "  Prefix: $PREFIX"
+echo ""
+
+# Ensure prefix exists
+if [ ! -f "$PREFIX/.macify_prefix" ]; then
+    echo "  Initializing prefix..."
+    LD_LIBRARY_PATH="$PROJECT_DIR/build" "$PROJECT_DIR/build/macify" \
+        "$PROJECT_DIR/tests/real/echo_macos" "init" >/dev/null 2>&1
+fi
+
+mkdir -p "$CELLAR" "$PREFIX/usr/local/bin" "$PREFIX/usr/local/lib"
+
+# Default packages: Ruby + dependencies
+PACKAGES=("$@")
+if [ ${#PACKAGES[@]} -eq 0 ]; then
+    PACKAGES=(ca-certificates libyaml openssl@3 ruby)
+fi
+
+for pkg in "${PACKAGES[@]}"; do
+    install_bottle "$pkg" || true
+done
+
+# Install Homebrew itself
+echo -e "${GREEN}=== Installing Homebrew ===${RESET}"
+if [ ! -d "$PREFIX/usr/local/Homebrew" ]; then
+    git clone --depth 1 https://github.com/Homebrew/brew.git "$PREFIX/usr/local/Homebrew" 2>/dev/null
+fi
+ln -sf ../Homebrew/bin/brew "$PREFIX/usr/local/bin/brew" 2>/dev/null
+echo "  Homebrew installed"
+
+# Summary
+echo ""
+echo -e "${GREEN}Setup complete!${RESET}"
+echo ""
+echo "Installed packages:"
+ls "$CELLAR" 2>/dev/null | sed 's/^/  /'
+echo ""
+echo "Binaries in /usr/local/bin:"
+ls "$PREFIX/usr/local/bin/" 2>/dev/null | sed 's/^/  /'
+echo ""
+echo -e "${YELLOW}Note:${RESET} Running Ruby requires Mach-O dylib loading support."
+echo "  Currently, statically-linked Mach-O binaries work perfectly."
+echo "  Mach-O binaries that load .dylib files at runtime need dylib support (TODO)."
