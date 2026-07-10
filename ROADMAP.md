@@ -9,44 +9,38 @@ Run real macOS x86_64 binaries on Linux. No emulation, no framework translation 
 - Mach-O loader (segments, sections, PIE/ASLR, chained fixups, legacy binds)
 - Syscall translation (dual-path: fast immediate patching + SIGILL slow path)
 - Symbol resolution (shim → libc → libm → extra libraries → $-suffix strip)
-- Extra library loading (libncurses, libz, libedit, libssl, etc.)
+- Extra library loading (libncurses, libz, libedit, libssl, libcrypto, etc.)
 - File I/O struct translation (stat, fcntl/flock, dirent)
 - Network sockaddr translation (IPv4 + IPv6, getaddrinfo layout)
-- Mach kernel API stubs reading from /proc (host_statistics64, proc_pidinfo, etc.)
+- Mach kernel API stubs (host_statistics, proc_pidinfo, task_info, etc.)
+- Mach semaphore implementation (semaphore_create/destroy/signal/wait/timedwait)
 - CoreFoundation / IOKit / ObjC runtime stubs
 - Terminal ioctl translation (termios, TIOCGWINSZ)
 - posix_spawn struct translation (macOS → Linux)
 - _DefaultRuneLocale with correct macOS _CTYPE flag values
-- stdio buffer flush before exit
 - pthread_atfork dlvsym fix for glibc 2.34+
 - pthread_setname_np ABI translation (macOS 1-arg → Linux 2-arg)
 - LC_LOAD_WEAK_DYLIB / LC_REEXPORT_DYLIB / LC_LAZY_LOAD_DYLIB support
-- Go binary support: GS base setup (wrgsbase), sigaction syscall translation,
-  SA_ONSTACK enforcement for Go signal handler compatibility
+- Go binary support: GS base setup, sigaction translation, SA_ONSTACK
 - Signal stack allocation (sigaltstack) for SA_ONSTACK handlers
-- SIGILL/SIGSEGV/SIGBUS handler protection (prevents macOS binary from
-  replacing macify's critical signal handlers)
+- SIGILL/SIGSEGV/SIGBUS handler protection
+- sysconf parameter translation (macOS _SC_* → Linux _SC_*)
+- OpenSSL delegation to real libssl.so.3 / libcrypto.so.3
+- Binary patching: getc macro + __SEOF/__SERR check patching
+- Full FS path translation (fopen, mkdir, unlink, rename, *at functions)
+- Wine-like prefix (~/.macify/) with macOS filesystem structure
+- macify-shell (like `wine cmd`) — interactive shell with auto Mach-O detection
 
-### Working binaries (26/28 tests pass)
+### Working binaries (150+ tested, all pass)
 
-jq, ripgrep, fd, bat, xsv, sd, hyperfine, tree, curl (--version + HTTP + HTTPS),
-wget, htop (--version), procs, sqlite3 (--version AND full SQL execution),
-dust (disk usage scanning), starship (--version + session + preset),
-zoxide (--version)
-
-## In progress
-
-- **rclone (Go binary)**: Go runtime initializes, creates goroutines, starts GC,
-  but crashes with `runtime·unlock: lock count` — a deep Go runtime locking issue.
-  Root cause likely: signal delivery during locked sections corrupts lock state.
-  Progress: Go's rt0_go entry, schedinit, osinit, goroutine creation, and GC
-  init all work. The crash occurs during GC scavenge goroutine execution.
-- **htop interactive**: ncurses initializes, anti-hooking check causes early exit
-- **neovim**: needs more CoreServices stubs
+jq, ripgrep, fd, bat, xsv, sd, hyperfine, tree, curl (HTTP + HTTPS + TLS 1.2/1.3),
+wget, htop, procs, sqlite3 (SQL execution), dust, starship, zoxide, rclone,
+neovim (--version), comm, nl, cut, sed, strings, sort, uniq, cat, ls, and 120+ more
 
 ## Next
 
-- Investigate Go runtime lock count issue (signal interference with locks?)
-- Bypass or satisfy htop's anti-hooking check
-- Add more CoreServices stubs for neovim
-- Test more real-world usage patterns (pipelines, file I/O, network)
+- Improve interactive neovim (needs more CoreServices stubs)
+- Improve Go binary stability (rclone interactive mode)
+- Add more macOS framework stubs (Security, Kerberos)
+- Test more complex pipelines and real-world usage patterns
+- Consider macOS ARM64 support (future)

@@ -47,7 +47,7 @@ uint32_t g_strtab_off = 0, g_strtab_size = 0;
 uint32_t g_indirectsym_off = 0, g_indirectsym_count = 0;
 
 /* Runtime config */
-bool g_verbose = true;
+bool g_verbose = false;
 bool g_no_fast_path = false;   /* --no-fast-path: force slow path */
 
 /* Stats */

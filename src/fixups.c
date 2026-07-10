@@ -202,7 +202,7 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                 }
 
                 if (g_verbose) {
-                    fprintf(stderr, "macify: bound %-16s from %-24s at %#lx -> %#lx\n",
+                    if (g_verbose) fprintf(stderr, "macify: bound %-16s from %-24s at %#lx -> %#lx\n",
                             symbol_name, g_dylibs[ordinal - 1].name,
                             (unsigned long)target, (unsigned long)(uintptr_t)addr);
                 }
@@ -221,7 +221,7 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                 uint64_t count = read_uleb128(&p, end);
                 uint64_t skip = read_uleb128(&p, end);
                 if (g_verbose) {
-                    fprintf(stderr, "macify: DO_BIND_ULEB_TIMES_SKIPPING_ULEB sym=%s count=%lu skip=%lu\n",
+                    if (g_verbose) fprintf(stderr, "macify: DO_BIND_ULEB_TIMES_SKIPPING_ULEB sym=%s count=%lu skip=%lu\n",
                             symbol_name, (unsigned long)count, (unsigned long)skip);
                 }
                 for (uint64_t i = 0; i < count; i++) {
@@ -238,7 +238,7 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                     uint64_t target = g_segments[seg_index].vmaddr + seg_offset;
                     *(uint64_t *)(uintptr_t)target = (uint64_t)(uintptr_t)addr + (uint64_t)addend;
                     if (g_verbose) {
-                        fprintf(stderr, "macify:   bound[%lu] %s at %#lx -> %#lx\n",
+                        if (g_verbose) fprintf(stderr, "macify:   bound[%lu] %s at %#lx -> %#lx\n",
                                 (unsigned long)i, symbol_name,
                                 (unsigned long)target, (unsigned long)(uintptr_t)addr);
                     }
@@ -308,7 +308,7 @@ int execute_rebases(uint8_t *file_data, size_t file_size) {
             val += (uint64_t)g_slide; \
             *(uint64_t *)(uintptr_t)target = val; \
             if (g_verbose) { \
-                fprintf(stderr, "macify: rebase at %#lx: %#lx -> %#lx (slide=%#lx)\n", \
+                if (g_verbose) fprintf(stderr, "macify: rebase at %#lx: %#lx -> %#lx (slide=%#lx)\n", \
                         (unsigned long)target, \
                         (unsigned long)(val - (uint64_t)g_slide), \
                         (unsigned long)val, (unsigned long)g_slide); \
@@ -429,7 +429,7 @@ int execute_lazy_binds(uint8_t *file_data, size_t file_size) {
  */
 
 int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
-    fprintf(stderr, "macify: execute_chained_fixups called (off=%u size=%u)\n",
+    if (g_verbose) fprintf(stderr, "macify: execute_chained_fixups called (off=%u size=%u)\n",
             g_chained_fixups_off, g_chained_fixups_size);
     if (!g_has_chained_fixups || g_chained_fixups_size == 0) return 0;
     if (g_chained_fixups_off + g_chained_fixups_size > file_size) {
@@ -456,7 +456,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
     uint8_t *symbols_base = fixups + hdr->symbols_offset;
 
     if (g_verbose) {
-        fprintf(stderr, "macify: chained fixups: %u segments, %u imports\n",
+        if (g_verbose) fprintf(stderr, "macify: chained fixups: %u segments, %u imports\n",
                 starts_count, hdr->imports_count);
     }
 
@@ -481,7 +481,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
         loaded_segment *seg = &g_segments[seg_idx];
 
         if (g_verbose) {
-            fprintf(stderr, "macify: chained fixups for %s: ptr_format=%u pages=%u\n",
+            if (g_verbose) fprintf(stderr, "macify: chained fixups for %s: ptr_format=%u pages=%u\n",
                     seg->name, ptr_format, page_count);
         }
 
@@ -490,7 +490,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
         /* Process each page */
         for (uint16_t page_idx = 0; page_idx < page_count; page_idx++) {
             uint16_t page_start = page_starts[page_idx];
-            fprintf(stderr, "macify:   page %u: start=0x%x\n", page_idx, page_start);
+            if (g_verbose) fprintf(stderr, "macify:   page %u: start=0x%x\n", page_idx, page_start);
             if (getenv("MACIFY_VERBOSE")) fflush(stderr);
             if (page_start == 0xFFFF) continue;  /* DYLD_CHAINED_PTR_START_NONE */
             /* page_start=0 means fixups start at beginning of page (valid) */
@@ -571,7 +571,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                         if (addr) {
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
                             if (getenv("MACIFY_TRACE_FIXUPS")) {
-                                fprintf(stderr, "macify: fixup sym=%s -> %p (GOT=%p)\n", sym, addr, (void*)chain_ptr);
+                                if (g_verbose) fprintf(stderr, "macify: fixup sym=%s -> %p (GOT=%p)\n", sym, addr, (void*)chain_ptr);
                                 fflush(stderr);
                             }
                             if (strcmp(sym, "malloc_size") == 0) {

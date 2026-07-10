@@ -10,7 +10,8 @@ static void usage(const char *prog) {
         "Usage: %s [options] <macho-binary> [args...]\n"
         "\n"
         "Options:\n"
-        "  -q, --quiet         suppress loader diagnostics\n"
+        "  -v, --verbose       enable loader diagnostics\n"
+        "  -q, --quiet         suppress loader diagnostics (default)\n"
         "      --no-fast-path  disable immediate patching (force SIGILL slow path)\n"
         "  -h, --help          show this help\n"
         "\n", prog);
@@ -19,7 +20,10 @@ static void usage(const char *prog) {
 int main(int argc, char **argv, char **envp) {
     int argi = 1;
     while (argi < argc && argv[argi][0] == '-') {
-        if (strcmp(argv[argi], "-q") == 0 || strcmp(argv[argi], "--quiet") == 0) {
+        if (strcmp(argv[argi], "-v") == 0 || strcmp(argv[argi], "--verbose") == 0) {
+            g_verbose = true;
+            argi++;
+        } else if (strcmp(argv[argi], "-q") == 0 || strcmp(argv[argi], "--quiet") == 0) {
             g_verbose = false;
             argi++;
         } else if (strcmp(argv[argi], "--no-fast-path") == 0) {
@@ -666,13 +670,13 @@ int main(int argc, char **argv, char **envp) {
     }
     if (g_verbose) { const char m[] = "AFTER CHAINED\n"; write(2, m, sizeof(m)-1); }
     /* Skip __DATA_CONST reprotect for now */
-    /* Verify malloc_size GOT entry */
-    {
+    /* Verify malloc_size GOT entry (debug only) */
+    if (g_verbose) {
         for (int i = 0; i < g_nsegments; i++) {
             if (strcmp(g_segments[i].name, "__DATA_CONST") == 0) {
                 uint64_t *got = (uint64_t *)(g_segments[i].vmaddr + 0x2b0);
                 char b[128];
-                int n = snprintf(b, sizeof(b), "GOT[86] after fixups = 0x%lx\n", (unsigned long)*got);
+                int n = snprintf(b, sizeof(b), "macify: GOT[86] after fixups = 0x%lx\n", (unsigned long)*got);
                 write(2, b, n);
                 break;
             }
