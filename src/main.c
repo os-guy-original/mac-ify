@@ -372,6 +372,9 @@ int main(int argc, char **argv, char **envp) {
                    cmd == LC_REEXPORT_DYLIB || cmd == LC_LAZY_LOAD_DYLIB) {
             dylib_command *dc = (dylib_command *)(void *)lc;
             const char *name = (const char *)(lc + dc->name_offset);
+            if (g_verbose) {
+                fprintf(stderr, "macify: processing LC_LOAD_DYLIB cmd=%u name=%s\n", cmd, name ? name : "(null)");
+            }
             const char *cmd_name =
                 (cmd == LC_LOAD_DYLIB)       ? "LC_LOAD_DYLIB" :
                 (cmd == LC_LOAD_WEAK_DYLIB)  ? "LC_LOAD_WEAK_DYLIB" :
@@ -422,15 +425,15 @@ int main(int argc, char **argv, char **envp) {
                 fprintf(stderr, "macify: too many dylibs (max %d)\n", MAX_DYLIBS);
                 return 1;
             }
-            /* Load shim and libc. The shim provides macOS-specific functions
-             * (__errno, _NSGetEnviron, mach_*, objc_*, dispatch_*, etc.) that
-             * glibc lacks; libc.so.6 provides standard C functions. We store
-             * both handles — the bind interpreter tries the shim first, then
-             * libc, then libm. RTLD_GLOBAL makes shim symbols visible to
-             * subsequently-loaded libraries. */
+            if (g_verbose) fprintf(stderr, "macify:   about to dlopen shim\n");
             void *shim_handle = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
+            if (g_verbose) fprintf(stderr, "macify:   shim=%p\n", shim_handle);
+            if (g_verbose) fprintf(stderr, "macify:   about to dlopen libc\n");
             void *libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+            if (g_verbose) fprintf(stderr, "macify:   libc=%p\n", libc_handle);
+            if (g_verbose) fprintf(stderr, "macify:   about to dlopen libm\n");
             void *libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
+            if (g_verbose) fprintf(stderr, "macify:   dlopen done: shim=%p libc=%p libm=%p\n", shim_handle, libc_handle, libm_handle);
 
             /* Map macOS library names to Linux equivalents.
              * IMPORTANT: @@HOMEBREW_PREFIX@@ and resolved (@rpath/@loader_path)
@@ -452,6 +455,7 @@ int main(int argc, char **argv, char **envp) {
                     rest = name + strlen("@@HOMEBREW_PREFIX@@");
                     snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
                 }
+                if (g_verbose) fprintf(stderr, "macify:   loading dylib: %s -> %s\n", name, real_path);
                 /* Load as Mach-O dylib (not dlopen which expects ELF) */
                 int rc = macho_load_dylib(real_path);
                 if (g_verbose) {
@@ -999,6 +1003,28 @@ int main(int argc, char **argv, char **envp) {
      * so macOS binaries find their expected paths without messing
      * with the real Linux system. */
     macify_init_prefix();
+
+    /* Set MACIFY_BINARY so exec/posix_spawn shims can re-run through macify.
+     * Use /proc/self/exe to get the absolute path to the macify binary. */
+    {
+        char exe_path[4096];
+        ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (n > 0) {
+            exe_path[n] = '\0';
+            setenv("MACIFY_BINARY", exe_path, 1);
+            if (g_verbose)
+                fprintf(stderr, "macify: MACIFY_BINARY=%s\n", exe_path);
+        }
+    }
+
+    /* Set PATH to macOS-style paths. The macOS binary's PATH should only
+     * contain macOS paths which get translated to the prefix. This prevents
+     * the macOS binary from finding Linux binaries via PATH search.
+     * But only set if PATH isn't already set (preserve user's PATH if set). */
+    if (!getenv("MACIFY_PATH_SET")) {
+        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin", 0);
+        setenv("MACIFY_PATH_SET", "1", 1);
+    }
 
     void *stack_base = NULL;
     size_t stack_size = 0;

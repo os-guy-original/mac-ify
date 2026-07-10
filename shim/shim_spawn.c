@@ -238,24 +238,78 @@ int macify_posix_spawn_file_actions_addfchdir_np(void *fa, int fd) {
     return 0;
 }
 
+/* Forward declarations for functions defined later in this file */
+static int is_macho_binary(const char *path);
+static const char *get_macify_binary(void);
+static char **build_macify_argv(const char *target, char *const argv[]);
+static int resolve_in_prefix_path(const char *file, char *out, size_t out_size);
+
 static int do_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions, const void *attrp,
                           char *const argv[], char *const envp[],
                           int use_path) {
     /* If path is NULL, return 0 (success) with pid=0. Python probes
-     * posix_spawn with NULL path during initialization. If we return an
-     * error, Python aborts. Returning 0 with pid=0 makes the probe
-     * succeed (Python won't use the invalid pid). */
+     * posix_spawn with NULL path during initialization. */
     if (!path) {
         if (pid) *pid = 0;
-        if (getenv("MACIFY_TRACE_SPAWN")) {
-            char b[256]; int n = snprintf(b, sizeof(b),
-                "macify: posix_spawn%s(NULL) -> 0 (probe)\n", use_path ? "p" : "");
-            (void)write(2, b, n);
-        }
         return 0;
     }
 
+    /* Resolve the path:
+     * - For posix_spawn (use_path=0): translate the absolute path
+     * - For posix_spawnp (use_path=1): search PATH in prefix
+     */
+    char resolved[4096];
+    const char *eff_path = path;
+
+    if (use_path) {
+        /* posix_spawnp — search PATH */
+        if (resolve_in_prefix_path(path, resolved, sizeof(resolved)) != 0) {
+            /* Not found — fall through to real posix_spawnp which will
+             * return ENOENT. Use original path. */
+            eff_path = path;
+        } else {
+            eff_path = resolved;
+        }
+    } else {
+        /* posix_spawn — translate absolute path */
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, resolved, sizeof(resolved)) == 0)
+            eff_path = resolved;
+    }
+
+    if (getenv("MACIFY_TRACE_SPAWN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: posix_spawn%s(\"%s\" -> \"%s\")\n",
+            use_path ? "p" : "", path, eff_path);
+        (void)write(2, b, n);
+    }
+
+    /* If it's a Mach-O binary, fork + exec through macify */
+    if (is_macho_binary(eff_path)) {
+        const char *macify_bin = get_macify_binary();
+        if (macify_bin) {
+            char **new_argv = build_macify_argv(eff_path, argv);
+            if (new_argv) {
+                /* Use fork + execve since posix_spawn can't handle
+                 * re-execing through macify with file_actions. */
+                pid_t child = fork();
+                if (child == 0) {
+                    /* Child: exec macify with the new argv */
+                    static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
+                    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
+                    if (real_execve) real_execve(macify_bin, new_argv, envp);
+                    _exit(127);
+                }
+                free(new_argv);
+                if (child < 0) return errno;
+                if (pid) *pid = child;
+                return 0;
+            }
+        }
+    }
+
+    /* ELF or unknown — use real posix_spawn with translated path */
     posix_spawnattr_t linux_attr;
     posix_spawn_file_actions_t linux_fa;
 
@@ -300,11 +354,11 @@ static int do_posix_spawn(pid_t *pid, const char *path,
                                      char *const [], char *const []) = NULL;
         if (use_path) {
             if (!real_spawnp) real_spawnp = dlsym(RTLD_NEXT, "posix_spawnp");
-            if (real_spawnp) ret = real_spawnp(pid, path, &linux_fa, &linux_attr, argv, envp);
+            if (real_spawnp) ret = real_spawnp(pid, eff_path, &linux_fa, &linux_attr, argv, envp);
             else ret = ENOSYS;
         } else {
             if (!real_spawn) real_spawn = dlsym(RTLD_NEXT, "posix_spawn");
-            if (real_spawn) ret = real_spawn(pid, path, &linux_fa, &linux_attr, argv, envp);
+            if (real_spawn) ret = real_spawn(pid, eff_path, &linux_fa, &linux_attr, argv, envp);
             else ret = ENOSYS;
         }
     }
@@ -353,34 +407,187 @@ int macify_posix_spawnp(void *pid, const char *file, const void *fa,
     return do_posix_spawn((pid_t *)pid, file, fa, attrp, argv, envp, 1);
 }
 
-/* execvp — execute a program using PATH search.
- * macOS binaries call this to spawn subprocesses (e.g., bat spawning a pager).
- * Without a shim, execvp goes directly to glibc, which is fine functionally,
- * but we add a trace to catch ENOENT from missing programs. */
+/* ── exec family — translate paths and re-run through macify ────
+ *
+ * When a macOS binary calls execve("/bin/sh"), we need to:
+ *   1. Translate the path: /bin/sh → <prefix>/bin/sh
+ *   2. Check if the target is a Mach-O binary (magic 0xFEEDFACF)
+ *   3. If Mach-O, transform to: execve(macify, {macify, target, args...}, env)
+ *      because Linux can't exec Mach-O directly.
+ *   4. If ELF, pass through normally.
+ *
+ * For execvp/execvpe (PATH search), search the translated PATH dirs
+ * in the prefix.
+ */
+
+/* Check if a file is a Mach-O binary (not ELF) */
+static int is_macho_binary(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    uint32_t magic;
+    ssize_t n = read(fd, &magic, sizeof(magic));
+    close(fd);
+    if (n != sizeof(magic)) return 0;
+    /* Mach-O 64-bit magic (little-endian): 0xFEEDFACF */
+    /* Mach-O 64-bit magic (big-endian): 0xCFFAEDFE */
+    return (magic == 0xFEEDFACF || magic == 0xCFFAEDFE ||
+            magic == 0xFEEDFACE || magic == 0xCEFAEDFE);
+}
+
+/* Get the path to the macify binary (from MACIFY_BINARY env or /proc/self/exe) */
+static const char *get_macify_binary(void) {
+    const char *mb = getenv("MACIFY_BINARY");
+    if (mb && mb[0]) return mb;
+    /* Fallback: /proc/self/exe points to the current process (macify) */
+    static char exe_path[4096];
+    ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (n > 0) {
+        exe_path[n] = '\0';
+        return exe_path;
+    }
+    return NULL;
+}
+
+/* Build a new argv array: {macify, target_path, original_argv[1]...} */
+static char **build_macify_argv(const char *target, char *const argv[]) {
+    /* Count original args */
+    int argc = 0;
+    if (argv) while (argv[argc]) argc++;
+    /* Allocate: macify + target + original_args + NULL */
+    char **new_argv = calloc(argc + 3, sizeof(char *));
+    if (!new_argv) return NULL;
+    new_argv[0] = (char *)"macify";
+    new_argv[1] = (char *)target;
+    for (int i = 1; i < argc; i++)
+        new_argv[i + 1] = argv[i];
+    new_argv[argc + 1] = NULL;
+    return new_argv;
+}
+
+/* Resolve a filename via PATH search in the prefix.
+ * Returns the full translated path in `out`, or NULL if not found. */
+static int resolve_in_prefix_path(const char *file, char *out, size_t out_size) {
+    if (!file || !file[0]) return -1;
+    /* If file contains '/', it's already a path — translate it */
+    if (strchr(file, '/')) {
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(file, out, out_size) == 0)
+            return 0;
+        strncpy(out, file, out_size - 1);
+        out[out_size - 1] = '\0';
+        return 0;
+    }
+    /* Search PATH — use macOS-style PATH (/usr/bin:/bin:/usr/local/bin)
+     * which gets translated to <prefix>/usr/bin, etc. */
+    const char *path_env = getenv("PATH");
+    if (!path_env) path_env = "/usr/bin:/bin:/usr/local/bin";
+    char path_copy[4096];
+    strncpy(path_copy, path_env, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+    char *dir = strtok(path_copy, ":");
+    while (dir) {
+        char macos_path[4096];
+        snprintf(macos_path, sizeof(macos_path), "%s/%s", dir, file);
+        extern int macify_translate_path(const char *, char *, size_t);
+        char translated[4096];
+        if (macify_translate_path(macos_path, translated, sizeof(translated)) == 0) {
+            if (access(translated, X_OK) == 0) {
+                strncpy(out, translated, out_size - 1);
+                out[out_size - 1] = '\0';
+                return 0;
+            }
+        } else {
+            /* Pass-through path (e.g., /dev) — check directly */
+            if (access(macos_path, X_OK) == 0) {
+                strncpy(out, macos_path, out_size - 1);
+                out[out_size - 1] = '\0';
+                return 0;
+            }
+        }
+        dir = strtok(NULL, ":");
+    }
+    return -1;
+}
+
+/* execve — translate path, re-run through macify if Mach-O */
+int macify_execve(const char *path, char *const argv[], char *const envp[]) __asm__("execve");
+int macify_execve(const char *path, char *const argv[], char *const envp[]) {
+    static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
+    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
+
+    if (!path) { errno = EFAULT; return -1; }
+
+    /* Translate path */
+    char translated[4096];
+    extern int macify_translate_path(const char *, char *, size_t);
+    const char *eff_path = path;
+    if (macify_translate_path(path, translated, sizeof(translated)) == 0)
+        eff_path = translated;
+
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: execve(\"%s\" -> \"%s\")\n", path, eff_path);
+        (void)write(2, b, n);
+    }
+
+    /* If it's a Mach-O binary, re-run through macify */
+    if (is_macho_binary(eff_path)) {
+        const char *macify_bin = get_macify_binary();
+        if (macify_bin) {
+            char **new_argv = build_macify_argv(eff_path, argv);
+            if (new_argv) {
+                int ret = real_execve ? real_execve(macify_bin, new_argv, envp) : -1;
+                free(new_argv);
+                return ret;
+            }
+        }
+    }
+
+    /* ELF or unknown — pass through */
+    return real_execve ? real_execve(eff_path, argv, envp) : -1;
+}
+
+/* execvpe — PATH search + translate + re-run through macify if Mach-O */
 int macify_execvp(const char *file, char *const argv[], char *const envp[]) __asm__("execvpe");
 int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
     static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
     if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
-    int ret = real_execvpe ? real_execvpe(file, argv, envp) : -1;
+
+    if (!file) { errno = EFAULT; return -1; }
+
+    /* Resolve file via PATH search in prefix */
+    char resolved[4096];
+    if (resolve_in_prefix_path(file, resolved, sizeof(resolved)) != 0) {
+        errno = ENOENT;
+        return -1;
+    }
+
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: execvpe(\"%s\") = %d errno=%d\n",
-            file ? file : "(null)", ret, ret < 0 ? errno : 0);
+            "macify: execvpe(\"%s\" -> \"%s\")\n", file, resolved);
         (void)write(2, b, n);
     }
-    return ret;
+
+    /* If it's a Mach-O binary, re-run through macify */
+    if (is_macho_binary(resolved)) {
+        const char *macify_bin = get_macify_binary();
+        if (macify_bin) {
+            char **new_argv = build_macify_argv(resolved, argv);
+            if (new_argv) {
+                int ret = real_execvpe ? real_execvpe(macify_bin, new_argv, envp) : -1;
+                free(new_argv);
+                return ret;
+            }
+        }
+    }
+
+    /* ELF or unknown — pass through */
+    return real_execvpe ? real_execvpe(resolved, argv, envp) : -1;
 }
 
+/* execvp — same as execvpe but uses environ */
 int macify_execvp2(const char *file, char *const argv[]) __asm__("execvp");
 int macify_execvp2(const char *file, char *const argv[]) {
-    static int (*real_execvp)(const char *, char *const []) = NULL;
-    if (!real_execvp) real_execvp = dlsym(RTLD_NEXT, "execvp");
-    int ret = real_execvp ? real_execvp(file, argv) : -1;
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: execvp(\"%s\") = %d errno=%d\n",
-            file ? file : "(null)", ret, ret < 0 ? errno : 0);
-        (void)write(2, b, n);
-    }
-    return ret;
+    extern char **environ;
+    return macify_execvp(file, argv, environ);
 }

@@ -1,14 +1,23 @@
 #!/bin/bash
-# macify-shell — interactive macOS environment shell
+# macify-shell — run a macOS shell inside the macify prefix
 #
-# Like Wine's `wine cmd`, this provides a shell that runs inside the
-# macify prefix (~/.macify/). The shell presents a macOS-like filesystem
-# view: /usr/bin, /bin, /usr/local/bin are all within the prefix.
+# Like Wine's `wine cmd`, this runs a real macOS binary (bash) inside
+# the macify prefix. The macOS bash sees / as the prefix root:
+#   /bin/sh      → <prefix>/bin/sh (macOS bash)
+#   /usr/bin/ls  → <prefix>/usr/bin/ls (macOS ls)
+#   /etc/passwd  → <prefix>/etc/passwd (macOS-style)
 #
-# Only the user's home directory is symlinked from the host.
-# Host system paths are NOT visible.
+# All exec/execve/posix_spawn calls are intercepted by the shim and
+# re-run through macify, so subprocesses also run as macOS binaries.
+# Linux binaries are invisible (they don't exist in the prefix).
+#
+# Usage: macify-shell [options] [command [args...]]
+#
+# Without a command: starts interactive macOS bash
+# With a command:    runs it in macOS bash (like bash -c)
 
-# ── Setup ──────────────────────────────────────────────────────
+set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MACIFY_BIN="$PROJECT_DIR/build/macify"
@@ -25,17 +34,24 @@ while [[ "$1" == --* || "$1" == -[a-z] ]]; do
             cat <<'EOF'
 Usage: macify-shell [options] [command [args...]]
 
-Interactive shell running inside the macify prefix (~/.macify/).
-macOS Mach-O binaries in /usr/bin, /bin, /usr/local/bin are run
-through the macify translator automatically.
+Runs a real macOS bash binary inside the macify prefix.
+
+The macOS bash sees / as the prefix root (~/.macify/):
+  /bin/sh      → macOS bash
+  /usr/bin/ls  → macOS ls
+  /usr/local/  → Homebrew packages
+
+All subprocesses also run as macOS binaries (Linux binaries are invisible).
 
 Options:
   --prefix <dir>   Set prefix directory (default: ~/.macify)
   -v, --verbose    Enable verbose macify loader output
   -h, --help       Show this help
 
-Without a command, starts an interactive REPL.
-With a command, runs it and exits.
+Without a command: starts interactive macOS bash.
+With a command:    runs `bash -c "<command>"` (macOS bash).
+
+First run automatically initializes the prefix and installs coreutils.
 EOF
             exit 0
             ;;
@@ -43,194 +59,41 @@ EOF
     esac
 done
 
-# ── Ensure prefix exists ───────────────────────────────────────
+# ── Ensure prefix and rootfs exist ─────────────────────────────
+export MACIFY_PREFIX="$PREFIX"
+
 if [ ! -f "$PREFIX/.macify_prefix" ]; then
-    echo "macify-shell: initializing prefix at $PREFIX..."
+    echo "macify-shell: initializing prefix at $PREFIX..." >&2
     export LD_LIBRARY_PATH="$SHIM_DIR"
-    export MACIFY_PREFIX="$PREFIX"
-    "$MACIFY_BIN" "$PROJECT_DIR/tests/real/echo_macos" "init" >/dev/null 2>&1
+    "$MACIFY_BIN" "$PROJECT_DIR/tests/real/echo_macos" "init" >/dev/null 2>&1 || true
 fi
 
-if [ ! -d "$PREFIX" ]; then
-    echo "macify-shell: ERROR — prefix not found at $PREFIX"
+# Ensure rootfs (macOS binaries in /bin, /usr/bin) is set up
+if [ ! -f "$PREFIX/bin/bash" ]; then
+    echo "macify-shell: setting up macOS rootfs..." >&2
+    bash "$SCRIPT_DIR/macify-setup-rootfs" >&2
+fi
+
+if [ ! -f "$PREFIX/bin/bash" ]; then
+    echo "macify-shell: ERROR — macOS bash not found at $PREFIX/bin/bash" >&2
+    echo "  Run: bash $SCRIPT_DIR/macify-setup-rootfs" >&2
     exit 1
 fi
 
-# ── Environment ────────────────────────────────────────────────
+# ── Run macOS bash ─────────────────────────────────────────────
 export LD_LIBRARY_PATH="$SHIM_DIR"
-export MACIFY_PREFIX="$PREFIX"
 
-# macOS-like PATH: all paths are within the prefix
-# The macify translator translates these to real paths internally
-export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+# PATH is set by macify to /usr/bin:/bin:/usr/local/bin (macOS paths)
+# These get translated to <prefix>/usr/bin, etc.
+# The macOS bash will search these for commands like ls, cat, grep.
 
-# macOS-like HOME — stays as the real home (symlinked into prefix)
-export HOME="$HOME"
+# MACIFY_BINARY is set by macify itself (via /proc/self/exe).
+# MACIFY_PATH_SET tells macify not to override PATH.
 
-# macOS-like shell
-export SHELL="/bin/bash"
-
-# ── Functions ──────────────────────────────────────────────────
-
-# Check if a file is a macOS Mach-O binary
-is_macho() {
-    [ -f "$1" ] || return 1
-    local magic
-    magic=$(od -A n -t x1 -N 4 "$1" 2>/dev/null | tr -d ' \n')
-    case "$magic" in
-        cffaedfe*|feedfacf*|cafebabe*|bebafeca*) return 0;;
-        *) return 1;;
-    esac
-}
-
-# Find a binary in the prefix's PATH
-# Returns the real path on disk (within the prefix)
-find_in_prefix() {
-    local name="$1"
-    # Search prefix bin directories
-    for dir in "$PREFIX/usr/bin" "$PREFIX/bin" "$PREFIX/usr/local/bin" "$PREFIX/usr/sbin" "$PREFIX/sbin"; do
-        if [ -f "$dir/$name" ]; then
-            echo "$dir/$name"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Run a macOS binary through macify
-run_macos() {
-    "$MACIFY_BIN" $VERBOSE "$@"
-}
-
-# Show help
-show_help() {
-    cat <<EOF
-
-macify-shell — macOS environment
-
-This shell runs inside the macify prefix: $PREFIX
-
-The filesystem looks like macOS:
-  /usr/bin/     — macOS binaries (run through macify)
-  /bin/         — essential macOS binaries
-  /usr/local/   — locally installed macOS binaries
-  /etc/         — macOS-style config files
-  /tmp/         — temporary files (shared with host)
-  ~/Library/    — macOS Library directory
-
-Only your home directory is shared with the host system.
-
-Commands:
-  help              Show this help
-  exit              Exit the shell
-  macify <bin>      Explicitly run a binary through macify
-  macify-init       Re-initialize the prefix
-  macify-version    Show macify version
-  install <bin>     Install a macOS binary into the prefix
-
-Any other command searches /usr/bin, /bin, /usr/local/bin in the prefix.
-If found and it's a Mach-O binary, it runs through macify.
-If not found, it runs as a native Linux command (for builtins like cd, echo).
-
-EOF
-}
-
-# Install a macOS binary into the prefix
-do_install() {
-    local src="$1"
-    local name="${2:-$(basename "$src")}"
-    if [ ! -f "$src" ]; then
-        echo "install: $src not found"
-        return 1
-    fi
-    if ! is_macho "$src"; then
-        echo "install: $src is not a Mach-O binary"
-        return 1
-    fi
-    cp "$src" "$PREFIX/usr/bin/$name"
-    chmod +x "$PREFIX/usr/bin/$name"
-    echo "installed: $name → /usr/bin/$name"
-}
-
-# ── Non-interactive mode ───────────────────────────────────────
 if [ $# -gt 0 ]; then
-    cmd="$1"; shift
-    case "$cmd" in
-        help) show_help; exit 0;;
-        macify) run_macos "$@"; exit $?;;
-        macify-init)
-            export MACIFY_PREFIX="$PREFIX"
-            "$MACIFY_BIN" "$PROJECT_DIR/tests/real/echo_macos" "init" >/dev/null 2>&1
-            echo "Prefix initialized at $PREFIX"
-            exit 0;;
-        macify-version) echo "macify 1.0"; exit 0;;
-        macify-prefix) echo "$PREFIX"; exit 0;;
-        install) do_install "$@"; exit $?;;
-    esac
-    # Search in prefix
-    binpath=$(find_in_prefix "$cmd") || binpath=""
-    if [ -n "$binpath" ]; then
-        run_macos "$binpath" "$@"
-        exit $?
-    fi
-    # Try as shell builtin/command
-    eval "$cmd $*"
-    exit $?
+    # Non-interactive: bash -c "<command>"
+    exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" -c "$*"
+else
+    # Interactive: macOS bash
+    exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --login -i
 fi
-
-# ── Interactive mode ───────────────────────────────────────────
-
-echo ""
-echo "  macify-shell v1.0"
-echo "  Prefix: $PREFIX"
-echo "  Type 'help' for commands, 'exit' to quit"
-echo ""
-
-# Start in the user's home directory
-cd "$HOME" 2>/dev/null
-
-while true; do
-    printf 'macify:%s$ ' "$(pwd)"
-    if ! IFS= read -r line; then
-        echo ""
-        break
-    fi
-    [ -z "$line" ] && continue
-
-    # Parse
-    set -- $line
-    cmd="$1"
-    [ $# -gt 0 ] && shift
-
-    # Built-in commands (no variable expansion needed)
-    case "$cmd" in
-        help) show_help; continue;;
-        exit|quit) break;;
-        macify) run_macos "$@"; continue;;
-        macify-init)
-            export MACIFY_PREFIX="$PREFIX"
-            "$MACIFY_BIN" "$PROJECT_DIR/tests/real/echo_macos" "init" >/dev/null 2>&1
-            echo "Prefix re-initialized"; continue;;
-        macify-version) echo "macify 1.0"; continue;;
-        macify-prefix) echo "$PREFIX"; continue;;
-        install) do_install "$@"; continue;;
-        cd) builtin cd "$@" 2>/dev/null; continue;;
-        pwd) pwd; continue;;
-        export) builtin export "$@"; continue;;
-    esac
-
-    # Search for macOS binary in prefix
-    binpath=$(find_in_prefix "$cmd") || binpath=""
-    if [ -n "$binpath" ] && is_macho "$binpath"; then
-        # Expand variables in args
-        eval "set -- $*"
-        run_macos "$binpath" "$@"
-        continue
-    fi
-
-    # Run as shell command (handles variables, pipes, redirects)
-    eval "$line"
-done
-
-echo ""
-echo "macify-shell exited"

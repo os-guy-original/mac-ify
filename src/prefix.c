@@ -343,19 +343,20 @@ void macify_init_prefix(void) {
  *   0  — path translated, result in `out`
  *   -1 — path should NOT be translated (pass through to real filesystem)
  *
+ * This implements a Wine-style fake rootfs: the macify prefix (~/.macify/)
+ * IS the root filesystem for macOS binaries. Every absolute path /foo
+ * becomes <prefix>/foo, so macOS binaries see their own macOS binaries
+ * in /bin/, /usr/bin/, etc. — never Linux binaries.
+ *
  * Translation rules:
- *   ~/Library/...        → ~/.macify/Library/...
- *   /Library/...         → ~/.macify/Library/...
- *   /System/Library/...  → ~/.macify/System/Library/...
- *   /etc/passwd          → ~/.macify/etc/passwd (macOS-style passwd)
- *   /etc/group           → ~/.macify/etc/group
- *   /etc/shells          → ~/.macify/etc/shells
- *   /var/log/...         → ~/.macify/var/log/...
- *   /var/root/...        → ~/.macify/var/root/...
- *   /usr/lib/...         → pass through (dylib loading handled by shim)
- *   /usr/local/...       → pass through
- *   /tmp/                → pass through (symlinked in prefix)
- *   /etc/ (other)        → pass through (use real /etc for system config)
+ *   /foo/bar          → <prefix>/foo/bar    (Wine-style rootfs)
+ *   ~/Library/...     → <prefix>/Library/...
+ *   ~/... (non-Lib)   → pass through (home dir access)
+ *   /dev/...          → pass through (real devices)
+ *   /proc/...         → pass through (Linux procfs)
+ *   /sys/...          → pass through (Linux sysfs)
+ *   /tmp/...          → pass through (shared temp dir)
+ *   relative paths    → pass through
  */
 int macify_translate_path(const char *path, char *out, size_t out_size) {
     if (!path || !out || out_size == 0) return -1;
@@ -363,82 +364,48 @@ int macify_translate_path(const char *path, char *out, size_t out_size) {
     const char *prefix = macify_get_prefix();
     if (!prefix || macify_prefix_len == 0) return -1;
 
-    const char *home = getenv("HOME");
-    size_t home_len = home ? strlen(home) : 0;
-
-    /* ~/Library/... → ~/.macify/Library/... */
-    if (home && strncmp(path, home, home_len) == 0 && path[home_len] == '/') {
-        if (strncmp(path + home_len + 1, "Library/", 8) == 0 ||
-            strcmp(path + home_len + 1, "Library") == 0) {
-            snprintf(out, out_size, "%s%s", prefix, path + home_len);
-            return 0;
+    /* Only translate absolute paths */
+    if (path[0] != '/') {
+        /* Handle ~/Library/ specially */
+        const char *home = getenv("HOME");
+        size_t home_len = home ? strlen(home) : 0;
+        if (home && strncmp(path, home, home_len) == 0 && path[home_len] == '/') {
+            if (strncmp(path + home_len + 1, "Library/", 8) == 0 ||
+                strcmp(path + home_len + 1, "Library") == 0) {
+                snprintf(out, out_size, "%s%s", prefix, path + home_len);
+                return 0;
+            }
         }
-        /* ~/... (not Library) — pass through */
+        /* Relative paths pass through */
         return -1;
     }
 
-    /* /Library/... → ~/.macify/Library/... */
-    if (strncmp(path, "/Library/", 9) == 0 || strcmp(path, "/Library") == 0) {
-        snprintf(out, out_size, "%s%s", prefix, path);
-        return 0;
-    }
+    /* ── Exceptions: paths that pass through to the real filesystem ── */
 
-    /* /System/Library/... → ~/.macify/System/Library/... */
-    if (strncmp(path, "/System/Library/", 16) == 0 || strcmp(path, "/System/Library") == 0) {
-        snprintf(out, out_size, "%s%s", prefix, path);
-        return 0;
-    }
-
-    /* /System/... (non-Library) → pass through (e.g., /System/Installation) */
-    if (strncmp(path, "/System/", 8) == 0) {
+    /* /dev/ — real device files (ttys, null, zero, etc.) */
+    if (strncmp(path, "/dev/", 5) == 0 || strcmp(path, "/dev") == 0)
         return -1;
-    }
 
-    /* /etc/passwd, /etc/group, /etc/shells → prefix etc/
-     * (macOS-style passwd/group differ from Linux) */
-    if (strcmp(path, "/etc/passwd") == 0 ||
-        strcmp(path, "/etc/group") == 0 ||
-        strcmp(path, "/etc/shells") == 0) {
-        snprintf(out, out_size, "%s%s", prefix, path);
-        return 0;
-    }
-
-    /* /var/log/... → prefix var/log/ */
-    if (strncmp(path, "/var/log/", 9) == 0 || strcmp(path, "/var/log") == 0) {
-        snprintf(out, out_size, "%s%s", prefix, path);
-        return 0;
-    }
-
-    /* /var/root/... → prefix var/root/ */
-    if (strncmp(path, "/var/root/", 10) == 0 || strcmp(path, "/var/root") == 0) {
-        snprintf(out, out_size, "%s%s", prefix, path);
-        return 0;
-    }
-
-    /* /var/empty → prefix var/empty */
-    if (strcmp(path, "/var/empty") == 0) {
-        snprintf(out, out_size, "%s%s", prefix, path);
-        return 0;
-    }
-
-    /* /usr/lib/... → pass through (Go's runtime uses this for dylib loading,
-     * and our shim already resolves macOS dylib paths to our .so) */
-    if (strncmp(path, "/usr/lib/", 9) == 0 || strcmp(path, "/usr/lib") == 0) {
+    /* /proc/ — Linux procfs (some macOS binaries read /proc/self) */
+    if (strncmp(path, "/proc/", 6) == 0 || strcmp(path, "/proc") == 0)
         return -1;
-    }
 
-    /* /usr/local/... → pass through */
-    if (strncmp(path, "/usr/local/", 11) == 0) {
+    /* /sys/ — Linux sysfs */
+    if (strncmp(path, "/sys/", 5) == 0 || strcmp(path, "/sys") == 0)
         return -1;
-    }
 
-    /* /private/... → pass through (macOS /private maps to Linux /var etc.) */
-    if (strncmp(path, "/private/", 9) == 0) {
+    /* /tmp/ — shared temp directory */
+    if (strncmp(path, "/tmp/", 5) == 0 || strcmp(path, "/tmp") == 0)
         return -1;
-    }
 
-    /* Everything else: pass through */
-    return -1;
+    /* ── All other absolute paths: translate to prefix ── */
+    /* /bin/sh          → <prefix>/bin/sh
+     * /usr/bin/ls      → <prefix>/usr/bin/ls
+     * /usr/local/brew  → <prefix>/usr/local/brew
+     * /etc/passwd      → <prefix>/etc/passwd
+     * /Library/...     → <prefix>/Library/... */
+    snprintf(out, out_size, "%s%s", prefix, path);
+    return 0;
 }
 
 /* Check if a path should be hidden from macOS binaries.

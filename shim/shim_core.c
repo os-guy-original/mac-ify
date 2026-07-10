@@ -12,10 +12,12 @@ void __macify_set_text_range(uint64_t lo, uint64_t hi) {
 }
 
 int macify_caller_is_macos_text(void *ret_addr) {
-    /* If the range hasn't been initialized yet, default to translating
-     * (preserve historical behavior for the macOS binary's own early
-     * startup calls). */
-    if (macify_text_lo == 0 || macify_text_hi == 0) return 1;
+    /* If the range hasn't been initialized yet, return FALSE.
+     * During early initialization (before g_macos_text_lo is set),
+     * only macify's own code and glibc are running — NOT the macOS
+     * binary. Returning FALSE ensures path/flag translation is NOT
+     * applied to macify's own open/sigaction/stat calls. */
+    if (macify_text_lo == 0 || macify_text_hi == 0) return 0;
     uintptr_t a = (uintptr_t)ret_addr;
     return (a >= macify_text_lo && a < macify_text_hi);
 }
