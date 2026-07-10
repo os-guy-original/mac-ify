@@ -387,7 +387,9 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         : [entry] "r"(entry), [stk] "r"(stack_top)
         : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
-    /* Flush stdio buffers before exiting — macOS binaries use buffered I/O */
+    /* Flush stdio buffers before exiting — macOS binaries use buffered I/O.
+     * We call fflush(NULL) which triggers our shim's fflush override that
+     * flushes both glibc streams and macOS FILE structs. */
     fflush(NULL);
     __asm__ volatile (
         "mov %[code], %%edi\n\t"

@@ -544,7 +544,10 @@ int atexit(void (*func)(void)) {
  * exit() from libSystem, we catch it here. */
 void macify_print_ret_globals(void);  /* defined in shim_pthread.c */
 void exit(int status) {
-    fflush(NULL);  /* Flush all stdio streams */
+    /* Flush macOS FILE buffers before exiting */
+    extern void macify_flush_macos_files(void);
+    macify_flush_macos_files();
+    fflush(NULL);  /* Flush all glibc stdio streams */
     _exit(status);
 }
 

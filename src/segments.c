@@ -85,7 +85,6 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         for (int i = 0; i < g_ndylibs; i++) {
             void *addr = dlsym(g_dylibs[i].handle, sym);
             if (!addr && g_dylibs[i].libc_handle) addr = dlsym(g_dylibs[i].libc_handle, sym);
-            if (!addr && g_dylibs[i].libm_handle) addr = dlsym(g_dylibs[i].libm_handle, sym);
             if (addr) return addr;
         }
         /* Check extra handles */
