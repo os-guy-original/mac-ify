@@ -501,7 +501,24 @@ int main(int argc, char **argv, char **envp) {
 
             /* Step 2: Only patch getc macros if EOF checks are also present */
             if (eof_check_count > 0) {
-                /* Patch __SEOF/__SERR checks first */
+                /* Patch __SEOF/__SERR checks first.
+                 *
+                 * The test instruction checks [fp+0x10] & {0x20|0x40}.
+                 * The conditional jump after it goes to either:
+                 *   - the error/EOF handler (if bit set), or
+                 *   - the normal path (if bit not set)
+                 *
+                 * We want to ALWAYS take the normal path (bit not set).
+                 *
+                 * For je (0x74/0x0f84): jumps when bit NOT set → normal path.
+                 *   Change to jmp (always take normal path).
+                 *   Short: 74 XX → eb XX
+                 *   Near:  0f 84 XX XX XX XX → e9 XX XX XX XX 90
+                 *
+                 * For jne (0x75/0x0f85): jumps when bit set → error path.
+                 *   NOP it (fall through to normal path).
+                 *   Short: 75 XX → 90 90
+                 *   Near:  0f 85 XX XX XX XX → 90 90 90 90 90 90 */
                 int eof_patched = 0;
                 for (size_t i = 0; i + 7 < size; i++) {
                     size_t off = i;
@@ -512,14 +529,40 @@ int main(int argc, char **argv, char **envp) {
                     if (text[off+2] != 0x10) continue;
                     if (text[off+3] != 0x20 && text[off+3] != 0x40) continue;
                     size_t after = i + 4 + has_rex;
-                    if (text[after] == 0x75 || text[after] == 0x74) {
-                        uintptr_t page = (uintptr_t)(text + after) & ~0xfffUL;
+                    uintptr_t page = (uintptr_t)(text + after) & ~0xfffUL;
+
+                    if (text[after] == 0x74) {
+                        /* je short → jmp short (always take no-error path) */
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+                        text[after] = 0xeb;
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
+                        eof_patched++;
+                    } else if (text[after] == 0x75) {
+                        /* jne short → NOP (fall through to no-error path) */
                         mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
                         text[after] = 0x90; text[after + 1] = 0x90;
                         mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
                         eof_patched++;
-                    } else if (text[after] == 0x0f && (text[after+1] == 0x85 || text[after+1] == 0x84)) {
-                        uintptr_t page = (uintptr_t)(text + after) & ~0xfffUL;
+                    } else if (text[after] == 0x0f && text[after+1] == 0x84) {
+                        /* je near → jmp near (always take no-error path)
+                         * je near:  0f 84 D1 D2 D3 D4 (6 bytes, target = ip+6+disp)
+                         * jmp near: e9 D1 D2 D3 D4 90 (5 bytes, target = ip+5+disp)
+                         * To keep same target: new_disp = disp + 1 */
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+                        /* Read original displacement */
+                        int32_t disp = (int32_t)(text[after+2] | (text[after+3]<<8) |
+                                       (text[after+4]<<16) | (text[after+5]<<24));
+                        disp += 1;  /* Adjust for shorter instruction */
+                        text[after] = 0xe9;
+                        text[after+1] = disp & 0xff;
+                        text[after+2] = (disp >> 8) & 0xff;
+                        text[after+3] = (disp >> 16) & 0xff;
+                        text[after+4] = (disp >> 24) & 0xff;
+                        text[after+5] = 0x90;  /* NOP padding */
+                        mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
+                        eof_patched++;
+                    } else if (text[after] == 0x0f && text[after+1] == 0x85) {
+                        /* jne near → NOP (fall through to no-error path) */
                         mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
                         for (int s = 0; s < 6; s++) text[after + s] = 0x90;
                         mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
