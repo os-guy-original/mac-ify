@@ -303,40 +303,89 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
     dyld_chained_fixups_header *hdr = (dyld_chained_fixups_header *)fixup_data;
     if (hdr->fixups_version != 0) return;
 
-    /* Parse segment starts */
-    uint32_t starts_count = *(uint32_t *)(fixup_data + hdr->starts_offset);
-    uint32_t *page_starts = (uint32_t *)(fixup_data + hdr->starts_offset + 4);
+    /* Parse starts_in_image */
+    uint8_t *starts_base = fixup_data + hdr->starts_offset;
+    uint32_t n_image_segs = *(uint32_t *)starts_base;
+    uint32_t *seg_offsets = (uint32_t *)(starts_base + 4);
 
-    /* For each page start, walk the fixup chain */
-    for (uint32_t i = 0; i < starts_count; i++) {
-        uint32_t page_start = page_starts[i];
-        if (page_start == 0) continue;
+    /* Parse imports */
+    uint8_t *imports_base = fixup_data + hdr->imports_offset;
+    uint8_t *symbols_base = hdr->symbols_offset ? (fixup_data + hdr->symbols_offset) : NULL;
 
-        /* Find which segment this page belongs to */
-        /* The page_start is an offset into the chained fixups data,
-         * but it actually encodes the fixup location within __LINKEDIT.
-         * The actual fixup is at: segment_base + page_start_offset
-         * where page_start gives the chain offset. */
+    for (uint32_t si = 0; si < n_image_segs && si < (uint32_t)nsegs; si++) {
+        if (seg_offsets[si] == 0) continue;
 
-        /* For DYLD_CHAINED_PTR_64_OFFSET format (ptr_format=6):
-         * Each fixup is 8 bytes. The chain is a linked list where
-         * the "next" field gives the offset to the next fixup.
-         *
-         * Bit layout for rebase (bind=0):
-         *   bits 0-35: target (VM address, add slide)
-         *   bits 36-51: next (offset/4 to next fixup, 0=end)
-         *   bit 52: high8 (if 1, high 8 bits of target)
-         *   bits 53-62: unused
-         *   bit 63: bind (0=rebase, 1=bind) */
+        uint8_t *seg_starts = starts_base + seg_offsets[si];
+        uint32_t seg_size = *(uint32_t *)seg_starts;
+        uint16_t page_size = *(uint16_t *)(seg_starts + 4);
+        uint16_t ptr_format = *(uint16_t *)(seg_starts + 6);
+        uint64_t seg_offset = *(uint64_t *)(seg_starts + 8);
+        uint16_t page_count = *(uint16_t *)(seg_starts + 20);
+        uint16_t *page_starts = (uint16_t *)(seg_starts + 22);
 
-        /* Walk the chain starting from the page's first fixup.
-         * The page_start value is relative to the start of the
-         * binary's __LINKEDIT, but we need it relative to the
-         * dylib's mapped memory. */
+        (void)seg_size;
 
-        /* For simplicity, skip chained fixups for now — the rebase
-         * fixups from LC_DYLD_INFO format (if present) handle most
-         * cases. Chained fixups are only used by newer binaries. */
+        for (uint16_t pi = 0; pi < page_count; pi++) {
+            uint16_t page_start = page_starts[pi];
+            if (page_start == 0xFFFF) continue;  /* DYLD_CHAINED_PTR_START_NONE */
+            if (page_start == 0 && page_count > 1 && pi > 0) continue;  /* skip empty pages */
+
+            /* Page base in mapped memory */
+            uint8_t *page_base = (uint8_t *)(uintptr_t)(segs[si].vmaddr + slide) +
+                                 (uint64_t)pi * page_size;
+            uint8_t *page_end = page_base + page_size;
+            if (page_end > (uint8_t *)(uintptr_t)(segs[si].vmaddr + slide) + segs[si].vmsize)
+                page_end = (uint8_t *)(uintptr_t)(segs[si].vmaddr + slide) + segs[si].vmsize;
+
+            uint8_t *chain_ptr = page_base + page_start;
+            if (chain_ptr + 8 > page_end) continue;
+
+            int chain_iter = 0;
+            while (chain_iter < 16384) {
+                uint64_t value = *(uint64_t *)chain_ptr;
+                bool is_bind = (value >> 63) & 1;
+                uint32_t next = (value >> 51) & 0xFFF;  /* bits 48-59 */
+
+                if (is_bind) {
+                    uint32_t ordinal = value & 0xFFFF;
+                    uint32_t addend = (value >> 16) & 0xFFFF;
+
+                    if (ordinal < hdr->imports_count) {
+                        /* DYLD_CHAINED_IMPORT format (4 bytes per import):
+                         * bits 0-7: lib_ordinal, bit 8: weak, bits 9-31: name_offset */
+                        uint32_t imp_raw = *(uint32_t *)(imports_base + ordinal * 4);
+                        int lib_ordinal = imp_raw & 0xFF;
+                        uint32_t name_off = (imp_raw >> 9) & 0x7FFFFF;
+                        const char *sym_name = symbols_base ?
+                            (const char *)(symbols_base + name_off) : "";
+                        const char *sym = sym_name;
+                        if (sym[0] == '_') sym++;
+
+                        void *addr;
+                        if (lib_ordinal == 0 || lib_ordinal >= 0xFB)
+                            addr = resolve_symbol(-1, sym);
+                        else
+                            addr = resolve_symbol(lib_ordinal - 1, sym);
+
+                        if (addr) {
+                            *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
+                        }
+                    }
+                } else {
+                    /* REBASE: target is offset from image base, add slide */
+                    uint64_t target = value & 0xFFFFFFFFF;  /* 36 bits */
+                    uint8_t high8 = (value >> 36) & 0xFF;
+                    uint64_t full_target = ((uint64_t)high8 << 36) | target;
+                    /* For non-PIE dylibs, vmaddr=0, so full_target is the offset */
+                    *(uint64_t *)chain_ptr = full_target + slide;
+                }
+
+                if (next == 0) break;
+                chain_ptr += next * 4;
+                if (chain_ptr + 8 > page_end) break;
+                chain_iter++;
+            }
+        }
     }
 }
 

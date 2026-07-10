@@ -15,10 +15,6 @@
  * Uses ONLY signal-safe functions (write, snprintf — NOT fprintf). */
 void crash_handler(int sig, siginfo_t *info, void *uctx) {
 
-    /* Print immediately so we know the handler ran */
-    const char msg[] = "\nmacify: CRASH handler invoked\n";
-    write(2, msg, sizeof(msg) - 1);
-
     static char buf[1024];
     int n __attribute__((unused));
 

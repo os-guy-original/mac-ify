@@ -537,7 +537,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
             while (chain_iter < 16384) {
                 uint64_t value = *(uint64_t *)chain_ptr;
                 bool is_bind = (value >> 63) & 1;
-                uint32_t next = (value >> 51) & 0xFFF;
+                uint32_t next = (value >> 51) & 0xFFF;  /* bits 51-62 */
 
                 if (is_bind) {
                     uint32_t ordinal = value & 0xFFFF;
@@ -546,6 +546,10 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                     if (ordinal >= hdr->imports_count) {
                         /* Out-of-range import index — leave as-is. */
                     } else {
+                        /* DYLD_CHAINED_IMPORT format (4 bytes per import):
+                         * bits 0-7: lib_ordinal
+                         * bit 8: weak_import
+                         * bits 9-31: name_offset (into symbols table) */
                         uint32_t imp_raw = *(uint32_t *)(imports_base + ordinal * 4);
                         int lib_ordinal = imp_raw & 0xFF;
                         uint32_t name_offset = (imp_raw >> 9) & 0x7FFFFF;

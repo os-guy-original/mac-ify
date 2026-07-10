@@ -161,12 +161,12 @@ typedef struct {
 } nlist_64;
 
 typedef struct {
-    uint32_t fixups_version;
-    uint32_t starts_offset;
-    uint32_t imports_offset;
-    uint32_t symbols_offset;
-    uint32_t imports_count;
-    uint32_t symbols_format;
+    uint32_t fixups_version;   /* 0  */
+    uint32_t starts_offset;    /* 4  */
+    uint32_t imports_offset;   /* 8  */
+    uint32_t symbols_offset;   /* 12 */
+    uint32_t imports_count;    /* 16 */
+    uint32_t symbols_format;   /* 20 */
 } dyld_chained_fixups_header;
 
 /* ============================================================
