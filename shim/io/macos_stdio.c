@@ -111,9 +111,14 @@ struct macos_sFILE {
 };
 
 #define MACOS_BUFSIZ 4096
-static unsigned char macos_stdout_buf[MACOS_BUFSIZ];
-static unsigned char macos_stderr_buf[MACOS_BUFSIZ];
-static unsigned char macos_stdin_buf[MACOS_BUFSIZ];
+/* Align buffers to 128 bytes so the lower 4 bytes of the address don't
+ * have glibc's _IO_ERR_SEEN (bit 0x20) or _IO_EOF_SEEN (bit 0x10) set.
+ * bash inlines ferror(stdout) by reading glibc's _flags at offset 0,
+ * which is our _p (buffer address). If the address has these bits set,
+ * bash thinks there's a write error and stops execution. */
+static unsigned char macos_stdout_buf[MACOS_BUFSIZ] __attribute__((aligned(128)));
+static unsigned char macos_stderr_buf[MACOS_BUFSIZ] __attribute__((aligned(128)));
+static unsigned char macos_stdin_buf[MACOS_BUFSIZ] __attribute__((aligned(128)));
 
 /* Forward declarations */
 static int macos_file_read(void *cookie, char *buf, int len);
@@ -146,11 +151,13 @@ static void init_macos_file(struct macos_sFILE *f, unsigned char *buf, int bufsi
     f->u38._glibc_buf_base = buf;
     /* glibc _IO_buf_end (0x40) = buffer end */
     f->u40._glibc_buf_end = buf + bufsiz;
-    /* macOS function pointers at 0x2c, 0x34, 0x3c, 0x44 */
-    set_fn_ptr(f, 0x2c, (void *)macos_file_read);
-    set_fn_ptr(f, 0x34, (void *)macos_file_write);
-    set_fn_ptr(f, 0x3c, (void *)macos_file_seek);
-    set_fn_ptr(f, 0x44, (void *)macos_file_close);
+    /* NOTE: macOS FILE has function pointers at 0x2c, 0x34, 0x3c, 0x44
+     * but these overlap with glibc's _IO_write_ptr/_IO_write_end/
+     * _IO_buf_base/_IO_buf_end. We do NOT set function pointers because
+     * the putc macro only uses _p, _w, and __swbuf — it never calls
+     * _read/_write/_seek/_close directly. Those are only used by macOS's
+     * internal __sfvwrite/__sflush, which bash doesn't call (it uses
+     * fwrite/fputs which go through our shims). */
 }
 
 static struct macos_sFILE macos_stdout;
@@ -287,6 +294,15 @@ void macify_use_macos_stdio(void) {
         init_macos_file(&macos_stdin, macos_stdin_buf, MACOS_BUFSIZ,
                         MACOS___SRD, 0);
         initialized = 1;
+        /* Debug: check if buffer address has glibc error/EOF bits set */
+        /* (disabled — using _w=-1 approach instead of macOS FILE) */
+        /*{*/
+        /*    uint32_t lo = (uint32_t)(uintptr_t)macos_stdout_buf;*/
+        /*    char b[256]; int n = snprintf(b, sizeof(b),*/
+        /*        "macify: stdout_buf=%p low4=0x%08x ERR_BIT=%d EOF_BIT=%d\n",*/
+        /*        (void*)macos_stdout_buf, lo, (lo & 0x20) ? 1 : 0, (lo & 0x10) ? 1 : 0);*/
+        /*    syscall(1, 2, b, n);*/
+        /*}*/
     }
     extern FILE *__stdoutp, *__stderrp;
     /* Flush glibc's buffers using raw syscall */

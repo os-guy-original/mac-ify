@@ -817,6 +817,105 @@ int main(int argc, char **argv, char **envp) {
     }
     skip_eof_patch: ;
 
+    /* Patch inlined putc macros to always call __swbuf.
+     *
+     * macOS's putc macro: --_w >= 0 ? (*_p++ = ch) : __swbuf(ch, fp)
+     * When using glibc's FILE, _w (offset 0x0c) overlaps with _IO_read_ptr's
+     * upper bytes, and _p (offset 0) is _flags (0xfbad2084). Characters
+     * written via the fast path (*_p++ = ch) go to the safety page and
+     * are lost.
+     *
+     * We patch the `jg` (if _w > 0, write directly) to `jmp` (always call
+     * __swbuf). This routes ALL characters through our __swbuf override,
+     * which calls glibc's real fputc for correct buffering.
+     *
+     * Pattern (x86_64):
+     *   8b 8X 0c 00 00 00   mov ecx, [rX+0x0c]    (read _w)
+     *   8d 5X ff            lea edx, [rcx-1]       (_w-1)
+     *   89 9X 0c 00 00 00   mov [rX+0x0c], edx     (write _w)
+     *   85 c9               test ecx, ecx
+     *   7f XX               jg XX                  (if _w > 0, write directly)
+     *   3c 0a               cmp al, 0xa            (if char == '\n')
+     *   74 YY               je ZZ                  (call __swbuf for newline)
+     *
+     * Change 7f XX → eb (4+YY) to always jump to the __swbuf path.
+     */
+    {
+        loaded_section *text_sec = find_section("__TEXT", "__text");
+        if (text_sec) {
+            uint8_t *text = (uint8_t *)(uintptr_t)text_sec->addr;
+            size_t size = text_sec->size;
+            int patched = 0;
+            for (size_t i = 0; i + 16 < size; i++) {
+                /* Pattern (3-byte instructions):
+                 *   8b 4X 0c            mov ecx, [rX+0x0c]    (read _w)
+                 *   8d 51 ff            lea edx, [rcx-1]       (_w-1)
+                 *   89 5X 0c            mov [rX+0x0c], edx     (write _w)
+                 *   85 c9               test ecx, ecx
+                 *   7f XX               jg XX                  (if _w > 0, write directly)
+                 *   3c 0a               cmp al, 0xa            (if char == '\n')
+                 *   74 YY               je ZZ                  (call __swbuf for newline)
+                 */
+                /* Check for: mov ecx, [rX+0x0c] (3 bytes) */
+                if (text[i] != 0x8b) continue;
+                uint8_t modrm1 = text[i+1];
+                if ((modrm1 & 0xC0) != 0x40) continue;  /* mod=01 (8-bit disp) */
+                if ((modrm1 & 0x38) != 0x08) continue;  /* reg=ecx */
+                int reg = modrm1 & 0x07;
+                if (text[i+2] != 0x0c) continue;
+
+                /* Check for: lea edx, [rcx-1] (3 bytes) */
+                if (text[i+3] != 0x8d) continue;
+                if (text[i+4] != 0x51) continue;
+                if (text[i+5] != 0xff) continue;
+
+                /* Check for: mov [rX+0x0c], edx (3 bytes) */
+                if (text[i+6] != 0x89) continue;
+                uint8_t modrm2 = text[i+7];
+                if ((modrm2 & 0xC0) != 0x40) continue;
+                if ((modrm2 & 0x38) != 0x10) continue;  /* reg=edx */
+                if ((modrm2 & 0x07) != reg) continue;    /* same base reg */
+                if (text[i+8] != 0x0c) continue;
+
+                /* Check for: test ecx, ecx (2 bytes) */
+                if (text[i+9] != 0x85) continue;
+                if (text[i+10] != 0xc9) continue;
+
+                /* Check for: jg XX (2 bytes) */
+                if (text[i+11] != 0x7f) continue;
+
+                /* Check for: cmp al, 0xa (2 bytes) */
+                if (text[i+13] != 0x3c) continue;
+                if (text[i+14] != 0x0a) continue;
+
+                /* Check for: je YY (2 bytes) */
+                if (text[i+15] != 0x74) continue;
+                uint8_t je_offset = text[i+16];
+
+                /* Patch: change jg to jmp to the __swbuf path.
+                 * jg is at i+11, je is at i+15.
+                 * je target = (i+15) + 2 + je_offset = i + 17 + je_offset
+                 * jmp offset = je_target - (jg + 2) = (i + 17 + je_offset) - (i + 13) = 4 + je_offset
+                 */
+                uintptr_t page = (uintptr_t)(text + i) & ~0xfffUL;
+                if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+                    if (g_verbose) fprintf(stderr, "macify: mprotect RWX failed for putc patch at %p\n", (void*)(text+i));
+                }
+                /* NOP the write to [rX+0x0c] (3 bytes at i+6) to prevent
+                 * _IO_read_ptr corruption */
+                text[i+6] = 0x90; text[i+7] = 0x90; text[i+8] = 0x90;
+                /* Change jg to jmp to always call __swbuf */
+                text[i+11] = 0xeb;  /* jmp short */
+                text[i+12] = 4 + je_offset;
+                mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
+                if (g_verbose) fprintf(stderr, "macify: patched putc at %p: NOP write + jg→jmp\n", (void*)(text+i+11));
+                patched++;
+            }
+            if (g_verbose && patched > 0)
+                fprintf(stderr, "macify: patched %d putc macro(s) to call __swbuf\n", patched);
+        }
+    }
+
     /* Patch close_stdout to return 0 immediately.
      * macOS close_stdout checks [FILE* + 0x10] & 0x40 for __SERR (error).
      * Glibc stores _IO_read_end (buffer pointer) at offset 0x10, which
@@ -913,15 +1012,15 @@ int main(int argc, char **argv, char **envp) {
     if (g_ndylibs > 0 && g_dylibs[0].handle) {
         loaded_section *text_sec = find_section("__TEXT", "__text");
         if (text_sec && text_sec->size > 100000) {
-            void (*use_macos_stdio)(void) =
-                (void (*)(void))dlsym(g_dylibs[0].handle,
-                                       "macify_use_macos_stdio");
-            if (use_macos_stdio) {
-                use_macos_stdio();
-                if (g_verbose)
-                    fprintf(stderr, "macify: using macOS FILE structs (text=%zu bytes > 100KB)\n",
-                            text_sec->size);
-            }
+            /* Use _w=-1 approach: force glibc's _IO_read_ptr upper 4 bytes
+             * (macOS _w at offset 0x0c) to -1 so the inlined putc macro
+             * always calls __swbuf (which we intercept).
+             * This is done right before calling main in runtime.c.
+             * We don't use macOS FILE structs because they conflict with
+             * glibc's buffer pointer layout. */
+            if (g_verbose)
+                fprintf(stderr, "macify: will set _w=-1 for inlined putc (text=%zu bytes > 100KB)\n",
+                        text_sec->size);
         }
     }
 

@@ -544,16 +544,11 @@ int atexit(void (*func)(void)) {
  * exit() from libSystem, we catch it here. */
 void macify_print_ret_globals(void);  /* defined in shim_pthread.c */
 void exit(int status) {
-    /* Flush macOS FILE buffers before exiting */
-    extern void macify_flush_macos_files(void);
-    macify_flush_macos_files();
-    /* Only flush glibc streams if __stdoutp is still glibc's stdout.
-     * If we switched to macOS FILE, glibc's stdout is stale. */
-    extern FILE *__stdoutp;
-    extern FILE *stdout;
-    if (__stdoutp == stdout) {
-        fflush(NULL);
+    if (getenv("MACIFY_TRACE_EXIT")) {
+        char b[64]; int n = snprintf(b, sizeof(b), "macify: exit(%d)\n", status);
+        syscall(1, 2, b, n);
     }
+    fflush(NULL);
     _exit(status);
 }
 
@@ -562,6 +557,10 @@ void exit(int status) {
  * exit() — that would cause double-flushing and incorrect behavior.
  * Export _exit so chained fixups find it directly instead of finding exit(). */
 void _exit(int status) {
+    if (getenv("MACIFY_TRACE_EXIT")) {
+        char b[64]; int n = snprintf(b, sizeof(b), "macify: _exit(%d)\n", status);
+        syscall(1, 2, b, n);
+    }
     syscall(231, status);  /* SYS_exit_group */
     __builtin_unreachable();
 }

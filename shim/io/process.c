@@ -105,6 +105,10 @@ ssize_t macify_read(int fd, void *buf, size_t count) {
 
 ssize_t macify_write(int fd, const void *buf, size_t count) __asm__("write");
 ssize_t macify_write(int fd, const void *buf, size_t count) {
+    if (getenv("MACIFY_TRACE_WRITE") && fd <= 2 && count > 0 && count < 100) {
+        char b[256]; int n = snprintf(b, sizeof(b), "write(%d,%zu:%.*s)", fd, count, (int)count, (char*)buf);
+        syscall(1, 2, b, n);
+    }
     static ssize_t (*real_write)(int, const void *, size_t) = NULL;
     if (!real_write) real_write = dlsym(RTLD_NEXT, "write");
     ssize_t r = real_write(fd, buf, count);
@@ -310,23 +314,15 @@ int __srget(FILE *fp) {
  *
  * Fix: After fputc, set _w = -1 to force next putc to call __swbuf. */
 int __swbuf(int ch, FILE *fp) {
-    /* Check if this is a macOS-format FILE (our own struct) */
-    extern int macify_is_macos_file(void *);
-    if (macify_is_macos_file(fp)) {
-        /* Write to the macOS FILE buffer directly */
-        extern int macify_fputc_macos(int, void *);
-        return macify_fputc_macos(ch, fp);
+    if (getenv("MACIFY_TRACE_WRITE")) {
+        char b[64]; int n = snprintf(b, sizeof(b), "S(%02x)", ch & 0xff);
+        syscall(1, 2, b, n);
     }
-    /* glibc FILE — call real fputc, then re-set _w = -1 */
     static int (*real_fputc)(int, FILE *) = NULL;
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
-        extern FILE *__stdoutp, *__stderrp;
-        if (fp == __stdoutp || fp == __stderrp) {
-            macify_clear_serr_flag(fp);
-            *(int *)((char *)fp + 0x0c) = -1;
-        }
+        macify_clear_serr_flag(fp);
     }
     return r;
 }
@@ -616,32 +612,8 @@ int macify_feof(FILE *stream) {
  * detects a write error. We intercept setvbuf to allocate a safe buffer. */
 int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) __asm__("setvbuf");
 int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
-    /* If using macOS FILE, ignore setvbuf — our buffer is already set up */
-    extern int macify_is_macos_file(void *);
-    if (macify_is_macos_file(stream)) return 0;
     static int (*real_setvbuf)(FILE *, char *, int, size_t) = NULL;
     if (!real_setvbuf) real_setvbuf = dlsym(RTLD_NEXT, "setvbuf");
-    
-    /* If buf is NULL (glibc allocates), provide our own buffer */
-    if (!buf && size > 0) {
-        /* Allocate a buffer without bit 0x40 in the low byte */
-        char *our_buf = malloc(size + 128);
-        if (our_buf) {
-            /* Find an offset within the allocation that clears bit 0x40 */
-            uintptr_t addr = (uintptr_t)our_buf;
-            if (addr & 0x40) {
-                /* Round up to next 0x80 boundary to clear bit 0x40 */
-                addr = (addr + 0x7f) & ~0x7f;
-            }
-            buf = (char *)addr;
-            /* Ensure buf is still within our allocation */
-            if (buf + size > our_buf + size + 128) {
-                free(our_buf);
-                our_buf = NULL;
-                buf = NULL;
-            }
-        }
-    }
     return real_setvbuf(stream, buf, mode, size);
 }
 
@@ -653,11 +625,9 @@ int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
 
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fwrite");
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-    /* Check if this is a macOS-format FILE (our own struct) */
-    extern int macify_is_macos_file(void *);
-    extern size_t macify_fwrite_macos(const void *, size_t, size_t, void *);
-    if (macify_is_macos_file(stream)) {
-        return macify_fwrite_macos(ptr, size, nmemb, stream);
+    if (getenv("MACIFY_TRACE_WRITE") && size * nmemb < 100) {
+        char b[256]; int n = snprintf(b, sizeof(b), "W(%zu:%.*s)", size*nmemb, (int)(size*nmemb), (char*)ptr);
+        syscall(1, 2, b, n);
     }
     static size_t (*real_fwrite)(const void *, size_t, size_t, FILE *) = NULL;
     if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
@@ -783,10 +753,9 @@ FILE *macify_fdopen(int fd, const char *mode) {
 /* fputc — handle macOS FILE */
 int macify_fputc(int c, FILE *stream) __asm__("fputc");
 int macify_fputc(int c, FILE *stream) {
-    extern int macify_is_macos_file(void *);
-    extern int macify_fputc_macos(int, void *);
-    if (macify_is_macos_file(stream)) {
-        return macify_fputc_macos(c, stream);
+    if (getenv("MACIFY_TRACE_WRITE")) {
+        char b[64]; int n = snprintf(b, sizeof(b), "F(%02x)", c & 0xff);
+        syscall(1, 2, b, n);
     }
     static int (*real_fputc)(int, FILE *) = NULL;
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
@@ -831,21 +800,6 @@ int macify_puts(const char *s) {
 /* fflush — handle macOS FILE structs */
 int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
-    extern int macify_fflush_macos(void *);
-    extern int macify_is_macos_file(void *);
-    if (stream && macify_is_macos_file(stream)) {
-        return macify_fflush_macos(stream);
-    }
-    /* Flush macOS FILEs if flushing all */
-    if (stream == NULL) {
-        macify_fflush_macos(NULL);
-        /* Only flush glibc streams if __stdoutp is still glibc's stdout.
-         * If we switched to macOS FILE, glibc's stdout is stale. */
-        extern FILE *__stdoutp;
-        extern FILE *stdout;
-        if (__stdoutp != stdout) return 0;
-    }
-    /* Flush glibc streams normally */
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
     return real_fflush ? real_fflush(stream) : 0;
