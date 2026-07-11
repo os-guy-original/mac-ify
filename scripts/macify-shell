@@ -1,9 +1,6 @@
 #!/bin/bash
 # macify-shell — run a macOS bash shell inside the macify prefix
 #
-# Like Wine's `wine cmd`, this runs a real macOS binary (bash) inside
-# the macify prefix. The macOS bash sees / as the prefix root.
-#
 # Usage:
 #   macify-shell                  # interactive shell
 #   macify-shell 'echo hello'     # run command
@@ -12,9 +9,23 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MACIFY_BIN="$PROJECT_DIR/build/macify"
-SHIM_DIR="$PROJECT_DIR/build"
+
+# Find macify binary: installed path, env var, or source tree
+MACIFY_BIN="${MACIFY_BINARY:-}"
+if [ -z "$MACIFY_BIN" ] || [ ! -f "$MACIFY_BIN" ]; then
+    if [ -f "$SCRIPT_DIR/../macify" ]; then
+        MACIFY_BIN="$SCRIPT_DIR/../macify"
+    elif [ -f "$SCRIPT_DIR/../build/macify" ]; then
+        MACIFY_BIN="$SCRIPT_DIR/../build/macify"
+    else
+        echo "macify-shell: ERROR — cannot find macify binary" >&2
+        echo "  Set MACIFY_BINARY env var or run from source tree" >&2
+        exit 1
+    fi
+fi
+
+# Find shim directory (same dir as macify binary)
+SHIM_DIR="$(dirname "$MACIFY_BIN")"
 PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
 
 # ── Parse options ───────────────────────────────────────────────

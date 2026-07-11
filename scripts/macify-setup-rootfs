@@ -9,10 +9,45 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Find macify binary and source tree
+MACIFY_BIN="${MACIFY_BINARY:-}"
+if [ -z "$MACIFY_BIN" ] || [ ! -f "$MACIFY_BIN" ]; then
+    if [ -f "$SCRIPT_DIR/../macify" ]; then
+        MACIFY_BIN="$SCRIPT_DIR/../macify"
+    elif [ -f "$SCRIPT_DIR/../build/macify" ]; then
+        MACIFY_BIN="$SCRIPT_DIR/../build/macify"
+    fi
+fi
+SHIM_DIR="$(dirname "$MACIFY_BIN")"
+export LD_LIBRARY_PATH="$SHIM_DIR"
+
+# Find tests/real/ directory (macOS binaries source)
+REAL_DIR=""
+for d in "$SCRIPT_DIR/../tests/real" "$SCRIPT_DIR/tests/real"; do
+    if [ -d "$d" ]; then
+        REAL_DIR="$d"
+        break
+    fi
+done
+
 PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
 
 echo "Setting up macOS rootfs at $PREFIX"
+
+if [ -z "$MACIFY_BIN" ] || [ ! -f "$MACIFY_BIN" ]; then
+    echo "ERROR: cannot find macify binary" >&2
+    exit 1
+fi
+
+# Initialize prefix if needed
+if [ ! -f "$PREFIX/.macify_prefix" ]; then
+    "$MACIFY_BIN" "$REAL_DIR/echo_macos" init >/dev/null 2>&1 || true
+fi
+
+if [ -z "$REAL_DIR" ] || [ ! -d "$REAL_DIR" ]; then
+    echo "WARNING: tests/real/ not found — run scripts/fetch_binaries.sh first" >&2
+fi
 
 # ── Install bash + dylib deps via Homebrew ──────────────────────
 BASH_SRC="$PREFIX/usr/local/opt/bash/bin/bash"
@@ -45,7 +80,7 @@ fi
 install_binary() {
     local name="$1"
     local dest_dir="$2"
-    local src="$PROJECT_DIR/tests/real/${name}_macos"
+    local src="$REAL_DIR/${name}_macos"
     if [ -f "$src" ]; then
         cp "$src" "$dest_dir/$name"
         chmod 755 "$dest_dir/$name"

@@ -21,8 +21,17 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MACIFY_BIN="$PROJECT_DIR/build/macify"
+
+# Find macify binary: env var, installed path, or source tree
+MACIFY_BIN="${MACIFY_BINARY:-}"
+if [ -z "$MACIFY_BIN" ] || [ ! -f "$MACIFY_BIN" ]; then
+    if [ -f "$SCRIPT_DIR/../macify" ]; then
+        MACIFY_BIN="$SCRIPT_DIR/../macify"
+    elif [ -f "$SCRIPT_DIR/../build/macify" ]; then
+        MACIFY_BIN="$SCRIPT_DIR/../build/macify"
+    fi
+fi
+SHIM_DIR="$(dirname "$MACIFY_BIN")"
 PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
 
 # ── Check arguments ─────────────────────────────────────────────
@@ -56,7 +65,7 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-export LD_LIBRARY_PATH="$PROJECT_DIR/build"
+export LD_LIBRARY_PATH="$SHIM_DIR"
 
 # ── Print report header ─────────────────────────────────────────
 {
