@@ -534,6 +534,19 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     }
     return r;
 }
+
+/* fgets — pass-through. macOS code uses fgets to read lines.
+ * We can't safely do FILE* manipulation here because glibc's internal
+ * calls to fgets (e.g., from NSS) would be corrupted.
+ * The caller check doesn't help because the call comes through the PLT
+ * which always shows the shim's address, not the macOS binary's. */
+char *macify_fgets(char *s, int n, FILE *stream) __asm__("fgets");
+char *macify_fgets(char *s, int n, FILE *stream) {
+    static char *(*real_fgets)(char *, int, FILE *) = NULL;
+    if (!real_fgets) real_fgets = dlsym(RTLD_NEXT, "fgets");
+    return real_fgets(s, n, stream);
+}
+
 int macify_fgetc(FILE *stream) __asm__("fgetc");
 int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;

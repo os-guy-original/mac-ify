@@ -1060,7 +1060,7 @@ int main(int argc, char **argv, char **envp) {
                     if (nl->n_strx >= g_strtab_size) continue;
                     const char *name = strtab + nl->n_strx;
                     if (name[0] == '_') name++;
-                    if (strcmp(name, "environ") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0) {
+                    if (strcmp(name, "environ") == 0 || strcmp(name, "__environ") == 0) {
                         /* Overwrite with &environ (pointer to environ global) */
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)&environ;
                         if (g_verbose)
