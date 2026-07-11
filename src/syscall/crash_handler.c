@@ -44,8 +44,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         }
         extern FILE *stdout;
         if (stdout) {
-            char **base = (char **)((char *)stdout + 0x28);
-            char **ptr = (char **)((char *)stdout + 0x30);
+            char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+            char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
             if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                 write(1, *base, *ptr - *base);
             }
@@ -104,13 +104,13 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                  * corrupted FILE* structures. Instead, use write(1, ...) to
                  * flush stdout's glibc buffer directly.
                  * glibc's FILE struct for stdout has _IO_write_base at
-                 * offset 0x28 and _IO_write_ptr at offset 0x30 (64-bit). */
+                 * offset 0x20 and _IO_write_ptr at offset 0x28 (64-bit). */
                 extern FILE *stdout;
                 extern FILE *stderr;
                 /* Only flush if it looks like a valid glibc FILE* */
                 if (stdout) {
-                    char **base = (char **)((char *)stdout + 0x28);
-                    char **ptr = (char **)((char *)stdout + 0x30);
+                    char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+                    char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
                     if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                         write(1, *base, *ptr - *base);
                     }
@@ -137,8 +137,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                 && (unsigned long)info->si_addr == 0) {
                 extern FILE *stdout;
                 if (stdout) {
-                    char **base = (char **)((char *)stdout + 0x28);
-                    char **ptr = (char **)((char *)stdout + 0x30);
+                    char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+                    char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
                     if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                         write(1, *base, *ptr - *base);
                     }

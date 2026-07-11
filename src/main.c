@@ -18,11 +18,6 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv, char **envp) {
-    /* Debug: check if MACIFY_NO_FORK is in the environment */
-    if (getenv("MACIFY_DEBUG_ENV")) {
-        fprintf(stderr, "macify: env has MACIFY_NO_FORK=%s\n",
-                getenv("MACIFY_NO_FORK") ? getenv("MACIFY_NO_FORK") : "(not set)");
-    }
     int argi = 1;
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "-v") == 0 || strcmp(argv[argi], "--verbose") == 0) {
@@ -1243,12 +1238,6 @@ int main(int argc, char **argv, char **envp) {
      * Linux binaries on the host. */
     setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin", 1);
     setenv("MACIFY_PATH_SET", "1", 1);
-
-    /* Debug: verify MACIFY_NO_FORK is still in environ before setup_stack */
-    if (getenv("MACIFY_DEBUG_ENV")) {
-        fprintf(stderr, "macify: before setup_stack, MACIFY_NO_FORK=%s\n",
-                getenv("MACIFY_NO_FORK") ? getenv("MACIFY_NO_FORK") : "(not set)");
-    }
 
     void *stack_base = NULL;
     size_t stack_size = 0;

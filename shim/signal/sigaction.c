@@ -40,13 +40,14 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     /* macOS caller: translate signal number and struct layout.
      * CRITICAL: Don't allow macOS binaries to override SIGSEGV/SIGABRT
      * handlers — our crash recovery handler must remain installed to
-     * catch FILE* layout incompatibility crashes. */
+     * catch FILE* layout incompatibility crashes.
+     * Also block SIGALRM when MACIFY_NO_FORK is set — we use it for
+     * the timeout that kills binaries like sort that hang in cleanup. */
     {
-        /* Block macOS code from replacing our crash handlers */
-        if (signum == 11 /* SIGSEGV */ || signum == 6 /* SIGABRT */) {
+        /* Block macOS code from replacing our handlers */
+        if (signum == 11 /* SIGSEGV */ || signum == 6 /* SIGABRT */ ||
+            (signum == 14 /* SIGALRM */ && getenv("MACIFY_NO_FORK"))) {
             if (act) {
-                /* macOS binary is trying to install its own SIGSEGV/SIGABRT
-                 * handler. Silently ignore — our handler must stay. */
                 return 0;
             }
         }
@@ -221,6 +222,10 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
  * SIGBUS and install our own handler. */
 sighandler_t macify_signal(int signum, sighandler_t handler) __asm__("signal");
 sighandler_t macify_signal(int signum, sighandler_t handler) {
+    /* Block SIGALRM override when MACIFY_NO_FORK is set */
+    if (signum == 14 /* SIGALRM */ && getenv("MACIFY_NO_FORK")) {
+        return SIG_DFL;
+    }
     if (signum == SIGSEGV || signum == SIGBUS || signum == SIGABRT) {
         /* Install our crash handler via raw rt_sigaction syscall */
         struct sigaction sa;

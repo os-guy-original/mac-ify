@@ -256,12 +256,16 @@ static inline void macify_clear_serr_flag(FILE *fp) {
 
 /* Per-FILE* saved _IO_read_ptr. Uses a simple array keyed by FILE* address.
  * Most macOS binaries use only a few FILE* streams (stdin, stdout, stderr,
- * plus a few opened files). A small array suffices. */
+ * plus a few opened files). A small array suffices.
+ *
+ * We only save/restore _IO_read_ptr (offset 8). We do NOT save/restore
+ * _IO_read_end (offset 0x10) because it changes between calls as glibc
+ * refills the buffer. Restoring a stale _IO_read_end causes crashes.
+ * Instead, we fix _IO_read_end if it's corrupted (see macify_fix_read_end). */
 #define MACIFY_MAX_SAVED_FPS 16
 static struct {
     FILE *fp;
     void *saved_read_ptr;
-    void *saved_read_end;
     int valid;
 } macify_saved_fps[MACIFY_MAX_SAVED_FPS];
 
@@ -269,7 +273,6 @@ static void macify_save_read_ptr(FILE *fp) {
     for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
         if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
             macify_saved_fps[i].saved_read_ptr = *(void **)((char *)fp + 8);
-            macify_saved_fps[i].saved_read_end = *(void **)((char *)fp + 0x10);
             return;
         }
     }
@@ -278,25 +281,30 @@ static void macify_save_read_ptr(FILE *fp) {
         if (!macify_saved_fps[i].valid) {
             macify_saved_fps[i].fp = fp;
             macify_saved_fps[i].saved_read_ptr = *(void **)((char *)fp + 8);
-            macify_saved_fps[i].saved_read_end = *(void **)((char *)fp + 0x10);
             macify_saved_fps[i].valid = 1;
             return;
         }
     }
 }
 
+/* Fix _IO_read_end if macOS code corrupted it. Currently a no-op —
+ * the save/restore of _IO_read_ptr is sufficient for most binaries.
+ * Adding _IO_read_end manipulation caused hangs in sort. */
+static void macify_fix_read_end(FILE *fp) {
+    (void)fp;
+}
+
 static void macify_restore_read_ptr(FILE *fp) {
     for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
         if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
             *(void **)((char *)fp + 8) = macify_saved_fps[i].saved_read_ptr;
-            /* Also restore _IO_read_end (offset 0x10). macOS code writes
-             * _flags (short) to offset 0x10, corrupting _IO_read_end.
-             * Without restoring it, glibc's fread sees _IO_read_ptr >
-             * _IO_read_end and loops forever (sort hang). */
-            *(void **)((char *)fp + 0x10) = macify_saved_fps[i].saved_read_end;
+            /* Fix _IO_read_end if corrupted by macOS _flags write. */
+            macify_fix_read_end(fp);
             return;
         }
     }
+    /* No saved entry — just fix _IO_read_end if corrupted. */
+    macify_fix_read_end(fp);
 }
 
 static void macify_sync_stdio_flags(FILE *fp);
@@ -490,16 +498,11 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
-    /* Always restore _IO_read_ptr AND _IO_read_end before calling glibc's
-     * fread. macOS code writes _flags to offset 0x10, corrupting
-     * _IO_read_end. Without restoring, glibc sees _IO_read_ptr >
-     * _IO_read_end and loops forever. */
-    if (!macify_getc_patched) macify_restore_read_ptr(stream);
+    /* Restore _IO_read_ptr and fix _IO_read_end before calling glibc. */
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
-    /* After glibc's fread, _IO_read_ptr and _IO_read_end are valid.
-     * Save them so we can restore on the next call (after macOS code
-     * corrupts them by writing _flags). */
-    if (!macify_getc_patched) macify_save_read_ptr(stream);
+    /* After glibc's fread, save valid _IO_read_ptr. */
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_save_read_ptr(stream);
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -511,7 +514,6 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     if (r > 0 && !macify_getc_patched && !macify_skip_r_patch) {
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
-        *((unsigned char *)stream + 0x10) &= ~0x40;
     }
     return r;
 }
@@ -520,10 +522,10 @@ int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
     /* Restore _IO_read_ptr AND _IO_read_end before calling fgetc. */
-    if (!macify_getc_patched) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
     /* Save valid _IO_read_ptr and _IO_read_end after glibc's fgetc. */
-    if (!macify_getc_patched) macify_save_read_ptr(stream);
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_save_read_ptr(stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         *(int *)((char *)stream + 8) = -1;
     }
@@ -537,7 +539,7 @@ int macify_ungetc(int c, FILE *stream) __asm__("ungetc");
 int macify_ungetc(int c, FILE *stream) {
     static int (*real_ungetc)(int, FILE *) = NULL;
     if (!real_ungetc) real_ungetc = dlsym(RTLD_NEXT, "ungetc");
-    if (!macify_getc_patched) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
     int r = real_ungetc(c, stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         /* Re-save and re-corrupt _r = -1 */
@@ -554,10 +556,10 @@ int macify_fseeko(FILE *stream, long off, int whence) {
     static int (*real_fseeko)(FILE *, long, int) = NULL;
     if (!real_fseeko) real_fseeko = dlsym(RTLD_NEXT, "fseeko");
     /* Restore _IO_read_ptr and _IO_read_end before calling glibc. */
-    if (!macify_getc_patched) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
     int r = real_fseeko(stream, off, whence);
     /* Save valid state after glibc's fseeko. */
-    if (!macify_getc_patched) macify_save_read_ptr(stream);
+    if (!macify_getc_patched && !macify_skip_r_patch) macify_save_read_ptr(stream);
     return r;
 }
 
@@ -589,11 +591,8 @@ int macify_fclose(FILE *stream) {
     }
     static int (*real_fclose)(FILE *) = NULL;
     if (!real_fclose) real_fclose = dlsym(RTLD_NEXT, "fclose");
-    /* Restore saved _IO_read_ptr before fclose. */
+    /* Restore _IO_read_ptr and fix _IO_read_end before fclose. */
     macify_restore_read_ptr(stream);
-    void **read_ptr = (void **)((char *)stream + 8);
-    void **read_end = (void **)((char *)stream + 0x10);
-    *read_end = *read_ptr;
     /* Invalidate the save/restore entry so a reused FILE* (same address)
      * doesn't get the stale saved _IO_read_ptr restored. */
     for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
@@ -828,8 +827,8 @@ int macify_fflush(FILE *stream) {
         extern FILE *__stdoutp, *__stderrp;
         FILE *streams[] = { __stdoutp, __stderrp, NULL };
         for (int i = 0; streams[i]; i++) {
-            char **base = (char **)((char *)streams[i] + 0x28);
-            char **ptr = (char **)((char *)streams[i] + 0x30);
+            char **base = (char **)((char *)streams[i] + 0x20);  /* _IO_write_base */
+            char **ptr = (char **)((char *)streams[i] + 0x28);  /* _IO_write_ptr */
             if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                 int fd = (streams[i] == __stderrp) ? 2 : 1;
                 write(fd, *base, *ptr - *base);

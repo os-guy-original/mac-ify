@@ -202,6 +202,24 @@ static void setup_gs_base(uint64_t entry_rip) {
 }
 
 __attribute__((noreturn))
+/* SIGALRM handler for MACIFY_NO_FORK binaries — flushes stdout and exits. */
+__attribute__((naked))
+static void alarm_restore_rt(void) {
+    __asm__ volatile("mov $15, %%rax; syscall" :::);
+}
+
+static void alarm_handler(int sig) {
+    (void)sig;
+    extern FILE *stdout;
+    if (stdout) {
+        char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+        char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
+        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576)
+            write(1, *base, *ptr - *base);
+    }
+    _exit(0);
+}
+
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
     /* Set up %gs base for Go binaries that use gs:0x30 for goroutine TLS.
      * For Go binaries, GS base is set to (tls_g_addr - 0x30) so the GS
@@ -357,6 +375,28 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * setlocale() to set it (our shim re-forces LC_CTYPE=C after). */
     unsetenv("LC_CTYPE");
 
+    /* If MACIFY_NO_FORK is set, the binary (like sort) has FILE* layout
+     * issues that cause it to hang in glibc's internal I/O during cleanup.
+     * Set a 5-second alarm — if the binary hasn't exited by then, SIGALRM
+     * fires and our crash handler flushes stdout and exits cleanly.
+     * The binary has already produced its output by then. */
+    if (getenv("MACIFY_NO_FORK")) {
+        /* Install SIGALRM handler that flushes stdout and exits. */
+        struct k_sigaction {
+            void (*handler)(int);
+            unsigned long flags;
+            void (*restorer)(void);
+            unsigned long mask[16];
+        };
+        struct k_sigaction ala;
+        memset(&ala, 0, sizeof(ala));
+        ala.handler = alarm_handler;
+        ala.flags = 0x04000000;  /* SA_RESTORER */
+        ala.restorer = alarm_restore_rt;
+        syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
+        alarm(5);  /* 5 second timeout */
+    }
+
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
      * macOS binaries use printf/fwrite which buffer output internally. */
@@ -395,8 +435,8 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
     {
         extern FILE *stdout;
         if (stdout) {
-            char **base = (char **)((char *)stdout + 0x28);
-            char **ptr = (char **)((char *)stdout + 0x30);
+            char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+            char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
             if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                 write(1, *base, *ptr - *base);
             }

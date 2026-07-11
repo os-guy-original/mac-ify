@@ -556,8 +556,8 @@ void exit(int status) {
     {
         extern FILE *stdout;
         if (stdout) {
-            char **base = (char **)((char *)stdout + 0x28);
-            char **ptr = (char **)((char *)stdout + 0x30);
+            char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+            char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
             if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                 syscall(1, 1, *base, *ptr - *base);
             }
@@ -580,8 +580,8 @@ void _exit(int status) {
      * _exit() — without this, their output is lost. */
     extern FILE *stdout;
     if (stdout) {
-        char **base = (char **)((char *)stdout + 0x28);
-        char **ptr = (char **)((char *)stdout + 0x30);
+        char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
+        char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
         if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
             syscall(1, 1, *base, *ptr - *base);
         }
