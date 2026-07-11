@@ -998,6 +998,11 @@ int main(int argc, char **argv, char **envp) {
                     void *addr = resolve_symbol(-1, name);
                     if (addr) {
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)addr;
+                        /* Debug: verify critical symbols */
+                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0))
+                            fprintf(stderr, "macify: GOT %s at %p = 0x%lx\n", name,
+                                    (void*)(uintptr_t)(s->addr + k * 8),
+                                    (unsigned long)*(uint64_t*)(uintptr_t)(s->addr + k * 8));
                         resolved++;
                     } else {
                         unresolved++;
@@ -1221,14 +1226,14 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    /* Set PATH to macOS-style paths. The macOS binary's PATH should only
-     * contain macOS paths which get translated to the prefix. This prevents
-     * the macOS binary from finding Linux binaries via PATH search.
-     * But only set if PATH isn't already set (preserve user's PATH if set). */
-    if (!getenv("MACIFY_PATH_SET")) {
-        setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin", 0);
-        setenv("MACIFY_PATH_SET", "1", 1);
-    }
+    /* Set PATH to macOS-style paths. This MUST be done after all dylib
+     * loading (so macify can find its libraries) but before calling main
+     * (so the macOS binary sees the right PATH).
+     * These paths get translated to <prefix>/usr/bin, etc. by our shim.
+     * This ensures macOS binaries find macOS binaries in the prefix, not
+     * Linux binaries on the host. */
+    setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin", 1);
+    setenv("MACIFY_PATH_SET", "1", 1);
 
     void *stack_base = NULL;
     size_t stack_size = 0;

@@ -295,10 +295,27 @@ static int do_posix_spawn(pid_t *pid, const char *path,
                  * re-execing through macify with file_actions. */
                 pid_t child = fork();
                 if (child == 0) {
-                    /* Child: exec macify with the new argv */
+                    /* Child: exec macify with the new argv.
+                     * Ensure LD_LIBRARY_PATH is set so macify can find the shim. */
+                    if (!getenv("LD_LIBRARY_PATH")) {
+                        char libpath[4096];
+                        strncpy(libpath, macify_bin, sizeof(libpath) - 1);
+                        libpath[sizeof(libpath) - 1] = '\0';
+                        char *slash = strrchr(libpath, '/');
+                        if (slash) *slash = '\0';
+                        setenv("LD_LIBRARY_PATH", libpath, 1);
+                    }
+                    /* Ensure MACIFY_BINARY is set for nested execs */
+                    setenv("MACIFY_BINARY", macify_bin, 1);
+                    /* Ensure MACIFY_PREFIX is set */
+                    if (!getenv("MACIFY_PREFIX")) {
+                        extern const char *macify_get_prefix(void);
+                        const char *pfx = macify_get_prefix();
+                        if (pfx) setenv("MACIFY_PREFIX", pfx, 1);
+                    }
                     static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
                     if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
-                    if (real_execve) real_execve(macify_bin, new_argv, envp);
+                    if (real_execve) real_execve(macify_bin, new_argv, environ);
                     _exit(127);
                 }
                 free(new_argv);
@@ -550,9 +567,6 @@ int macify_execve(const char *path, char *const argv[], char *const envp[]) {
 /* execvpe — PATH search + translate + re-run through macify if Mach-O */
 int macify_execvp(const char *file, char *const argv[], char *const envp[]) __asm__("execvpe");
 int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
-    static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
-    if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
-
     if (!file) { errno = EFAULT; return -1; }
 
     /* Resolve file via PATH search in prefix */
@@ -562,26 +576,37 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
         return -1;
     }
 
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: execvpe(\"%s\" -> \"%s\")\n", file, resolved);
-        (void)write(2, b, n);
-    }
-
-    /* If it's a Mach-O binary, re-run through macify */
+    /* If it's a Mach-O binary, re-run through macify using execve (not execvpe)
+     * since we already have the full path. */
     if (is_macho_binary(resolved)) {
         const char *macify_bin = get_macify_binary();
         if (macify_bin) {
             char **new_argv = build_macify_argv(resolved, argv);
             if (new_argv) {
-                int ret = real_execvpe ? real_execvpe(macify_bin, new_argv, envp) : -1;
+                /* Use real execve (not execvpe) since macify_bin is a full path.
+                 * Also ensure LD_LIBRARY_PATH is in the environment. */
+                static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
+                if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
+                /* Make sure LD_LIBRARY_PATH is set so macify can find the shim */
+                if (!getenv("LD_LIBRARY_PATH")) {
+                    /* Find the directory of macify_bin and set it */
+                    char libpath[4096];
+                    strncpy(libpath, macify_bin, sizeof(libpath) - 1);
+                    libpath[sizeof(libpath) - 1] = '\0';
+                    char *slash = strrchr(libpath, '/');
+                    if (slash) *slash = '\0';
+                    setenv("LD_LIBRARY_PATH", libpath, 1);
+                }
+                int ret = real_execve ? real_execve(macify_bin, new_argv, envp) : -1;
                 free(new_argv);
                 return ret;
             }
         }
     }
 
-    /* ELF or unknown — pass through */
+    /* ELF or unknown — use real execvpe */
+    static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
+    if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
     return real_execvpe ? real_execvpe(resolved, argv, envp) : -1;
 }
 

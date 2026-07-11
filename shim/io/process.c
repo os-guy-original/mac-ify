@@ -19,17 +19,24 @@ int macify_wait4(int pid, int *status, int options, void *rusage) {
 
 pid_t macify_fork(void) __asm__("fork");
 pid_t macify_fork(void) {
-    if (macify_caller_is_macos_text(__builtin_return_address(0))) {
-        static pid_t (*real_fork)(void) = NULL;
-        if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
-        if (real_fork) return real_fork();
-    }
-    errno = 38;
+    /* Always call real fork — both macOS binaries and our shim need it.
+     * The previous check (macify_caller_is_macos_text) blocked fork()
+     * from our own posix_spawn handler, breaking pipes. */
+    static pid_t (*real_fork)(void) = NULL;
+    if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
+    if (real_fork) return real_fork();
+    errno = ENOSYS;
     return -1;
 }
 
 pid_t macify_vfork(void) __asm__("vfork");
-pid_t macify_vfork(void) { errno = 38; return -1; }
+pid_t macify_vfork(void) {
+    static pid_t (*real_fork)(void) = NULL;
+    if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
+    if (real_fork) return real_fork();
+    errno = ENOSYS;
+    return -1;
+}
 
 long macify_clone(unsigned long flags, void *stack, int *parent_tid,
                   int *child_tid, unsigned long tls, void *newsp) __asm__("__clone");
