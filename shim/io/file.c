@@ -1018,3 +1018,61 @@ long macify_sysconf(int name) {
     if (r != -1) errno = 0;
     return r;
 }
+
+/* ── termios: tcgetattr / tcsetattr ────────────────────────────
+ * macOS and Linux have DIFFERENT struct termios layouts:
+ *   macOS: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[20] c_ispeed(4) c_ospeed(4) = 60 bytes
+ *   Linux: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[19] c_line(1) = 36 bytes
+ * Without translation, bash's readline reads garbage terminal settings
+ * and crashes when entering interactive mode. */
+
+struct macos_termios {
+    unsigned int  c_iflag;    /* 0  */
+    unsigned int  c_oflag;    /* 4  */
+    unsigned int  c_cflag;    /* 8  */
+    unsigned int  c_lflag;    /* 12 */
+    unsigned char c_cc[20];   /* 16  — macOS NCCS=20 */
+    unsigned int  c_ispeed;   /* 36 */
+    unsigned int  c_ospeed;   /* 40 */
+    /* padding to 60 bytes */
+};
+
+int macify_tcgetattr(int fd, struct macos_termios *termios_p) __asm__("tcgetattr");
+int macify_tcgetattr(int fd, struct macos_termios *termios_p) {
+    static int (*real_tcgetattr)(int, struct termios *) = NULL;
+    if (!real_tcgetattr) real_tcgetattr = dlsym(RTLD_NEXT, "tcgetattr");
+    if (!real_tcgetattr) return -1;
+    struct termios lt;
+    int ret = real_tcgetattr(fd, &lt);
+    if (ret == 0 && termios_p) {
+        memset(termios_p, 0, sizeof(*termios_p));
+        termios_p->c_iflag = lt.c_iflag;
+        termios_p->c_oflag = lt.c_oflag;
+        termios_p->c_cflag = lt.c_cflag;
+        termios_p->c_lflag = lt.c_lflag;
+        /* Copy c_cc: macOS has 20 entries, Linux has 19 + c_line */
+        memcpy(termios_p->c_cc, lt.c_cc, 19);
+        termios_p->c_cc[19] = lt.c_line;  /* Linux c_line → macOS c_cc[19] */
+        termios_p->c_ispeed = cfgetispeed(&lt);
+        termios_p->c_ospeed = cfgetospeed(&lt);
+    }
+    return ret;
+}
+
+int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *termios_p) __asm__("tcsetattr");
+int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *termios_p) {
+    static int (*real_tcsetattr)(int, int, const struct termios *) = NULL;
+    if (!real_tcsetattr) real_tcsetattr = dlsym(RTLD_NEXT, "tcsetattr");
+    if (!real_tcsetattr || !termios_p) return -1;
+    struct termios lt;
+    memset(&lt, 0, sizeof(lt));
+    lt.c_iflag = termios_p->c_iflag;
+    lt.c_oflag = termios_p->c_oflag;
+    lt.c_cflag = termios_p->c_cflag;
+    lt.c_lflag = termios_p->c_lflag;
+    memcpy(lt.c_cc, termios_p->c_cc, 19);
+    lt.c_line = termios_p->c_cc[19];  /* macOS c_cc[19] → Linux c_line */
+    /* Translate macOS optional_actions to Linux:
+     *   TCSANOW=0, TCSADRAIN=1, TCSAFLUSH=2 (same on both) */
+    return real_tcsetattr(fd, optional_actions, &lt);
+}

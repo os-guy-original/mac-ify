@@ -338,6 +338,20 @@ int main(int argc, char **argv, char **envp) {
                     unwind_h, cxxabi, libcxx);
     }
 
+    /* Pre-load libtinfo (termcap functions) so readline can resolve
+     * tgetent, tgoto, tputs, tgetstr, tgetflag, tgetnum.
+     * These are needed by bash's readline in interactive mode.
+     * Without this, readline crashes when calling termcap functions
+     * (they resolve to NULL). */
+    {
+        void *tinfo = dlopen("libtinfo.so.6", RTLD_NOW | RTLD_GLOBAL);
+        if (!tinfo) tinfo = dlopen("libtinfo.so.5", RTLD_NOW | RTLD_GLOBAL);
+        if (!tinfo) tinfo = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
+        if (tinfo) register_extra_handle(tinfo);
+        if (g_verbose)
+            fprintf(stderr, "macify: preloaded libtinfo=%p\n", tinfo);
+    }
+
     for (uint32_t i = 0; i < hdr->ncmds && lc + 8 <= lc_end; i++) {
         uint32_t cmd     = *(uint32_t *)(void *)lc;
         uint32_t cmdsize = *(uint32_t *)(void *)(lc + 4);
@@ -485,6 +499,14 @@ int main(int argc, char **argv, char **envp) {
             } else if (strstr(name, "libncurses")) {
                 extra1 = dlopen("libncursesw.so.6", RTLD_NOW | RTLD_GLOBAL);
                 if (!extra1) extra1 = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
+                /* Also load libtinfo — termcap functions (tgetent, tgoto,
+                 * tputs, tgetstr, tgetflag, tgetnum) live in libtinfo on
+                 * Linux, not libncurses. Without this, readline's termcap
+                 * calls resolve to NULL and bash crashes in interactive mode. */
+                if (extra1) {
+                    void *tinfo = dlopen("libtinfo.so.6", RTLD_NOW | RTLD_GLOBAL);
+                    if (tinfo) register_extra_handle(tinfo);
+                }
             } else if (strstr(name, "libz")) {
                 extra1 = dlopen("libz.so.1", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libresolv")) {
