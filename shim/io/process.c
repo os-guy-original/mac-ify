@@ -287,11 +287,21 @@ static void macify_save_read_ptr(FILE *fp) {
     }
 }
 
-/* Fix _IO_read_end if macOS code corrupted it. Currently a no-op —
- * the save/restore of _IO_read_ptr is sufficient for most binaries.
- * Adding _IO_read_end manipulation caused hangs in sort. */
+/* Fix _IO_read_end if macOS code corrupted it by writing _flags (short,
+ * 2 bytes) to offset 0x10. This corrupts the low 2 bytes of _IO_read_end
+ * (an 8-byte pointer), making it point to a wrong address. Glibc then
+ * reads garbage from the buffer or loops forever.
+ *
+ * Detection: if _IO_read_end < _IO_read_ptr (buffer underflow) or
+ * _IO_read_end - _IO_read_ptr > 65536 (unreasonably large buffer),
+ * it's corrupted. Fix by setting _IO_read_end = _IO_read_ptr (empty
+ * buffer), which forces glibc to do a fresh kernel read. */
 static void macify_fix_read_end(FILE *fp) {
-    (void)fp;
+    char **read_ptr = (char **)((char *)fp + 8);
+    char **read_end = (char **)((char *)fp + 0x10);
+    if (*read_end < *read_ptr || *read_end - *read_ptr > 65536) {
+        *read_end = *read_ptr;
+    }
 }
 
 static void macify_restore_read_ptr(FILE *fp) {
@@ -499,10 +509,15 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
     /* Restore _IO_read_ptr and fix _IO_read_end before calling glibc. */
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
     /* After glibc's fread, save valid _IO_read_ptr. */
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_save_read_ptr(stream);
+    if (!macify_getc_patched) macify_save_read_ptr(stream);
+    /* Sync glibc EOF/ERR flags to macOS __SEOF/__SERR at offset 0x10.
+     * Without this, sort loops forever calling fread because macOS code
+     * checks offset 0x10 for EOF (which is glibc's _IO_read_end) instead
+     * of glibc's _flags at offset 0. */
+    macify_sync_stdio_flags(stream);
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -521,11 +536,11 @@ int macify_fgetc(FILE *stream) __asm__("fgetc");
 int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
-    /* Restore _IO_read_ptr AND _IO_read_end before calling fgetc. */
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
-    /* Save valid _IO_read_ptr and _IO_read_end after glibc's fgetc. */
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_save_read_ptr(stream);
+    if (!macify_getc_patched) macify_save_read_ptr(stream);
+    /* Sync EOF/ERR flags so macOS code detects EOF. */
+    macify_sync_stdio_flags(stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         *(int *)((char *)stream + 8) = -1;
     }
@@ -539,7 +554,7 @@ int macify_ungetc(int c, FILE *stream) __asm__("ungetc");
 int macify_ungetc(int c, FILE *stream) {
     static int (*real_ungetc)(int, FILE *) = NULL;
     if (!real_ungetc) real_ungetc = dlsym(RTLD_NEXT, "ungetc");
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_ungetc(c, stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         /* Re-save and re-corrupt _r = -1 */
@@ -556,10 +571,10 @@ int macify_fseeko(FILE *stream, long off, int whence) {
     static int (*real_fseeko)(FILE *, long, int) = NULL;
     if (!real_fseeko) real_fseeko = dlsym(RTLD_NEXT, "fseeko");
     /* Restore _IO_read_ptr and _IO_read_end before calling glibc. */
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_restore_read_ptr(stream);
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fseeko(stream, off, whence);
     /* Save valid state after glibc's fseeko. */
-    if (!macify_getc_patched && !macify_skip_r_patch) macify_save_read_ptr(stream);
+    if (!macify_getc_patched) macify_save_read_ptr(stream);
     return r;
 }
 
