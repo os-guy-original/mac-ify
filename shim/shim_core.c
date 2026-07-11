@@ -364,24 +364,73 @@ int tgetent(char *buf, const char *name) {
         }
         return r;
     }
-    /* Fallback: minimal stub */
+    /* Fallback: pretend we found an xterm-compatible terminal.
+     * This is safe because virtually all modern terminals (including
+     * Linux console, xterm, gnome-terminal, kitty, alacritty) support
+     * ANSI escape sequences. */
     if (buf) buf[0] = '\0';
     return 1;
 }
+
+/* Minimal xterm-compatible terminal capability strings.
+ * Used as fallback when real termcap is unavailable. */
+static char *tgetstr_fallback(const char *id) {
+    /* Key sequences */
+    if (strcmp(id, "ku") == 0) return "\033[A";  /* up */
+    if (strcmp(id, "kd") == 0) return "\033[B";  /* down */
+    if (strcmp(id, "kr") == 0) return "\033[C";  /* right */
+    if (strcmp(id, "kl") == 0) return "\033[D";  /* left */
+    if (strcmp(id, "kh") == 0) return "\033[H";  /* home */
+    if (strcmp(id, "kH") == 0) return "\033[F";  /* end */
+    if (strcmp(id, "kD") == 0) return "\033[3~"; /* delete */
+    if (strcmp(id, "kI") == 0) return "\033[2~"; /* insert */
+    if (strcmp(id, "k1") == 0) return "\033OP";  /* F1 */
+    if (strcmp(id, "k2") == 0) return "\033OQ";  /* F2 */
+    if (strcmp(id, "k3") == 0) return "\033OR";  /* F3 */
+    if (strcmp(id, "k4") == 0) return "\033OS";  /* F4 */
+    if (strcmp(id, "k5") == 0) return "\033[15~";/* F5 */
+    /* Cursor movement */
+    if (strcmp(id, "cr") == 0) return "\r";      /* carriage return */
+    if (strcmp(id, "nl") == 0) return "\n";      /* newline */
+    if (strcmp(id, "le") == 0) return "\b";      /* cursor left */
+    if (strcmp(id, "nd") == 0) return "\033[C";  /* cursor right */
+    if (strcmp(id, "up") == 0) return "\033[A";  /* cursor up */
+    if (strcmp(id, "do") == 0) return "\033[B";  /* cursor down */
+    if (strcmp(id, "ho") == 0) return "\033[H";  /* home */
+    if (strcmp(id, "ce") == 0) return "\033[K";  /* clear to end of line */
+    if (strcmp(id, "cd") == 0) return "\033[J";  /* clear to end of screen */
+    if (strcmp(id, "cl") == 0) return "\033[2J\033[H"; /* clear screen */
+    /* Misc */
+    if (strcmp(id, "bc") == 0) return "\b";      /* backspace */
+    if (strcmp(id, "bl") == 0) return "\a";      /* bell */
+    if (strcmp(id, "md") == 0) return "\033[1m"; /* bold */
+    if (strcmp(id, "me") == 0) return "\033[0m"; /* end attrs */
+    if (strcmp(id, "so") == 0) return "\033[7m"; /* standout */
+    if (strcmp(id, "se") == 0) return "\033[0m"; /* end standout */
+    if (strcmp(id, "us") == 0) return "\033[4m"; /* underline */
+    if (strcmp(id, "ue") == 0) return "\033[0m"; /* end underline */
+    return NULL;
+}
+
 int tgetflag(const char *id) {
     init_real_termcap();
     if (real_tgetflag) return real_tgetflag(id);
+    /* xterm-compatible flags */
+    if (strcmp(id, "am") == 0) return 1;  /* auto right margin */
+    if (strcmp(id, "xn") == 0) return 1;  /* newline ignored after wrap */
     return 0;
 }
 int tgetnum(const char *id) {
     init_real_termcap();
     if (real_tgetnum) return real_tgetnum(id);
+    if (strcmp(id, "co") == 0) return 80;  /* columns */
+    if (strcmp(id, "li") == 0) return 24;  /* lines */
     return -1;
 }
 char *tgetstr(const char *id, char **area) {
     init_real_termcap();
     if (real_tgetstr) return real_tgetstr(id, area);
-    return NULL;
+    return tgetstr_fallback(id);
 }
 char *tgoto(const char *cap, int col, int row) {
     init_real_termcap();
