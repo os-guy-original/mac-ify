@@ -340,11 +340,13 @@ int __srget(FILE *fp) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
-    /* Restore _IO_read_ptr before calling fgetc, but ONLY when the getc
-     * macro is NOT patched. When patched, the store was NOP'd so
-     * _IO_read_ptr is never corrupted and no restore is needed. */
     if (is_macos && !macify_getc_patched) macify_restore_read_ptr(fp);
     int c = real_fgetc ? real_fgetc(fp) : EOF;
+    if (is_macos && !macify_getc_patched) macify_save_read_ptr(fp);
+    /* Sync EOF/ERR flags ONLY when at EOF — writing to offset 0x10
+     * corrupts _IO_read_end, which breaks subsequent buffer reads.
+     * At EOF, the buffer is empty so corruption is safe. */
+    if (is_macos && c == EOF) macify_sync_stdio_flags(fp);
     if (getenv("MACIFY_TRACE_SRGET")) {
         void *rp = *(void **)((char *)fp + 8);
         void *re = *(void **)((char *)fp + 0x10);
@@ -514,10 +516,10 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     /* After glibc's fread, save valid _IO_read_ptr. */
     if (!macify_getc_patched) macify_save_read_ptr(stream);
     /* Sync glibc EOF/ERR flags to macOS __SEOF/__SERR at offset 0x10.
-     * Without this, sort loops forever calling fread because macOS code
-     * checks offset 0x10 for EOF (which is glibc's _IO_read_end) instead
-     * of glibc's _flags at offset 0. */
-    macify_sync_stdio_flags(stream);
+     * ONLY when fread returns 0 (EOF) — writing to offset 0x10 corrupts
+     * _IO_read_end, which breaks subsequent buffer reads. At EOF, the
+     * buffer is empty so corruption is safe. */
+    if (r == 0) macify_sync_stdio_flags(stream);
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -539,8 +541,9 @@ int macify_fgetc(FILE *stream) {
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
     if (!macify_getc_patched) macify_save_read_ptr(stream);
-    /* Sync EOF/ERR flags so macOS code detects EOF. */
-    macify_sync_stdio_flags(stream);
+    /* Sync EOF/ERR flags ONLY at EOF — writing to offset 0x10 corrupts
+     * _IO_read_end, breaking subsequent buffer reads. */
+    if (r == EOF) macify_sync_stdio_flags(stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         *(int *)((char *)stream + 8) = -1;
     }
