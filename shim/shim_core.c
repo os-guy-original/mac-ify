@@ -291,3 +291,21 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize) {
     *bufsize = len;
     return 0;
 }
+
+/* ── termcap global variables (BC, PC, UP) ──────────────────────
+ * macOS's ncurses exports these as global variables that readline
+ * references via GOT. Linux's ncurses does NOT export them — they're
+ * internal. Without providing them, readline's GOT entries resolve
+ * to NULL, causing crashes (rip=0x8) in interactive mode.
+ *
+ *   BC — char* : backspace cursor movement string
+ *   PC — char  : padding character
+ *   UP — char* : cursor up movement string
+ *
+ * These are normally set by tgetent() after reading the terminal entry.
+ * We initialize them to safe defaults. tgetent (from libncursesw) will
+ * set Linux's internal copies but NOT these — we intercept tgetent in
+ * file.c to sync them. */
+char *BC = (char *)"\b";   /* backspace */
+char  PC = 0;              /* no padding */
+char *UP = (char *)"\033[A"; /* ESC [ A = cursor up */
