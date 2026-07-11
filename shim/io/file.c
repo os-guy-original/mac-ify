@@ -547,7 +547,21 @@ int macify_lstat_inode64(const char *path, struct macos_stat *buf) {
 
 int macify_fstat_inode64(int fd, struct macos_stat *buf) __asm__("fstat$INODE64");
 int macify_fstat_inode64(int fd, struct macos_stat *buf) {
-    return macify_fstat(fd, buf);
+    /* Do NOT delegate to macify_fstat — it checks caller, and the
+     * return address would be in this shim, not macOS text, so it
+     * would skip translate_stat and write Linux struct stat data
+     * into the macOS struct stat buffer (wrong field offsets). */
+    if (!real_fstat) real_fstat = dlsym(RTLD_NEXT, "fstat");
+    struct stat ls;
+    int ret = real_fstat(fd, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: fstat$INODE64(%d) = %d errno=%d st_mode=0%o\n",
+            fd, ret, ret ? errno : 0, ret == 0 ? ls.st_mode : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
+    return ret;
 }
 
 int macify_fstatat_inode64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) __asm__("fstatat$INODE64");
