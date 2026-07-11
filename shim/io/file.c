@@ -499,6 +499,62 @@ int macify_fstatat64(int dirfd, const char *pathname, struct macos_stat *buf, in
     return macify_fstatat(dirfd, pathname, buf, flags);
 }
 
+/* ── $INODE64 variants ────────────────────────────────────────
+ * macOS provides stat$INODE64, lstat$INODE64, fstat$INODE64,
+ * fstatat$INODE64 as aliases to the regular 64-bit inode variants.
+ * Many macOS binaries (including ls from coreutils) import these names
+ * directly. Without these exports, the symbols resolve to 0 (NULL).
+ *
+ * CRITICAL: These do their own path translation directly (NOT delegating
+ * to macify_stat etc.) because macify_stat checks
+ * macify_caller_is_macos_text(__builtin_return_address) — and the return
+ * address would be in the shim (here), not in macOS text, so the caller
+ * check would return FALSE and skip path translation. */
+
+int macify_stat_inode64(const char *path, struct macos_stat *buf) __asm__("stat$INODE64");
+int macify_stat_inode64(const char *path, struct macos_stat *buf) {
+    if (!real_stat) real_stat = dlsym(RTLD_NEXT, "stat");
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    struct stat ls;
+    int ret = real_stat(eff, &ls);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
+    return ret;
+}
+
+int macify_lstat_inode64(const char *path, struct macos_stat *buf) __asm__("lstat$INODE64");
+int macify_lstat_inode64(const char *path, struct macos_stat *buf) {
+    if (!real_lstat) real_lstat = dlsym(RTLD_NEXT, "lstat");
+    const char *eff = path;
+    char tp[4096];
+    if (path) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    struct stat ls;
+    int ret = real_lstat(eff, &ls);
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
+    return ret;
+}
+
+int macify_fstat_inode64(int fd, struct macos_stat *buf) __asm__("fstat$INODE64");
+int macify_fstat_inode64(int fd, struct macos_stat *buf) {
+    return macify_fstat(fd, buf);
+}
+
+int macify_fstatat_inode64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) __asm__("fstatat$INODE64");
+int macify_fstatat_inode64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) {
+    return macify_fstatat(dirfd, pathname, buf, flags);
+}
+
 /* ── access ──────────────────────────────────────────────────── */
 /* access — check file accessibility. Apply prefix path translation. */
 int macify_access(const char *path, int mode) __asm__("access");

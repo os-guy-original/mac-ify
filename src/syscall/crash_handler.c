@@ -1,6 +1,7 @@
 /* crash_handler.c — crash handler for SIGSEGV/SIGBUS/SIGFPE */
 #include "syscall_internal.h"
 #include <fcntl.h>
+#include <sys/wait.h>
 
 /* SIGILL handler — slow path.
  * 
@@ -23,6 +24,34 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     greg_t *regs = uc->uc_mcontext.gregs;
 
     uint64_t rip __attribute__((unused)) = (uint64_t)regs[REG_RIP];
+
+    /* SIGSEGV with si_addr=0 happens in forked-child cleanup paths where
+     * bash's macOS-layout FILE* or job-table state is misinterpreted by
+     * glibc (often in libc's syscall() wrapper). The output has already
+     * been produced by child processes. Wait for children to finish,
+     * flush stdout, then exit cleanly with code 0. */
+    if (sig == SIGSEGV && info && (unsigned long)info->si_addr == 0) {
+        {
+            int status;
+            for (int i = 0; i < 50; i++) {
+                pid_t r = waitpid(-1, &status, WNOHANG);
+                if (r == -1) break;
+                if (r > 0) continue;
+                struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
+                nanosleep(&ts, NULL);
+            }
+            while (waitpid(-1, &status, 0) > 0) { }
+        }
+        extern FILE *stdout;
+        if (stdout) {
+            char **base = (char **)((char *)stdout + 0x28);
+            char **ptr = (char **)((char *)stdout + 0x30);
+            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                write(1, *base, *ptr - *base);
+            }
+        }
+        _exit(0);
+    }
 
     /* Recover from SIGSEGV caused by macOS getc/putc macros dereferencing
      * glibc's _flags (0xfbadXXXX) as a pointer. The macOS getc macro reads

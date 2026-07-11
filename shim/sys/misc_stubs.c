@@ -574,6 +574,17 @@ void _exit(int status) {
         char b[64]; int n = snprintf(b, sizeof(b), "macify: pid=%d _exit(%d)\n", getpid(), status);
         syscall(1, 2, b, n);
     }
+    /* Flush stdout's buffer directly via write syscall before exiting.
+     * Critical for forked children (like cat in a pipe) that call
+     * _exit() — without this, their output is lost. */
+    extern FILE *stdout;
+    if (stdout) {
+        char **base = (char **)((char *)stdout + 0x28);
+        char **ptr = (char **)((char *)stdout + 0x30);
+        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            syscall(1, 1, *base, *ptr - *base);
+        }
+    }
     syscall(231, status);  /* SYS_exit_group */
     __builtin_unreachable();
 }
