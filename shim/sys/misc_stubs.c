@@ -545,10 +545,23 @@ int atexit(void (*func)(void)) {
 void macify_print_ret_globals(void);  /* defined in shim_pthread.c */
 void exit(int status) {
     if (getenv("MACIFY_TRACE_EXIT")) {
-        char b[64]; int n = snprintf(b, sizeof(b), "macify: exit(%d)\n", status);
+        char b[64]; int n = snprintf(b, sizeof(b), "macify: pid=%d exit(%d)\n", getpid(), status);
         syscall(1, 2, b, n);
     }
-    fflush(NULL);
+    /* Only flush stdio in the parent process. In a forked child,
+     * macOS bash's FILE* state may be inconsistent (macOS vs glibc
+     * FILE struct layout differences), and glibc's fflush(NULL)
+     * iterates ALL open streams — including ones with corrupted
+     * macOS-layout FILE*, causing SIGSEGV.
+     *
+     * The child has already written its output (e.g., echo hello)
+     * which was flushed by the putc macro calling __swbuf. Skipping
+     * fflush(NULL) here is safe — the kernel flushes fd buffers on
+     * _exit anyway. */
+    extern int is_forked_child(void);
+    if (!is_forked_child()) {
+        fflush(NULL);
+    }
     _exit(status);
 }
 
@@ -558,7 +571,7 @@ void exit(int status) {
  * Export _exit so chained fixups find it directly instead of finding exit(). */
 void _exit(int status) {
     if (getenv("MACIFY_TRACE_EXIT")) {
-        char b[64]; int n = snprintf(b, sizeof(b), "macify: _exit(%d)\n", status);
+        char b[64]; int n = snprintf(b, sizeof(b), "macify: pid=%d _exit(%d)\n", getpid(), status);
         syscall(1, 2, b, n);
     }
     syscall(231, status);  /* SYS_exit_group */

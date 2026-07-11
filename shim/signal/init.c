@@ -2,17 +2,28 @@
 #include "signal_internal.h"
 #include <sys/syscall.h>
 
-/* atfork child handler: immediately exit forked children. */
+/* Track the original PID to detect forked children.
+ * Set in the constructor (parent process). After fork(), the child
+ * inherits this value (parent's PID), so getpid() != g_original_pid
+ * returns TRUE in the child. */
+static pid_t g_original_pid = 0;
+
+/* atfork child handler — currently a no-op.
+ *
+ * Previously this called _exit(0) to immediately kill forked children,
+ * which completely broke pipes (echo hello | cat) and subshells because
+ * every forked child died before it could exec the next command.
+ *
+ * We must NOT reset g_original_pid here — the child needs to keep the
+ * parent's PID so is_forked_child() correctly returns TRUE in the
+ * forked child. */
 static void atfork_child_handler(void) {
-    _exit(0);
+    /* no-op — child inherits parent's g_original_pid */
 }
 
 void atfork_child_exit(void) {
     pthread_atfork(NULL, NULL, atfork_child_handler);
 }
-
-/* Track the original PID to detect forked children. */
-static pid_t g_original_pid = 0;
 
 int is_forked_child(void) {
     if (g_original_pid == 0) g_original_pid = getpid();

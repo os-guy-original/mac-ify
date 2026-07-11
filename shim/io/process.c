@@ -72,34 +72,21 @@ int macify_pipe(int *pipefd) {
     return real_pipe(pipefd);
 }
 
-/* read — if reading from a pipe (FIFO) and no data is available,
- * return EOF. This prevents deadlocks when glibc's NSS tries to
- * fork helper processes (which are blocked by our clone override).
- * Without this, the parent blocks forever waiting for data from
- * a child that can never write. */
+/* read — pass through to glibc's real read.
+ *
+ * Previously this had special logic to return EOF when a pipe (FIFO) had
+ * no data immediately available (poll returns 0). That was a workaround
+ * for glibc's NSS helpers forking helpers that couldn't run because our
+ * clone() shim blocked them. The workaround broke real pipes: if the
+ * reader polled before the writer wrote, it got a spurious EOF.
+ *
+ * Now we just pass through to glibc's read. The kernel handles pipe
+ * semantics correctly: read() blocks until data is available OR the
+ * writer closes the pipe (then returns 0 = EOF). */
 ssize_t macify_read(int fd, void *buf, size_t count) __asm__("read");
 ssize_t macify_read(int fd, void *buf, size_t count) {
     static ssize_t (*real_read)(int, void *, size_t) = NULL;
-    static int (*real_fstat)(int, struct stat *) = NULL;
     if (!real_read) real_read = dlsym(RTLD_NEXT, "read");
-    if (!real_fstat) real_fstat = dlsym(RTLD_NEXT, "fstat");
-    /* Check if fd is a pipe (FIFO). Use real_fstat (not our interposed
-     * fstat) because we need Linux-format struct stat.
-     * CRITICAL: Save/restore errno around fstat — if fstat fails (e.g.,
-     * for an already-closed fd), it sets errno. When read() succeeds
-     * after, errno is still set from fstat. sort checks errno after
-     * read() and reports "read failed" with the stale error. */
-    int saved_errno = errno;
-    struct stat st;
-    if (real_fstat && real_fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode)) {
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int pr = poll(&pfd, 1, 0);
-        if (pr == 0) {
-            errno = saved_errno;
-            return 0;
-        }
-    }
-    errno = saved_errno;
     ssize_t r = real_read(fd, buf, count);
     if (getenv("MACIFY_TRACE_READ")) {
         char b[256]; int n = snprintf(b, sizeof(b),

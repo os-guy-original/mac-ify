@@ -208,6 +208,13 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
     /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
     int result = syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
+    if (getenv("MACIFY_TRACE_SIGNAL")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: sigprocmask(how=%d, set=%p, oldset=%p) = %d from %p\n",
+            how, set, oldset, result, __builtin_return_address(0));
+        (void)write(2, b, n);
+    }
+
     if (oldset && result == 0) {
         linux_to_macos_sigset(&linux_oldset, oldset);
     }
