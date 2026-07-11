@@ -899,7 +899,8 @@ int main(int argc, char **argv, char **envp) {
                  */
                 uintptr_t page = (uintptr_t)(text + i) & ~0xfffUL;
                 if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-                    if (g_verbose) fprintf(stderr, "macify: mprotect RWX failed for putc patch at %p\n", (void*)(text+i));
+                    fprintf(stderr, "macify: mprotect RWX FAILED for putc patch at %p: %s\n", (void*)(text+i), strerror(errno));
+                    continue;
                 }
                 /* NOP the write to [rX+0x0c] (3 bytes at i+6) to prevent
                  * _IO_read_ptr corruption */
@@ -908,7 +909,13 @@ int main(int argc, char **argv, char **envp) {
                 text[i+11] = 0xeb;  /* jmp short */
                 text[i+12] = 4 + je_offset;
                 mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
-                if (g_verbose) fprintf(stderr, "macify: patched putc at %p: NOP write + jg→jmp\n", (void*)(text+i+11));
+                /* Verify the patch was applied */
+                if (text[i+11] != 0xeb || text[i+6] != 0x90) {
+                    fprintf(stderr, "macify: putc patch VERIFY FAILED at %p (got %02x %02x)\n",
+                            (void*)(text+i+11), text[i+11], text[i+6]);
+                } else if (g_verbose) {
+                    fprintf(stderr, "macify: putc patch OK at %p (NOP+jmp %d)\n", (void*)(text+i+11), 4+je_offset);
+                }
                 patched++;
             }
             if (g_verbose && patched > 0)

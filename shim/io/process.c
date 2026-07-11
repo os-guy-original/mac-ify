@@ -105,10 +105,6 @@ ssize_t macify_read(int fd, void *buf, size_t count) {
 
 ssize_t macify_write(int fd, const void *buf, size_t count) __asm__("write");
 ssize_t macify_write(int fd, const void *buf, size_t count) {
-    if (getenv("MACIFY_TRACE_WRITE") && fd <= 2 && count > 0 && count < 100) {
-        char b[256]; int n = snprintf(b, sizeof(b), "write(%d,%zu:%.*s)", fd, count, (int)count, (char*)buf);
-        syscall(1, 2, b, n);
-    }
     static ssize_t (*real_write)(int, const void *, size_t) = NULL;
     if (!real_write) real_write = dlsym(RTLD_NEXT, "write");
     ssize_t r = real_write(fd, buf, count);
@@ -314,17 +310,9 @@ int __srget(FILE *fp) {
  *
  * Fix: After fputc, set _w = -1 to force next putc to call __swbuf. */
 int __swbuf(int ch, FILE *fp) {
-    if (getenv("MACIFY_TRACE_WRITE")) {
-        char b[64]; int n = snprintf(b, sizeof(b), "S(%02x)", ch & 0xff);
-        syscall(1, 2, b, n);
-    }
     static int (*real_fputc)(int, FILE *) = NULL;
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
-    int r = real_fputc ? real_fputc(ch, fp) : EOF;
-    if (r != EOF) {
-        macify_clear_serr_flag(fp);
-    }
-    return r;
+    return real_fputc ? real_fputc(ch, fp) : EOF;
 }
 
 /* putc_unlocked — macOS inlines this as a macro accessing FILE* fields.
@@ -338,7 +326,7 @@ int putc_unlocked(int ch, FILE *fp) {
     if (r != EOF) {
         extern FILE *__stdoutp, *__stderrp;
         if (fp == __stdoutp || fp == __stderrp) {
-            macify_clear_serr_flag(fp);
+    
             *(int *)((char *)fp + 0x0c) = -1;
         }
     }
@@ -380,7 +368,7 @@ int putchar_unlocked(int ch) {
     macify_restore_read_ptr(__stdoutp);
     int r = real_fputc ? real_fputc(ch, __stdoutp) : EOF;
     if (r != EOF) {
-        macify_clear_serr_flag(__stdoutp);
+
         *(int *)((char *)__stdoutp + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
@@ -625,17 +613,9 @@ int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
 
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fwrite");
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-    if (getenv("MACIFY_TRACE_WRITE") && size * nmemb < 100) {
-        char b[256]; int n = snprintf(b, sizeof(b), "W(%zu:%.*s)", size*nmemb, (int)(size*nmemb), (char*)ptr);
-        syscall(1, 2, b, n);
-    }
     static size_t (*real_fwrite)(const void *, size_t, size_t, FILE *) = NULL;
     if (!real_fwrite) real_fwrite = dlsym(RTLD_NEXT, "fwrite");
-    size_t r = real_fwrite(ptr, size, nmemb, stream);
-    if (r > 0) {
-        macify_clear_serr_flag(stream);
-    }
-    return r;
+    return real_fwrite(ptr, size, nmemb, stream);
 }
 
 /* printf shim — write to macOS stdout if applicable */
@@ -663,7 +643,7 @@ int macify_printf(const char *fmt, ...) {
     int r = real_vfprintf(stdout, fmt, ap);
     va_end(ap);
     if (r >= 0) {
-        macify_clear_serr_flag(stdout);
+
     }
     return r;
 }
@@ -685,7 +665,7 @@ int macify_vfprintf(FILE *stream, const char *fmt, va_list ap) {
     if (!real_vfprintf) real_vfprintf = dlsym(RTLD_NEXT, "vfprintf");
     int r = real_vfprintf(stream, fmt, ap);
     if (r >= 0) {
-        macify_clear_serr_flag(stream);
+
     }
     return r;
 }
@@ -712,7 +692,7 @@ int macify_fprintf(FILE *stream, const char *fmt, ...) {
     r = real_vfprintf(stream, fmt, ap);
     va_end(ap);
     if (r >= 0) {
-        macify_clear_serr_flag(stream);
+
     }
     return r;
 }
@@ -720,20 +700,9 @@ int macify_fprintf(FILE *stream, const char *fmt, ...) {
 /* fputs shim — handle macOS FILE and clear __SERR */
 int macify_fputs(const char *s, FILE *stream) __asm__("fputs");
 int macify_fputs(const char *s, FILE *stream) {
-    extern int macify_is_macos_file(void *);
-    extern size_t macify_fwrite_macos(const void *, size_t, size_t, void *);
-    if (macify_is_macos_file(stream)) {
-        size_t len = strlen(s);
-        size_t r = macify_fwrite_macos(s, 1, len, stream);
-        return (r == len) ? 0 : EOF;
-    }
     static int (*real_fputs)(const char *, FILE *) = NULL;
     if (!real_fputs) real_fputs = dlsym(RTLD_NEXT, "fputs");
-    int r = real_fputs(s, stream);
-    if (r >= 0) {
-        macify_clear_serr_flag(stream);
-    }
-    return r;
+    return real_fputs(s, stream);
 }
 
 /* fdopen — pass-through. Safe buffer is set by fopen shim. */
@@ -761,7 +730,7 @@ int macify_fputc(int c, FILE *stream) {
     if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     int r = real_fputc(c, stream);
     if (r != EOF) {
-        macify_clear_serr_flag(stream);
+
     }
     return r;
 }
@@ -769,13 +738,10 @@ int macify_fputc(int c, FILE *stream) {
 /* putchar — write to macOS stdout */
 int macify_putchar(int c) __asm__("putchar");
 int macify_putchar(int c) {
+    static int (*real_fputc)(int, FILE *) = NULL;
+    if (!real_fputc) real_fputc = dlsym(RTLD_NEXT, "fputc");
     extern FILE *__stdoutp;
-    extern int macify_is_macos_file(void *);
-    extern int macify_fputc_macos(int, void *);
-    if (macify_is_macos_file(__stdoutp)) {
-        return macify_fputc_macos(c, __stdoutp);
-    }
-    return macify_fputc(c, stdout);
+    return real_fputc ? real_fputc(c, __stdoutp) : EOF;
 }
 
 /* puts — write string + newline to macOS stdout */
