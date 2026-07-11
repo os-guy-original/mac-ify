@@ -61,30 +61,44 @@ static void macify_init_stdio(void) {
         (void)p;  /* if mapping fails, the SIGSEGV recovery handler is the fallback */
     }
 
-    /* Allocate stdout's buffer at a controlled address where the low byte
-     * does NOT have bit 0x40 set. macOS binaries check [stdout + 0x10] & 0x40
-     * for __SERR (error flag). Glibc stores _IO_read_end (buffer pointer) at
-     * offset 0x10. If the buffer address has bit 0x40 in its low byte, macOS
-     * code falsely detects a write error.
+    /* Allocate stdout's buffer at a LOW address (below 4GB) so that
+     * _IO_read_ptr's upper 4 bytes (which overlap with macOS's _w at
+     * offset 0x0c) are 0. With _w=0, the putc macro's `jg` (jump-if-
+     * greater) won't take the fast path — it falls through to check
+     * for '\n' and calls __swbuf, which we intercept.
      *
-     * We use mmap to get a page at a predictable address, then use part of it
-     * as stdout's buffer. Since most macOS binaries don't call setvbuf, our
-     * buffer persists for the lifetime of the process. */
+     * Also ensure the buffer address doesn't have bit 0x40 set in the
+     * low byte (macOS __SERR false positive check at [fp+0x10]).
+     *
+     * We mmap at 0x10000 (64KB), which is:
+     *   - Below 4GB (upper 4 bytes = 0 → _w = 0)
+     *   - Bit 0x40 not set in low byte (0x00 & 0x40 = 0)
+     *   - Page-aligned
+     *   - Unlikely to conflict with other mappings */
     {
-        char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (page && page != MAP_FAILED) {
-            /* Check if the address has bit 0x40 set */
-            if (((uintptr_t)page & 0x40) == 0) {
-                /* Safe to use directly */
-                setvbuf(stdout, page, _IOLBF, 4096);
-            } else {
-                /* Bit 0x40 is set — find an offset within the page that clears it */
-                char *safe = (char *)(((uintptr_t)page + 0x40) & ~0x3f);
-                if (((uintptr_t)safe & 0x40) == 0 && safe + 4096 <= page + 4096) {
-                    setvbuf(stdout, safe, _IOLBF, 4096 - (safe - page));
+        char *buf = mmap((void *)0x10000, 4096, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (buf && buf != MAP_FAILED) {
+            setvbuf(stdout, buf, _IOLBF, 4096);
+        } else {
+            /* Fallback: try any low address */
+            for (uintptr_t addr = 0x20000; addr < 0x10000000; addr += 0x1000) {
+                buf = mmap((void *)addr, 4096, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+                if (buf && buf != MAP_FAILED && (uintptr_t)buf < 0x100000000ULL) {
+                    if (((uintptr_t)buf & 0x40) == 0) {
+                        setvbuf(stdout, buf, _IOLBF, 4096);
+                        break;
+                    }
+                    munmap(buf, 4096);
                 }
             }
+        }
+        /* Same for stderr — use unbuffered so characters go through write() */
+        char *ebuf = mmap((void *)0x11000, 4096, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (ebuf && ebuf != MAP_FAILED) {
+            setvbuf(stderr, ebuf, _IONBF, 0);
         }
     }
 
