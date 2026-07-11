@@ -920,6 +920,23 @@ int main(int argc, char **argv, char **envp) {
             }
             if (g_verbose && patched > 0)
                 fprintf(stderr, "macify: patched %d putc macro(s) to call __swbuf\n", patched);
+
+            /* If NO putc macros were patched, the binary calls fputc/fgetc
+             * as functions (not inlined). In that case, skip the _r=-1/_w=-1
+             * corruption — it breaks glibc's internal I/O (fread, fgets,
+             * fclose) causing hangs in binaries like sort.
+             *
+             * If putc macros WERE patched, the binary uses inlined stdio
+             * macros, so we NEED _r=-1 to prevent the getc macro from
+             * reading _p (glibc's _flags = 0xfbad2084). */
+            if (patched == 0 && g_ndylibs > 0 && g_dylibs[0].handle) {
+                int *skip_flag = (int *)dlsym(g_dylibs[0].handle, "macify_skip_r_patch");
+                if (skip_flag) {
+                    *skip_flag = 1;
+                    if (g_verbose)
+                        fprintf(stderr, "macify: skipping _r=-1 patch (no inlined putc macros found)\n");
+                }
+            }
         }
     }
 
@@ -999,7 +1016,7 @@ int main(int argc, char **argv, char **envp) {
                     if (addr) {
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)addr;
                         /* Debug: verify critical symbols */
-                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0))
+                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0))
                             fprintf(stderr, "macify: GOT %s at %p = 0x%lx\n", name,
                                     (void*)(uintptr_t)(s->addr + k * 8),
                                     (unsigned long)*(uint64_t*)(uintptr_t)(s->addr + k * 8));
@@ -1018,23 +1035,10 @@ int main(int argc, char **argv, char **envp) {
                     resolved, unresolved);
     }
 
-    /* Switch to macOS FILE structs if the binary uses inlined putc macros.
-     * Detected by text section size > 100KB (bash, node, etc.).
-     * Small binaries (echo, cat, ls) work fine with glibc's FILE. */
-    if (g_ndylibs > 0 && g_dylibs[0].handle) {
-        loaded_section *text_sec = find_section("__TEXT", "__text");
-        if (text_sec && text_sec->size > 100000) {
-            /* Use _w=-1 approach: force glibc's _IO_read_ptr upper 4 bytes
-             * (macOS _w at offset 0x0c) to -1 so the inlined putc macro
-             * always calls __swbuf (which we intercept).
-             * This is done right before calling main in runtime.c.
-             * We don't use macOS FILE structs because they conflict with
-             * glibc's buffer pointer layout. */
-            if (g_verbose)
-                fprintf(stderr, "macify: will set _w=-1 for inlined putc (text=%zu bytes > 100KB)\n",
-                        text_sec->size);
-        }
-    }
+    /* macify_skip_r_patch is set above after putc patching, based on
+     * whether inlined putc macros were found. The old text-size-based
+     * detection (>100KB) is no longer used here — the putc patching
+     * logic handles it more precisely. */
 
     /* Set up TLV (Thread-Local Variable) info in the shim. Find __thread_data
      * and __thread_bss sections and pass them to __macify_set_tlv_info() so

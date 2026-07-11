@@ -8,6 +8,12 @@
 
 int macify_wait4(int pid, int *status, int options, void *rusage) __asm__("wait4");
 int macify_wait4(int pid, int *status, int options, void *rusage) {
+    if (getenv("MACIFY_TRACE_FORK")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: wait4(pid=%d, options=0x%x) from pid=%d\n",
+            pid, options, getpid());
+        (void)write(2, b, n);
+    }
     if (macify_caller_is_macos_text(__builtin_return_address(0))) {
         static pid_t (*real_wait4)(pid_t, int *, int, void *) = NULL;
         if (!real_wait4) real_wait4 = dlsym(RTLD_NEXT, "wait4");
@@ -15,6 +21,24 @@ int macify_wait4(int pid, int *status, int options, void *rusage) {
     }
     errno = 10;
     return -1;
+}
+
+/* waitpid — macOS binaries call waitpid (not wait4). Without this shim,
+ * waitpid resolves to glibc's waitpid which calls wait4 syscall directly,
+ * bypassing our wait4 shim. This causes sort to block forever waiting
+ * for children that were never forked (sort calls waitpid defensively
+ * to reap zombies). */
+pid_t macify_waitpid(pid_t pid, int *status, int options) __asm__("waitpid");
+pid_t macify_waitpid(pid_t pid, int *status, int options) {
+    if (getenv("MACIFY_TRACE_FORK")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: waitpid(pid=%d, options=0x%x) from pid=%d\n",
+            pid, options, getpid());
+        (void)write(2, b, n);
+    }
+    static pid_t (*real_waitpid)(pid_t, int *, int) = NULL;
+    if (!real_waitpid) real_waitpid = dlsym(RTLD_NEXT, "waitpid");
+    return real_waitpid ? real_waitpid(pid, status, options) : -1;
 }
 
 pid_t macify_fork(void) __asm__("fork");
@@ -33,9 +57,14 @@ pid_t macify_vfork(void) __asm__("vfork");
 pid_t macify_vfork(void) {
     static pid_t (*real_fork)(void) = NULL;
     if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
-    if (real_fork) return real_fork();
-    errno = ENOSYS;
-    return -1;
+    pid_t r = real_fork ? real_fork() : -1;
+    if (getenv("MACIFY_TRACE_FORK")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: vfork() = %d (pid=%d)\n", r, getpid());
+        (void)write(2, b, n);
+    }
+    if (r < 0) errno = ENOSYS;
+    return r;
 }
 
 long macify_clone(unsigned long flags, void *stack, int *parent_tid,
@@ -263,6 +292,16 @@ static void macify_sync_stdio_flags(FILE *fp);
  * fpurge, getline, etc.). */
 int macify_getc_patched = 0;
 
+/* macify_skip_r_patch — when TRUE, do NOT set _r=-1 or _w=-1 (which
+ * corrupt glibc's _IO_read_ptr at offset 8 and _IO_read_ptr+4 at 0x0c).
+ * Set by the loader for binaries that call fputc/fgetc as FUNCTIONS
+ * (no inlined putc/getc macros). For these binaries, setting _r=-1
+ * breaks glibc's internal I/O (fread, fgets, fclose) causing hangs.
+ *
+ * Binaries WITH inlined putc macros NEED _r=-1 to prevent the macro
+ * from reading _p (glibc's _flags = 0xfbad2084) as a pointer. */
+int macify_skip_r_patch = 0;
+
 int __srget(FILE *fp) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
@@ -285,7 +324,7 @@ int __srget(FILE *fp) {
     }
     /* Set _r = -1 to force the next getc to call __srget again.
      * SKIP this when getc is patched. */
-    if (c != EOF && is_macos && !macify_getc_patched) {
+    if (c != EOF && is_macos && !macify_getc_patched && !macify_skip_r_patch) {
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
     }
@@ -321,7 +360,7 @@ int putc_unlocked(int ch, FILE *fp) {
         extern FILE *__stdoutp, *__stderrp;
         if (fp == __stdoutp || fp == __stderrp) {
     
-            *(int *)((char *)fp + 0x0c) = -1;
+            if (!macify_skip_r_patch) *(int *)((char *)fp + 0x0c) = -1;
         }
     }
     return r;
@@ -339,7 +378,7 @@ int getc_unlocked(FILE *fp) {
     int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (c != EOF) {
         macify_save_read_ptr(fp);
-        if (!macify_getc_patched) *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+        if (!macify_getc_patched && !macify_skip_r_patch) *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(fp);
         /* skip — caller detects EOF via return value */
@@ -363,7 +402,7 @@ int putchar_unlocked(int ch) {
     int r = real_fputc ? real_fputc(ch, __stdoutp) : EOF;
     if (r != EOF) {
 
-        *(int *)((char *)__stdoutp + 0x0c) = -1;  /* _w = -1 */
+        if (!macify_skip_r_patch) *(int *)((char *)__stdoutp + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
 }
@@ -381,7 +420,7 @@ int getchar_unlocked(void) {
     int c = real_fgetc ? real_fgetc(__stdinp) : EOF;
     if (c != EOF) {
         macify_save_read_ptr(__stdinp);
-        if (!macify_getc_patched) *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
+        if (!macify_getc_patched && !macify_skip_r_patch) *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(__stdinp);
         /* skip */
@@ -445,7 +484,7 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
             (flags_before & 0x20) ? 1 : 0, (flags_before & 0x10) ? 1 : 0);
         (void)write(2, b, n);
     }
-    if (r > 0 && !macify_getc_patched) {
+    if (r > 0 && !macify_getc_patched && !macify_skip_r_patch) {
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
         /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte).
@@ -467,7 +506,7 @@ int macify_fgetc(FILE *stream) {
     /* Restore _IO_read_ptr before calling fgetc, unless getc is patched. */
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
-    if (r != EOF && !macify_getc_patched) {
+    if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         /* Save _IO_read_ptr and set _r = -1 to prevent inlined getc
          * from dereferencing _p (glibc _flags = 0xfbad2084) → SIGSEGV. */
         macify_save_read_ptr(stream);
@@ -485,7 +524,7 @@ int macify_ungetc(int c, FILE *stream) {
     if (!real_ungetc) real_ungetc = dlsym(RTLD_NEXT, "ungetc");
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_ungetc(c, stream);
-    if (r != EOF && !macify_getc_patched) {
+    if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         /* Re-save and re-corrupt _r = -1 */
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
@@ -705,7 +744,7 @@ FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
     FILE *fp = real_fdopen(fd, mode);
-    if (fp && !macify_getc_patched && macify_caller_is_macos_text(__builtin_return_address(0))) {
+    if (fp && !macify_getc_patched && !macify_skip_r_patch && macify_caller_is_macos_text(__builtin_return_address(0))) {
         /* Save _IO_read_ptr and set _r = -1 (see fopen for details). */
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
@@ -762,5 +801,26 @@ int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = dlsym(RTLD_NEXT, "fflush");
+    /* When stream is NULL (flush all streams), glibc iterates ALL open
+     * FILE* structures. macOS binaries corrupt some FILE* by writing to
+     * offset 0x10 (thinking it's macOS _flags, but glibc has _IO_read_end
+     * there). Glibc's fflush hangs on these corrupted streams.
+     *
+     * Fix: for fflush(NULL), only flush stdout and stderr directly via
+     * write syscall, bypassing glibc's stream iteration. */
+    if (stream == NULL) {
+        extern FILE *__stdoutp, *__stderrp;
+        FILE *streams[] = { __stdoutp, __stderrp, NULL };
+        for (int i = 0; streams[i]; i++) {
+            char **base = (char **)((char *)streams[i] + 0x28);
+            char **ptr = (char **)((char *)streams[i] + 0x30);
+            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                int fd = (streams[i] == __stderrp) ? 2 : 1;
+                write(fd, *base, *ptr - *base);
+                *ptr = *base;  /* reset write pointer */
+            }
+        }
+        return 0;
+    }
     return real_fflush ? real_fflush(stream) : 0;
 }

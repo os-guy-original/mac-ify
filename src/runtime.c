@@ -387,10 +387,21 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         : [entry] "r"(entry), [stk] "r"(stack_top)
         : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
-    /* Flush stdio buffers before exiting — macOS binaries use buffered I/O.
-     * We call fflush(NULL) which triggers our shim's fflush override that
-     * flushes both glibc streams and macOS FILE structs. */
-    fflush(NULL);
+    /* Flush stdout buffer directly via write syscall before exiting.
+     * We can't call fflush(NULL) because macOS binaries may have corrupted
+     * FILE* structures by writing to offset 0x10 (thinking it's macOS
+     * _flags, but glibc has _IO_read_end there). fflush(NULL) iterates
+     * ALL open streams and hangs on corrupted ones. */
+    {
+        extern FILE *stdout;
+        if (stdout) {
+            char **base = (char **)((char *)stdout + 0x28);
+            char **ptr = (char **)((char *)stdout + 0x30);
+            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                write(1, *base, *ptr - *base);
+            }
+        }
+    }
     __asm__ volatile (
         "mov %[code], %%edi\n\t"
         "mov $231, %%eax\n\t"             /* SYS_exit_group */

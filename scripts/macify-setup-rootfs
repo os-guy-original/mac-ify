@@ -28,6 +28,18 @@ if [ ! -f "$BASH_SRC" ]; then
     bash "$SCRIPT_DIR/macify-setup-homebrew" bash 2>/dev/null
 fi
 
+# ── Install bash's dylib dependencies ──────────────────────────
+# bash links against readline, ncurses, gettext (libintl). Without
+# these, the macify loader prints "open: No such file or directory"
+# and bash runs with unresolved symbols (broken stdio).
+echo "  Checking bash dylib dependencies..."
+for pkg in readline ncurses gettext; do
+    if [ ! -d "$PREFIX/usr/local/opt/$pkg" ]; then
+        echo "    Installing $pkg..."
+        bash "$SCRIPT_DIR/macify-setup-homebrew" "$pkg" 2>/dev/null
+    fi
+done
+
 # ── Install macOS coreutils into /bin and /usr/bin ─────────────
 # We copy from tests/real/ which has MacPorts-built macOS binaries
 mkdir -p "$PREFIX/bin" "$PREFIX/usr/bin" "$PREFIX/usr/sbin" "$PREFIX/sbin"
