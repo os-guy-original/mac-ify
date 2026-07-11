@@ -310,25 +310,88 @@ char *BC = (char *)"\b";   /* backspace */
 char  PC = 0;              /* no padding */
 char *UP = (char *)"\033[A"; /* ESC [ A = cursor up */
 
-/* ── termcap function stubs ─────────────────────────────────────
- * Some Linux distros (Artix, Arch) don't have libtinfo as a separate
- * library, and libncursesw doesn't export tgetent/tgoto/tputs.
- * Without these, readline's GOT entries resolve to NULL, causing
- * rip=0x8 crash in interactive mode.
+/* ── termcap function wrappers ──────────────────────────────────
+ * macOS's ncurses exports tgetent/tgoto/tputs etc. and the termcap
+ * variables BC, PC, UP. Linux's ncurses does NOT export BC/PC/UP,
+ * and on some distros (Artix) doesn't even export tgetent etc.
  *
- * We provide minimal stubs. tgetent returns 1 (success) to tell
- * readline the terminal entry was found. tgetstr returns NULL for
- * unknown capabilities (readline handles this). tgoto and tputs are
- * pass-throughs. */
-int tgetent(char *buf, const char *name) {
-    if (buf) buf[0] = '\0';
-    return 1;  /* success: terminal entry found */
+ * We export BC/PC/UP as globals and provide tgetent/tgetstr/etc.
+ * wrappers that DELEGATE to the real implementations from libtinfo
+ * or libncursesw if available, falling back to stubs if not.
+ *
+ * After calling the real tgetent, we sync BC/PC/UP from the real
+ * library's internal variables (via dlsym) so readline can use them. */
+
+/* Termcap global variables — exported for readline's GOT */
+
+/* Helper: get the real tgetent from libtinfo/libncursesw */
+static int (*real_tgetent)(char *, const char *) = NULL;
+static int (*real_tgetflag)(const char *) = NULL;
+static int (*real_tgetnum)(const char *) = NULL;
+static char *(*real_tgetstr)(const char *, char **) = NULL;
+static char *(*real_tgoto)(const char *, int, int) = NULL;
+static int (*real_tputs)(const char *, int, int (*)(int)) = NULL;
+
+static void init_real_termcap(void) {
+    if (real_tgetent) return;  /* already initialized */
+    void *h = dlopen("libtinfo.so.6", RTLD_NOW);
+    if (!h) h = dlopen("libtinfo.so.5", RTLD_NOW);
+    if (!h) h = dlopen("libncursesw.so.6", RTLD_NOW);
+    if (!h) h = dlopen("libncurses.so.6", RTLD_NOW);
+    if (!h) return;
+    real_tgetent  = dlsym(h, "tgetent");
+    real_tgetflag = dlsym(h, "tgetflag");
+    real_tgetnum  = dlsym(h, "tgetnum");
+    real_tgetstr  = dlsym(h, "tgetstr");
+    real_tgoto    = dlsym(h, "tgoto");
+    real_tputs    = dlsym(h, "tputs");
 }
-int tgetflag(const char *id) { return 0; }
-int tgetnum(const char *id) { return -1; }
-char *tgetstr(const char *id, char **area) { return NULL; }
-char *tgoto(const char *cap, int col, int row) { return (char *)cap; }
+
+int tgetent(char *buf, const char *name) {
+    init_real_termcap();
+    if (real_tgetent) {
+        int r = real_tgetent(buf, name);
+        /* Sync BC/PC/UP from the real library's globals */
+        void *h = dlopen("libtinfo.so.6", RTLD_NOW);
+        if (!h) h = dlopen("libncursesw.so.6", RTLD_NOW);
+        if (h) {
+            char **pBC = dlsym(h, "BC");
+            char  *pPC = dlsym(h, "PC");
+            char **pUP = dlsym(h, "UP");
+            if (pBC) BC = *pBC;
+            if (pPC) PC = *pPC;
+            if (pUP) UP = *pUP;
+        }
+        return r;
+    }
+    /* Fallback: minimal stub */
+    if (buf) buf[0] = '\0';
+    return 1;
+}
+int tgetflag(const char *id) {
+    init_real_termcap();
+    if (real_tgetflag) return real_tgetflag(id);
+    return 0;
+}
+int tgetnum(const char *id) {
+    init_real_termcap();
+    if (real_tgetnum) return real_tgetnum(id);
+    return -1;
+}
+char *tgetstr(const char *id, char **area) {
+    init_real_termcap();
+    if (real_tgetstr) return real_tgetstr(id, area);
+    return NULL;
+}
+char *tgoto(const char *cap, int col, int row) {
+    init_real_termcap();
+    if (real_tgoto) return real_tgoto(cap, col, row);
+    return (char *)cap;
+}
 int tputs(const char *str, int affcnt, int (*putc_fn)(int)) {
+    init_real_termcap();
+    if (real_tputs) return real_tputs(str, affcnt, putc_fn);
+    /* Fallback: output string, skipping $<padding> delays */
     if (!str) return 0;
     while (*str) {
         if (*str == '$' && str[1] == '<') {
