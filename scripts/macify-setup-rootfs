@@ -1,14 +1,8 @@
 #!/bin/bash
-# macify-setup-rootfs — install macOS coreutils into the macify prefix
+# macify-setup-rootfs — install macOS binaries into the macify prefix
 #
-# This creates a Wine-like fake rootfs at ~/.macify/ where macOS binaries
+# Creates a Wine-like fake rootfs at ~/.macify/ where macOS binaries
 # see their own /bin/, /usr/bin/, etc. — never Linux binaries.
-#
-# Installs:
-#   <prefix>/bin/sh → bash (macOS binary)
-#   <prefix>/bin/bash (macOS binary)
-#   <prefix>/bin/cat, echo, ls, cp, mv, rm, etc. (macOS coreutils)
-#   <prefix>/usr/bin/env, grep, find, sed, etc. (macOS binaries)
 #
 # Usage: macify-setup-rootfs
 
@@ -18,21 +12,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
 
-echo "macify-setup-rootfs: setting up fake rootfs at $PREFIX"
+echo "Setting up macOS rootfs at $PREFIX"
 
-# ── Install macOS bash as /bin/sh ──────────────────────────────
-# bash is installed via macify-setup-homebrew bash
+# ── Install bash + dylib deps via Homebrew ──────────────────────
 BASH_SRC="$PREFIX/usr/local/opt/bash/bin/bash"
 if [ ! -f "$BASH_SRC" ]; then
-    echo "  Installing bash via Homebrew..."
+    echo "  Installing bash..."
     bash "$SCRIPT_DIR/macify-setup-homebrew" bash 2>/dev/null
 fi
 
-# ── Install bash's dylib dependencies ──────────────────────────
-# bash links against readline, ncurses, gettext (libintl). Without
-# these, the macify loader prints "open: No such file or directory"
-# and bash runs with unresolved symbols (broken stdio).
-echo "  Checking bash dylib dependencies..."
+echo "  Checking dylib dependencies..."
 for pkg in readline ncurses gettext; do
     if [ ! -d "$PREFIX/usr/local/opt/$pkg" ]; then
         echo "    Installing $pkg..."
@@ -40,44 +29,36 @@ for pkg in readline ncurses gettext; do
     fi
 done
 
-# ── Install macOS coreutils into /bin and /usr/bin ─────────────
-# We copy from tests/real/ which has MacPorts-built macOS binaries
-mkdir -p "$PREFIX/bin" "$PREFIX/usr/bin" "$PREFIX/usr/sbin" "$PREFIX/sbin"
+# ── Create directory structure ──────────────────────────────────
+mkdir -p "$PREFIX"/{bin,etc,sbin,tmp,var}
+mkdir -p "$PREFIX/usr"/{bin,sbin,lib,local}
+mkdir -p "$PREFIX/usr/local"/{bin,lib,opt,Cellar}
 
-# Install bash as /bin/bash and /bin/sh
+# ── Install bash ────────────────────────────────────────────────
 if [ -f "$BASH_SRC" ]; then
     cp "$BASH_SRC" "$PREFIX/bin/bash"
     chmod 755 "$PREFIX/bin/bash"
     ln -sf bash "$PREFIX/bin/sh"
-    echo "  /bin/bash (and /bin/sh → bash) installed"
-else
-    echo "  WARNING: bash not found at $BASH_SRC"
 fi
 
-# Install coreutils binaries from tests/real/
-# These are macOS Mach-O binaries from MacPorts
+# ── Install coreutils from tests/real/ ──────────────────────────
 install_binary() {
     local name="$1"
-    local src="$PROJECT_DIR/tests/real/${name}_macos"
     local dest_dir="$2"
-    local dest="$dest_dir/$name"
-    
+    local src="$PROJECT_DIR/tests/real/${name}_macos"
     if [ -f "$src" ]; then
-        cp "$src" "$dest"
-        chmod 755 "$dest"
-        return 0
+        cp "$src" "$dest_dir/$name"
+        chmod 755 "$dest_dir/$name"
     fi
-    return 1
 }
 
-# /bin/ — essential binaries
-echo "  Installing /bin/ coreutils..."
+echo "  Installing coreutils..."
+# /bin/ — essential
 for bin in cat echo false true pwd test; do
-    install_binary "$bin" "$PREFIX/bin" && echo "    /bin/$bin" || true
+    install_binary "$bin" "$PREFIX/bin"
 done
 
 # /usr/bin/ — standard utilities
-echo "  Installing /usr/bin/ utilities..."
 for bin in basename cp cut date dd df dir dirname du env expand expr \
            fmt fold head hostid hostname id install join link ln ls \
            mkdir mktemp mv nl nohup nproc numfmt od paste printenv \
@@ -87,56 +68,32 @@ for bin in basename cp cut date dd df dir dirname du env expand expr \
            uniq unlink uptime users vdir wc who whoami yes \
            base32 base64 basename basenc b2sum cksum comm csplit \
            env fold pathchk pinky ptx sha224sum sha384sum shred \
-           truncate tsort unexpand; do
-    install_binary "$bin" "$PREFIX/usr/bin" && echo "    /usr/bin/$bin" || true
+           truncate tsort unexpand \
+           grep sed awk find tar gzip xargs \
+           bc bzip2 diff diff3 cmp; do
+    install_binary "$bin" "$PREFIX/usr/bin"
 done
 
-# /usr/bin/ — text processing and search
-for bin in grep sed awk find tar gzip xargs; do
-    install_binary "$bin" "$PREFIX/usr/bin" && echo "    /usr/bin/$bin" || true
+# ── Symlinks for Homebrew-installed languages ───────────────────
+for lang in python@3.13:python3 ruby lua node; do
+    pkg="${lang%%:*}"
+    bin="${lang##*:}"
+    if [ -f "$PREFIX/usr/local/opt/$pkg/bin/$bin" ]; then
+        ln -sf "$PREFIX/usr/local/opt/$pkg/bin/$bin" "$PREFIX/usr/bin/$bin"
+    fi
 done
 
-# /usr/bin/ — misc
-for bin in bc bzip2 diff diff3 cmp; do
-    install_binary "$bin" "$PREFIX/usr/bin" && echo "    /usr/bin/$bin" || true
-done
-
-# ── Create essential symlinks ──────────────────────────────────
-# /usr/bin/python3 → python3.13 (if installed)
-if [ -f "$PREFIX/usr/local/opt/python@3.13/bin/python3.13" ]; then
-    ln -sf "$PREFIX/usr/local/opt/python@3.13/bin/python3.13" "$PREFIX/usr/bin/python3"
-    ln -sf "$PREFIX/usr/local/opt/python@3.13/bin/python3.13" "$PREFIX/usr/bin/python"
-    echo "  /usr/bin/python3 → python3.13"
-fi
-
-# /usr/bin/ruby (if installed)
-if [ -f "$PREFIX/usr/local/opt/ruby/bin/ruby" ]; then
-    ln -sf "$PREFIX/usr/local/opt/ruby/bin/ruby" "$PREFIX/usr/bin/ruby"
-    echo "  /usr/bin/ruby"
-fi
-
-# /usr/bin/lua (if installed)
-if [ -f "$PREFIX/usr/local/opt/lua/bin/lua" ]; then
-    ln -sf "$PREFIX/usr/local/opt/lua/bin/lua" "$PREFIX/usr/bin/lua"
-    echo "  /usr/bin/lua"
-fi
-
-# /usr/bin/node (if installed)
-if [ -f "$PREFIX/usr/local/opt/node/bin/node" ]; then
-    ln -sf "$PREFIX/usr/local/opt/node/bin/node" "$PREFIX/usr/bin/node"
-    echo "  /usr/bin/node"
-fi
-
-# ── Create /etc/shells ─────────────────────────────────────────
+# ── Config files ────────────────────────────────────────────────
 cat > "$PREFIX/etc/shells" << 'EOF'
 /bin/bash
 /bin/sh
-/usr/bin/bash
-/usr/bin/sh
 EOF
 
+# ── Pass-through symlinks ───────────────────────────────────────
+ln -sf /dev "$PREFIX/dev" 2>/dev/null || true
+ln -sf /tmp "$PREFIX/tmp" 2>/dev/null || true
+
 echo ""
-echo "macify-setup-rootfs: rootfs setup complete"
-echo "  /bin/sh → $(readlink "$PREFIX/bin/sh")"
-echo "  $(ls "$PREFIX/bin/" | wc -l) files in /bin/"
-echo "  $(ls "$PREFIX/usr/bin/" | wc -l) files in /usr/bin/"
+echo "Rootfs setup complete:"
+echo "  /bin/       — $(ls "$PREFIX/bin/" 2>/dev/null | wc -l) files"
+echo "  /usr/bin/   — $(ls "$PREFIX/usr/bin/" 2>/dev/null | wc -l) files"

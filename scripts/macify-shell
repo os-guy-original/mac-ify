@@ -1,20 +1,13 @@
 #!/bin/bash
-# macify-shell — run a macOS shell inside the macify prefix
+# macify-shell — run a macOS bash shell inside the macify prefix
 #
 # Like Wine's `wine cmd`, this runs a real macOS binary (bash) inside
-# the macify prefix. The macOS bash sees / as the prefix root:
-#   /bin/sh      → <prefix>/bin/sh (macOS bash)
-#   /usr/bin/ls  → <prefix>/usr/bin/ls (macOS ls)
-#   /etc/passwd  → <prefix>/etc/passwd (macOS-style)
+# the macify prefix. The macOS bash sees / as the prefix root.
 #
-# All exec/execve/posix_spawn calls are intercepted by the shim and
-# re-run through macify, so subprocesses also run as macOS binaries.
-# Linux binaries are invisible (they don't exist in the prefix).
-#
-# Usage: macify-shell [options] [command [args...]]
-#
-# Without a command: starts interactive macOS bash
-# With a command:    runs it in macOS bash (like bash -c)
+# Usage:
+#   macify-shell                  # interactive shell
+#   macify-shell 'echo hello'     # run command
+#   macify-shell -v 'echo hello'  # verbose
 
 set -e
 
@@ -24,77 +17,47 @@ MACIFY_BIN="$PROJECT_DIR/build/macify"
 SHIM_DIR="$PROJECT_DIR/build"
 PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
 
-# ── Parse options ──────────────────────────────────────────────
+# ── Parse options ───────────────────────────────────────────────
 VERBOSE=""
 while [[ "$1" == --* || "$1" == -[a-z] ]]; do
     case "$1" in
         --prefix) PREFIX="$2"; shift 2;;
-        --verbose|-v) VERBOSE="-v"; shift;;
-        --help|-h)
+        -v|--verbose) VERBOSE="-v"; shift;;
+        -h|--help)
             cat <<'EOF'
 Usage: macify-shell [options] [command [args...]]
 
 Runs a real macOS bash binary inside the macify prefix.
-
-The macOS bash sees / as the prefix root (~/.macify/):
-  /bin/sh      → macOS bash
-  /usr/bin/ls  → macOS ls
-  /usr/local/  → Homebrew packages
-
-All subprocesses also run as macOS binaries (Linux binaries are invisible).
+Without a command: starts interactive macOS bash.
+With a command:    runs `bash -c "<command>"` (macOS bash).
 
 Options:
   --prefix <dir>   Set prefix directory (default: ~/.macify)
   -v, --verbose    Enable verbose macify loader output
   -h, --help       Show this help
-
-Without a command: starts interactive macOS bash.
-With a command:    runs `bash -c "<command>"` (macOS bash).
-
-First run automatically initializes the prefix and installs coreutils.
 EOF
-            exit 0
-            ;;
+            exit 0;;
         *) break;;
     esac
 done
 
-# ── Ensure prefix and rootfs exist ─────────────────────────────
 export MACIFY_PREFIX="$PREFIX"
+export LD_LIBRARY_PATH="$SHIM_DIR"
 
-if [ ! -f "$PREFIX/.macify_prefix" ]; then
+# ── Ensure prefix and rootfs exist ──────────────────────────────
+if [ ! -f "$PREFIX/.macify_prefix" ] || [ ! -f "$PREFIX/bin/bash" ] || [ ! -d "$PREFIX/usr/local/opt/readline" ]; then
     echo "macify-shell: initializing prefix at $PREFIX..." >&2
-    export LD_LIBRARY_PATH="$SHIM_DIR"
-    "$MACIFY_BIN" "$PROJECT_DIR/tests/real/echo_macos" "init" >/dev/null 2>&1 || true
-fi
-
-# Ensure rootfs (macOS binaries in /bin, /usr/bin) is set up
-# Also check that bash's dylib deps (readline) are installed
-if [ ! -f "$PREFIX/bin/bash" ] || [ ! -d "$PREFIX/usr/local/opt/readline" ]; then
-    echo "macify-shell: setting up macOS rootfs..." >&2
     bash "$SCRIPT_DIR/macify-setup-rootfs" >&2
 fi
 
 if [ ! -f "$PREFIX/bin/bash" ]; then
     echo "macify-shell: ERROR — macOS bash not found at $PREFIX/bin/bash" >&2
-    echo "  Run: bash $SCRIPT_DIR/macify-setup-rootfs" >&2
     exit 1
 fi
 
-# ── Run macOS bash ─────────────────────────────────────────────
-export LD_LIBRARY_PATH="$SHIM_DIR"
-
-# PATH is set by macify to /usr/bin:/bin:/usr/local/bin (macOS paths)
-# These get translated to <prefix>/usr/bin, etc.
-# The macOS bash will search these for commands like ls, cat, grep.
-
-# MACIFY_BINARY is set by macify itself (via /proc/self/exe).
-# MACIFY_PATH_SET tells macify not to override PATH.
-
+# ── Run macOS bash ──────────────────────────────────────────────
 if [ $# -gt 0 ]; then
-    # Non-interactive: bash -c "<command>"
     exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" -c "$*"
 else
-    # Interactive: macOS bash
     exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --login -i
 fi

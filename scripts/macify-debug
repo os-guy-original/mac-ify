@@ -1,0 +1,161 @@
+#!/bin/bash
+# macify-debug — run a macOS binary under macify with full diagnostics
+#
+# Usage: macify-debug <macos-binary> [args...]
+#
+# Collects all diagnostic output (verbose loader, trace flags, crash
+# reports, GOT resolution, signal traces) into a single report that
+# helps developers diagnose and fix issues.
+#
+# The report includes:
+#   - Binary info (file type, architecture, segments)
+#   - Macify loader verbose output (segment mapping, fixups, GOT)
+#   - All trace flags (open, read, fork, spawn, signal, exit)
+#   - Crash handler output (registers, stack, /proc/self/maps)
+#   - Environment variables
+#   - Prefix state
+#
+# Output is written to stderr (for the report) and stdout (for the
+# binary's actual output).
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MACIFY_BIN="$PROJECT_DIR/build/macify"
+PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
+
+# ── Check arguments ─────────────────────────────────────────────
+if [ $# -lt 1 ]; then
+    cat >&2 <<'EOF'
+Usage: macify-debug <macos-binary> [args...]
+
+Runs a macOS binary under macify with ALL diagnostic flags enabled.
+The report is written to stderr. The binary's stdout goes to stdout.
+
+Examples:
+  macify-debug ~/.macify/bin/echo hello
+  macify-debug ~/.macify/usr/bin/awk 'BEGIN {print "test"}'
+  macify-debug ~/.macify/usr/bin/ls /
+EOF
+    exit 1
+fi
+
+BINARY="$1"
+shift
+
+# ── Check macify is built ───────────────────────────────────────
+if [ ! -f "$MACIFY_BIN" ]; then
+    echo "macify-debug: ERROR — macify not built at $MACIFY_BIN" >&2
+    echo "  Run: cd $PROJECT_DIR && make" >&2
+    exit 1
+fi
+
+if [ ! -f "$BINARY" ]; then
+    echo "macify-debug: ERROR — binary not found: $BINARY" >&2
+    exit 1
+fi
+
+export LD_LIBRARY_PATH="$PROJECT_DIR/build"
+
+# ── Print report header ─────────────────────────────────────────
+{
+    echo "════════════════════════════════════════════════════════════════"
+    echo "  macify-debug report"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "Binary: $BINARY"
+    echo "Args: $*"
+    echo "Prefix: $PREFIX"
+    echo "Macify: $MACIFY_BIN"
+    echo ""
+    echo "─── Binary Info ───────────────────────────────────────────────"
+    file "$BINARY" 2>/dev/null || echo "(file command failed)"
+    echo ""
+    echo "Binary size: $(wc -c < "$BINARY") bytes"
+    echo ""
+
+    # Check if it's a Mach-O binary
+    MAGIC=$(head -c 4 "$BINARY" | od -An -tx4 | tr -d ' ')
+    case "$MAGIC" in
+        feedfacf|cffaedfe) echo "Format: Mach-O 64-bit x86_64 ✓" ;;
+        cafebabe) echo "Format: Universal/Fat binary" ;;
+        *) echo "Format: Unknown (magic: $MAGIC) — may not be a macOS binary!" ;;
+    esac
+    echo ""
+
+    echo "─── Prefix State ──────────────────────────────────────────────"
+    if [ -f "$PREFIX/.macify_prefix" ]; then
+        echo "Prefix exists: $PREFIX ✓"
+        echo "  /bin/ entries: $(ls "$PREFIX/bin/" 2>/dev/null | wc -l)"
+        echo "  /usr/bin/ entries: $(ls "$PREFIX/usr/bin/" 2>/dev/null | wc -l)"
+        echo "  /usr/local/opt/: $(ls "$PREFIX/usr/local/opt/" 2>/dev/null | tr '\n' ' ')"
+    else
+        echo "Prefix NOT initialized: $PREFIX"
+        echo "  Run: $SCRIPT_DIR/macify-init"
+    fi
+    echo ""
+
+    echo "─── Environment ───────────────────────────────────────────────"
+    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+    echo "MACIFY_PREFIX=$PREFIX"
+    echo "MACIFY_BINARY=$MACIFY_BIN"
+    echo "PATH=$PATH"
+    echo ""
+
+    echo "─── Macify Loader Output (verbose) ────────────────────────────"
+    echo "All trace flags enabled: OPEN READ FORK SPAWN SIGNAL EXIT RECOVERY"
+    echo ""
+
+} >&2
+
+# ── Run the binary with all traces ──────────────────────────────
+# All trace output goes to stderr (interleaved with report header)
+# Binary's stdout goes to stdout
+
+export MACIFY_TRACE_OPEN=1
+export MACIFY_TRACE_READ=1
+export MACIFY_TRACE_FORK=1
+export MACIFY_TRACE_SPAWN=1
+export MACIFY_TRACE_SIGNAL=1
+export MACIFY_TRACE_EXIT=1
+export MACIFY_TRACE_RECOVERY=1
+export MACIFY_TRACE_LOCALE=1
+export MACIFY_SHIM_DEBUG=1
+export MACIFY_VERIFY_HANDLER=1
+
+# Run with -v (verbose loader)
+# stderr (all traces + crash report) → stderr
+# stdout (binary output) → stdout
+"$MACIFY_BIN" -v "$BINARY" "$@" || true
+
+EXIT_CODE=$?
+
+# ── Print report footer ─────────────────────────────────────────
+{
+    echo ""
+    echo "─── Exit ──────────────────────────────────────────────────────"
+    echo "Exit code: $EXIT_CODE"
+    if [ $EXIT_CODE -gt 128 ]; then
+        SIGNAL=$((EXIT_CODE - 128))
+        echo "Signal: $SIGNAL"
+        case $SIGNAL in
+            4)  echo "  SIGILL (Illegal instruction)" ;;
+            6)  echo "  SIGABRT (Abort)" ;;
+            7)  echo "  SIGBUS (Bus error)" ;;
+            8)  echo "  SIGFPE (Floating point exception)" ;;
+            11) echo "  SIGSEGV (Segmentation fault)" ;;
+            14) echo "  SIGALRM (Alarm — timeout killed the process)" ;;
+            *)  echo "  (unknown signal)" ;;
+        esac
+    fi
+    echo ""
+    echo "─── How to report this ────────────────────────────────────────"
+    echo "1. Save this report: macify-debug $BINARY $* 2>debug_report.txt"
+    echo "2. Include the binary name and what you expected to happen"
+    echo "3. If there's a crash, include the 'CRASH handler' section"
+    echo "4. Post at: https://github.com/os-guy-original/mac-ify/issues"
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+} >&2
