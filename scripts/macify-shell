@@ -69,7 +69,8 @@ if [ ! -f "$PREFIX/.macify_prefix" ]; then
 fi
 
 # Ensure rootfs (macOS binaries in /bin, /usr/bin) is set up
-if [ ! -f "$PREFIX/bin/bash" ]; then
+# Also check that bash's dylib deps (readline) are installed
+if [ ! -f "$PREFIX/bin/bash" ] || [ ! -d "$PREFIX/usr/local/opt/readline" ]; then
     echo "macify-shell: setting up macOS rootfs..." >&2
     bash "$SCRIPT_DIR/macify-setup-rootfs" >&2
 fi

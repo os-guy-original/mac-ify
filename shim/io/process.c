@@ -43,9 +43,14 @@ pid_t macify_waitpid(pid_t pid, int *status, int options) {
 
 pid_t macify_fork(void) __asm__("fork");
 pid_t macify_fork(void) {
-    /* Always call real fork — both macOS binaries and our shim need it.
-     * The previous check (macify_caller_is_macos_text) blocked fork()
-     * from our own posix_spawn handler, breaking pipes. */
+    /* If MACIFY_NO_FORK is set, return -1 to prevent forking.
+     * Some macOS binaries (like sort) fork a child that inherits
+     * corrupted FILE* state and hangs in glibc's internal I/O.
+     * Setting MACIFY_NO_FORK=1 forces single-process mode. */
+    if (getenv("MACIFY_NO_FORK")) {
+        errno = ENOSYS;
+        return -1;
+    }
     static pid_t (*real_fork)(void) = NULL;
     if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
     if (real_fork) return real_fork();
@@ -55,6 +60,10 @@ pid_t macify_fork(void) {
 
 pid_t macify_vfork(void) __asm__("vfork");
 pid_t macify_vfork(void) {
+    if (getenv("MACIFY_NO_FORK")) {
+        errno = ENOSYS;
+        return -1;
+    }
     static pid_t (*real_fork)(void) = NULL;
     if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
     pid_t r = real_fork ? real_fork() : -1;
@@ -177,10 +186,9 @@ FILE *macify_fopen(const char *path, const char *mode) {
         (void)write(2, b, n);
     }
     if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
-        if (strchr(mode, 'r') && !strchr(mode, '+')) {
-            /* No special buffering needed — the EOF/error check patching
-             * in main.c handles the macOS __SEOF/__SERR flag issue. */
-        }
+        /* Save initial _IO_read_ptr and _IO_read_end so we can restore
+         * them after macOS code corrupts offset 0x10 (writing _flags). */
+        macify_save_read_ptr(fp);
     }
     return fp;
 }
@@ -253,6 +261,7 @@ static inline void macify_clear_serr_flag(FILE *fp) {
 static struct {
     FILE *fp;
     void *saved_read_ptr;
+    void *saved_read_end;
     int valid;
 } macify_saved_fps[MACIFY_MAX_SAVED_FPS];
 
@@ -260,6 +269,7 @@ static void macify_save_read_ptr(FILE *fp) {
     for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
         if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
             macify_saved_fps[i].saved_read_ptr = *(void **)((char *)fp + 8);
+            macify_saved_fps[i].saved_read_end = *(void **)((char *)fp + 0x10);
             return;
         }
     }
@@ -268,6 +278,7 @@ static void macify_save_read_ptr(FILE *fp) {
         if (!macify_saved_fps[i].valid) {
             macify_saved_fps[i].fp = fp;
             macify_saved_fps[i].saved_read_ptr = *(void **)((char *)fp + 8);
+            macify_saved_fps[i].saved_read_end = *(void **)((char *)fp + 0x10);
             macify_saved_fps[i].valid = 1;
             return;
         }
@@ -278,6 +289,11 @@ static void macify_restore_read_ptr(FILE *fp) {
     for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
         if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
             *(void **)((char *)fp + 8) = macify_saved_fps[i].saved_read_ptr;
+            /* Also restore _IO_read_end (offset 0x10). macOS code writes
+             * _flags (short) to offset 0x10, corrupting _IO_read_end.
+             * Without restoring it, glibc's fread sees _IO_read_ptr >
+             * _IO_read_end and loops forever (sort hang). */
+            *(void **)((char *)fp + 0x10) = macify_saved_fps[i].saved_read_end;
             return;
         }
     }
@@ -474,8 +490,16 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__(
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
     if (!real_fread) real_fread = dlsym(RTLD_NEXT, "fread");
+    /* Always restore _IO_read_ptr AND _IO_read_end before calling glibc's
+     * fread. macOS code writes _flags to offset 0x10, corrupting
+     * _IO_read_end. Without restoring, glibc sees _IO_read_ptr >
+     * _IO_read_end and loops forever. */
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
+    /* After glibc's fread, _IO_read_ptr and _IO_read_end are valid.
+     * Save them so we can restore on the next call (after macOS code
+     * corrupts them by writing _flags). */
+    if (!macify_getc_patched) macify_save_read_ptr(stream);
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -487,14 +511,6 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     if (r > 0 && !macify_getc_patched && !macify_skip_r_patch) {
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
-        /* Clear bit 0x40 of _IO_read_end (offset 0x10, low byte).
-         * macOS code checks [fp+0x10] & 0x40 for __SERR directly
-         * (not via ferror). After fread, _IO_read_end points to
-         * the end of buffered data — its low byte may have bit 0x40
-         * set, causing false "read failed" errors. Clearing it
-         * changes the pointer by at most 0x40, which is safe because
-         * we force __srget for every getc (via _r=-1), so glibc
-         * never reads from the buffer directly. */
         *((unsigned char *)stream + 0x10) &= ~0x40;
     }
     return r;
@@ -503,13 +519,12 @@ int macify_fgetc(FILE *stream) __asm__("fgetc");
 int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = dlsym(RTLD_NEXT, "fgetc");
-    /* Restore _IO_read_ptr before calling fgetc, unless getc is patched. */
+    /* Restore _IO_read_ptr AND _IO_read_end before calling fgetc. */
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
+    /* Save valid _IO_read_ptr and _IO_read_end after glibc's fgetc. */
+    if (!macify_getc_patched) macify_save_read_ptr(stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
-        /* Save _IO_read_ptr and set _r = -1 to prevent inlined getc
-         * from dereferencing _p (glibc _flags = 0xfbad2084) → SIGSEGV. */
-        macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
     }
     return r;
@@ -538,12 +553,11 @@ int macify_fseeko(FILE *stream, long off, int whence) __asm__("fseeko");
 int macify_fseeko(FILE *stream, long off, int whence) {
     static int (*real_fseeko)(FILE *, long, int) = NULL;
     if (!real_fseeko) real_fseeko = dlsym(RTLD_NEXT, "fseeko");
+    /* Restore _IO_read_ptr and _IO_read_end before calling glibc. */
+    if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fseeko(stream, off, whence);
-    if (r == 0) {
-        /* Seek succeeded — clear macOS EOF/error flags at offset 0x10.
-         * After seek, buffer is empty, so modifying _IO_read_end is safe. */
-        unsigned char *macos_flags = (unsigned char *)stream + 0x10;
-    }
+    /* Save valid state after glibc's fseeko. */
+    if (!macify_getc_patched) macify_save_read_ptr(stream);
     return r;
 }
 
@@ -738,16 +752,18 @@ int macify_fputs(const char *s, FILE *stream) {
     return real_fputs(s, stream);
 }
 
-/* fdopen — pass-through. Safe buffer is set by fopen shim. */
+/* fdopen — pass-through. Save initial state for macOS callers. */
 FILE *macify_fdopen(int fd, const char *mode) __asm__("fdopen");
 FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
     FILE *fp = real_fdopen(fd, mode);
-    if (fp && !macify_getc_patched && !macify_skip_r_patch && macify_caller_is_macos_text(__builtin_return_address(0))) {
-        /* Save _IO_read_ptr and set _r = -1 (see fopen for details). */
+    if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
+        /* Save initial _IO_read_ptr and _IO_read_end. */
         macify_save_read_ptr(fp);
-        *(int *)((char *)fp + 8) = -1;
+        if (!macify_skip_r_patch) {
+            *(int *)((char *)fp + 8) = -1;
+        }
     }
     return fp;
 }
