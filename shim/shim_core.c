@@ -309,3 +309,36 @@ int _NSGetExecutablePath(char *buf, uint32_t *bufsize) {
 char *BC = (char *)"\b";   /* backspace */
 char  PC = 0;              /* no padding */
 char *UP = (char *)"\033[A"; /* ESC [ A = cursor up */
+
+/* ── termcap function stubs ─────────────────────────────────────
+ * Some Linux distros (Artix, Arch) don't have libtinfo as a separate
+ * library, and libncursesw doesn't export tgetent/tgoto/tputs.
+ * Without these, readline's GOT entries resolve to NULL, causing
+ * rip=0x8 crash in interactive mode.
+ *
+ * We provide minimal stubs. tgetent returns 1 (success) to tell
+ * readline the terminal entry was found. tgetstr returns NULL for
+ * unknown capabilities (readline handles this). tgoto and tputs are
+ * pass-throughs. */
+int tgetent(char *buf, const char *name) {
+    if (buf) buf[0] = '\0';
+    return 1;  /* success: terminal entry found */
+}
+int tgetflag(const char *id) { return 0; }
+int tgetnum(const char *id) { return -1; }
+char *tgetstr(const char *id, char **area) { return NULL; }
+char *tgoto(const char *cap, int col, int row) { return (char *)cap; }
+int tputs(const char *str, int affcnt, int (*putc_fn)(int)) {
+    if (!str) return 0;
+    while (*str) {
+        if (*str == '$' && str[1] == '<') {
+            str += 2;
+            while (*str && *str != '>') str++;
+            if (*str) str++;
+            continue;
+        }
+        if (putc_fn) putc_fn((unsigned char)*str);
+        str++;
+    }
+    return 0;
+}
