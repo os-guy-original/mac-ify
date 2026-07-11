@@ -1016,7 +1016,7 @@ int main(int argc, char **argv, char **envp) {
                     if (addr) {
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)addr;
                         /* Debug: verify critical symbols */
-                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "putc_unlocked") == 0))
+                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "putc_unlocked") == 0 || strcmp(name, "environ") == 0 || strcmp(name, "_NSGetEnviron") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0))
                             fprintf(stderr, "macify: GOT %s at %p = 0x%lx\n", name,
                                     (void*)(uintptr_t)(s->addr + k * 8),
                                     (unsigned long)*(uint64_t*)(uintptr_t)(s->addr + k * 8));
@@ -1033,6 +1033,43 @@ int main(int argc, char **argv, char **envp) {
         if (g_verbose && resolved > 0)
             fprintf(stderr, "macify: main binary GOT/la_symbol_ptr: %d resolved, %d unresolved\n",
                     resolved, unresolved);
+    }
+
+    /* Fix environ GOT entry: macOS binaries access environ via GOT which
+     * resolves to glibc's __environ. But macify's environ (updated by
+     * setenv) is a DIFFERENT variable. Overwrite the environ GOT entry
+     * to point to macify's environ so the macOS binary sees the correct
+     * environment (including PATH, MACIFY_BINARY, etc. that we set). */
+    {
+        extern char **environ;
+        /* Find the environ GOT entry by scanning all GOT/la_symbol_ptr sections */
+        for (int si = 0; si < g_nsections; si++) {
+            loaded_section *s = &g_sections[si];
+            uint32_t sec_type = s->flags & 0xff;
+            if ((sec_type == 7 || sec_type == 6) && s->reserved1 > 0) {
+                uint32_t start_idx = s->reserved1;
+                uint32_t n_entries = s->size / 8;
+                uint32_t *indirect = (uint32_t *)(file_data + g_indirectsym_off);
+                const char *strtab = (const char *)(file_data + g_strtab_off);
+                nlist_64 *syms = (nlist_64 *)(file_data + g_symtab_off);
+                for (uint32_t k = 0; k < n_entries; k++) {
+                    uint32_t sym_idx = indirect[start_idx + k];
+                    if (sym_idx & 0x80000000) continue;
+                    if (sym_idx >= g_symtab_nsyms) continue;
+                    nlist_64 *nl = &syms[sym_idx];
+                    if (nl->n_strx >= g_strtab_size) continue;
+                    const char *name = strtab + nl->n_strx;
+                    if (name[0] == '_') name++;
+                    if (strcmp(name, "environ") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0) {
+                        /* Overwrite with &environ (pointer to environ global) */
+                        *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)&environ;
+                        if (g_verbose)
+                            fprintf(stderr, "macify: fixed environ GOT at %p = &environ (%p)\n",
+                                    (void*)(uintptr_t)(s->addr + k * 8), (void*)&environ);
+                    }
+                }
+            }
+        }
     }
 
     /* macify_skip_r_patch is set above after putc patching, based on

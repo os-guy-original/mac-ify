@@ -775,6 +775,11 @@ FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
     if (!real_fdopen) real_fdopen = dlsym(RTLD_NEXT, "fdopen");
     FILE *fp = real_fdopen(fd, mode);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: fdopen(%d, \"%s\") = %p\n", fd, mode ? mode : "(null)", (void*)fp);
+        (void)write(2, b, n);
+    }
     if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
         /* Save initial _IO_read_ptr and _IO_read_end. */
         macify_save_read_ptr(fp);

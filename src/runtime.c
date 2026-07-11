@@ -400,6 +400,18 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
      * macOS binaries use printf/fwrite which buffer output internally. */
+    /* Sync glibc's __environ with our environ.
+     * macOS binaries access environ via GOT which points to glibc's
+     * __environ. If we called setenv() (which updates our CRT's
+     * environ but not glibc's __environ), the macOS binary sees
+     * stale environment. Sync them before calling main. */
+    {
+        extern char **environ;
+        extern char **__environ __attribute__((weak));
+        if (__environ) {
+            __environ = environ;
+        }
+    }
     int ret;
     __asm__ volatile (
         "mov %[entry], %%r11\n\t"          /* save entry in r11 */
