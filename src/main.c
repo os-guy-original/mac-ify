@@ -346,6 +346,7 @@ int main(int argc, char **argv, char **envp) {
     {
         void *tinfo = dlopen("libtinfo.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (!tinfo) tinfo = dlopen("libtinfo.so.5", RTLD_NOW | RTLD_GLOBAL);
+        if (!tinfo) tinfo = dlopen("libncursesw.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (!tinfo) tinfo = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (tinfo) register_extra_handle(tinfo);
         if (g_verbose)
