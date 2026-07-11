@@ -353,6 +353,31 @@ int main(int argc, char **argv, char **envp) {
             fprintf(stderr, "macify: preloaded libtinfo=%p\n", tinfo);
     }
 
+    /* Pre-load the shim BEFORE processing LC_LOAD_DYLIB entries.
+     * macOS binaries list dylibs in dependency order — readline comes
+     * before libSystem. When readline's GOT is resolved, it needs
+     * BC/PC/UP/tgetent from the shim. But the shim was previously
+     * loaded inside the LC_LOAD_DYLIB loop when libSystem was reached
+     * (the LAST dylib). By then, readline's GOT was already resolved
+     * with NULL values for BC/PC/UP → crash at rip=0x8.
+     *
+     * Loading the shim here ensures it's available as g_dylibs[0]
+     * before ANY dylib's GOT is resolved. */
+    {
+        void *shim_h = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
+        void *libc_h = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+        void *libm_h = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
+        if (shim_h) {
+            g_dylibs[g_ndylibs].handle = shim_h;
+            g_dylibs[g_ndylibs].libc_handle = libc_h;
+            g_dylibs[g_ndylibs].libm_handle = libm_h;
+            g_ndylibs++;
+        }
+        if (g_verbose)
+            fprintf(stderr, "macify: preloaded shim=%p libc=%p libm=%p\n",
+                    shim_h, libc_h, libm_h);
+    }
+
     for (uint32_t i = 0; i < hdr->ncmds && lc + 8 <= lc_end; i++) {
         uint32_t cmd     = *(uint32_t *)(void *)lc;
         uint32_t cmdsize = *(uint32_t *)(void *)(lc + 4);
@@ -440,13 +465,22 @@ int main(int argc, char **argv, char **envp) {
             }
             /* Load shim and libc. The shim provides macOS-specific functions
              * (__errno, _NSGetEnviron, mach_*, objc_*, dispatch_*, etc.) that
-             * glibc lacks; libc.so.6 provides standard C functions. We store
-             * both handles — the bind interpreter tries the shim first, then
-             * libc, then libm. RTLD_GLOBAL makes shim symbols visible to
-             * subsequently-loaded libraries. */
-            void *shim_handle = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
-            void *libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
-            void *libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
+             * glibc lacks; libc.so.6 provides standard C functions.
+             * NOTE: The shim may already be preloaded (g_ndylibs > 0) —
+             * skip re-loading in that case. */
+            void *shim_handle = NULL;
+            void *libc_handle = NULL;
+            void *libm_handle = NULL;
+            if (g_ndylibs == 0) {
+                shim_handle = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
+                libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+                libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
+            } else {
+                /* Already preloaded — reuse existing handles */
+                shim_handle = g_dylibs[0].handle;
+                libc_handle = g_dylibs[0].libc_handle;
+                libm_handle = g_dylibs[0].libm_handle;
+            }
 
             /* Map macOS library names to Linux equivalents.
              * IMPORTANT: @@HOMEBREW_PREFIX@@ and resolved (@rpath/@loader_path)
@@ -569,6 +603,10 @@ int main(int argc, char **argv, char **envp) {
                         name, shim_handle, libc_handle, dlerror());
                 return 1;
             }
+            /* Always register a new dylib entry — each LC_LOAD_DYLIB
+             * gets its own ordinal, even if they all share the same
+             * shim/libc handles. The bind interpreter uses ordinals
+             * to look up g_dylibs[ordinal-1]. */
             strncpy(g_dylibs[g_ndylibs].name, name, 255);
             g_dylibs[g_ndylibs].name[255] = '\0';
             g_dylibs[g_ndylibs].handle = shim_handle;
