@@ -121,13 +121,13 @@ static unsigned char macos_stderr_buf[MACOS_BUFSIZ] __attribute__((aligned(128))
 static unsigned char macos_stdin_buf[MACOS_BUFSIZ] __attribute__((aligned(128)));
 
 /* Forward declarations */
-static int macos_file_read(void *cookie, char *buf, int len);
-static int macos_file_write(void *cookie, const char *buf, int len);
-static long long macos_file_seek(void *cookie, long long off, int whence);
-static int macos_file_close(void *cookie);
+static int __attribute__((unused)) macos_file_read(void *cookie, char *buf, int len);
+static int __attribute__((unused)) macos_file_write(void *cookie, const char *buf, int len);
+static long long __attribute__((unused)) macos_file_seek(void *cookie, long long off, int whence);
+static int __attribute__((unused)) macos_file_close(void *cookie);
 
 /* Helper to set function pointer in union at the right offset */
-static void set_fn_ptr(struct macos_sFILE *f, int offset, void *fn) {
+static void __attribute__((unused)) set_fn_ptr(struct macos_sFILE *f, int offset, void *fn) {
     memcpy((char *)f + offset, &fn, sizeof(void *));
 }
 
@@ -165,25 +165,25 @@ static struct macos_sFILE macos_stderr;
 static struct macos_sFILE macos_stdin;
 
 /* macOS FILE read/write/seek/close implementations */
-static int macos_file_read(void *cookie, char *buf, int len) {
+static int __attribute__((unused)) macos_file_read(void *cookie, char *buf, int len) {
     struct macos_sFILE *f = (struct macos_sFILE *)cookie;
     if (!f) return -1;
     return (int)read(f->_file, buf, len);
 }
 
-static int macos_file_write(void *cookie, const char *buf, int len) {
+static int __attribute__((unused)) macos_file_write(void *cookie, const char *buf, int len) {
     struct macos_sFILE *f = (struct macos_sFILE *)cookie;
     if (!f) return -1;
     return (int)write(f->_file, buf, len);
 }
 
-static long long macos_file_seek(void *cookie, long long off, int whence) {
+static long long __attribute__((unused)) macos_file_seek(void *cookie, long long off, int whence) {
     struct macos_sFILE *f = (struct macos_sFILE *)cookie;
     if (!f) return -1;
     return (long long)lseek(f->_file, off, whence);
 }
 
-static int macos_file_close(void *cookie) {
+static int __attribute__((unused)) macos_file_close(void *cookie) {
     struct macos_sFILE *f = (struct macos_sFILE *)cookie;
     if (!f) return -1;
     return close(f->_file);

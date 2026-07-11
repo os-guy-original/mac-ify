@@ -1,7 +1,7 @@
 # Mac-ify loader Makefile
 
 CC      ?= gcc
-CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11
+CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation -std=gnu11
 LDFLAGS ?= -ldl -rdynamic
 
 BIN_DIR  = ../build

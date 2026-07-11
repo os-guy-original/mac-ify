@@ -104,7 +104,10 @@ int macify_task_set_exception_ports(int t, int f, void *h, int b, int fc) {
 int macify_task_swap_exception_ports(int t, int f, void *oh, int b, int fc, void *nh, int *ob, int *of) __asm__("task_swap_exception_ports");
 int macify_task_swap_exception_ports(int t, int f, void *oh, int b, int fc, void *nh, int *ob, int *of) {
     (void)t;(void)f;(void)oh;(void)b;(void)fc;
-    if (nh) *(void**)nh = NULL; if (ob) *ob = 0; if (of) *of = 0; return 0;
+    if (nh) *(void**)nh = NULL;
+    if (ob) *ob = 0;
+    if (of) *of = 0;
+    return 0;
 }
 
 int macify_vm_region_recurse_64(int t, int *fl, void *i, int *c, unsigned long *a) __asm__("vm_region_recurse_64");

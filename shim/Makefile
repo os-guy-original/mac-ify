@@ -1,7 +1,7 @@
 # Mac-ify libSystem shim Makefile
 
 CC      ?= gcc
-CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11 -fPIC
+CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation -std=gnu11 -fPIC
 LDFLAGS ?= -shared -lpthread -ldl -lm -Wl,-z,now
 
 BIN_DIR  = ../build

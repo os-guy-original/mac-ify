@@ -217,7 +217,7 @@ static void process_dylib_rebases(uint8_t *file_data, size_t file_size,
 
     int seg_index = -1;
     uint64_t seg_offset = 0;
-    uint8_t type = 0;
+    uint8_t type = 0; (void)type;
 
     while (p < end) {
         uint8_t op = *p++;
@@ -349,7 +349,7 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
          *   Total header = 22 bytes, page_start[] starts at offset 22 */
         uint32_t seg_size = *(uint32_t *)seg_starts;
         uint16_t page_size = *(uint16_t *)(seg_starts + 4);
-        uint16_t ptr_format = *(uint16_t *)(seg_starts + 6);
+        uint16_t ptr_format = *(uint16_t *)(seg_starts + 6); (void)ptr_format;
         uint64_t seg_offset = *(uint64_t *)(seg_starts + 8);
         uint32_t max_valid = *(uint32_t *)(seg_starts + 16);
         uint16_t page_count = *(uint16_t *)(seg_starts + 20);
@@ -386,7 +386,7 @@ static void process_dylib_chained_fixups(uint8_t *file_data, size_t file_size,
                         /* DYLD_CHAINED_IMPORT format (4 bytes per import):
                          * bits 0-7: lib_ordinal, bit 8: weak, bits 9-31: name_offset */
                         uint32_t imp_raw = *(uint32_t *)(imports_base + ordinal * 4);
-                        int lib_ordinal = imp_raw & 0xFF;
+                        int lib_ordinal = imp_raw & 0xFF; (void)lib_ordinal;
                         uint32_t name_off = (imp_raw >> 9) & 0x7FFFFF;
                         const char *sym_name = symbols_base ?
                             (const char *)(symbols_base + name_off) : "";
@@ -469,8 +469,8 @@ static void process_dylib_binds(uint8_t *file_data, size_t file_size,
 
     int seg_index = -1;
     uint64_t seg_offset = 0;
-    uint32_t type = 0;
-    int lib_ordinal = 0;
+    uint32_t type = 0; (void)type;
+    int lib_ordinal = 0; (void)lib_ordinal;
     char sym_name[256] = "";
     int64_t addend = 0;
 
