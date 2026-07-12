@@ -378,21 +378,24 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * stdout before exiting. Interactive bash (--login -i) runs
      * indefinitely and must NOT have an alarm. */
     {
-        /* Check if this is an interactive bash shell */
-        int is_interactive = 0;
+        /* Check if this is an interactive bash shell by looking at
+         * the command-line arguments for -i flag. */
         extern char **environ;
-        /* Check argv for -i or --login -i */
-        extern int g_argc;
-        extern char **g_argv;
-        if (g_argv) {
-            for (int i = 1; i < g_argc; i++) {
-                if (g_argv[i] && (strcmp(g_argv[i], "-i") == 0 ||
-                    strcmp(g_argv[i], "--login") == 0)) {
-                    /* Check if next arg or this is interactive */
-                    if (strcmp(g_argv[i], "-i") == 0) is_interactive = 1;
-                    if (i + 1 < g_argc && g_argv[i+1] && strcmp(g_argv[i+1], "-i") == 0)
-                        is_interactive = 1;
+        int is_interactive = 0;
+        /* Read argv from /proc/self/cmdline */
+        FILE *cmdline = fopen("/proc/self/cmdline", "r");
+        if (cmdline) {
+            char buf[4096];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, cmdline);
+            fclose(cmdline);
+            buf[n] = '\0';
+            /* cmdline is NUL-separated. Check for "-i" as an arg. */
+            for (size_t i = 0; i < n; ) {
+                if (strcmp(buf + i, "-i") == 0) {
+                    is_interactive = 1;
+                    break;
                 }
+                i += strlen(buf + i) + 1;
             }
         }
         if (!is_interactive) {
