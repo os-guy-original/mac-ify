@@ -1077,7 +1077,7 @@ int main(int argc, char **argv, char **envp) {
                     if (addr) {
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)addr;
                         /* Debug: verify critical symbols */
-                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "putc_unlocked") == 0 || strcmp(name, "environ") == 0 || strcmp(name, "_NSGetEnviron") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0))
+                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "ferror") == 0 || strcmp(name, "feof") == 0 || strcmp(name, "clearerr") == 0 || strcmp(name, "putc_unlocked") == 0 || strcmp(name, "environ") == 0 || strcmp(name, "_NSGetEnviron") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0))
                             fprintf(stderr, "macify: GOT %s at %p = 0x%lx\n", name,
                                     (void*)(uintptr_t)(s->addr + k * 8),
                                     (unsigned long)*(uint64_t*)(uintptr_t)(s->addr + k * 8));

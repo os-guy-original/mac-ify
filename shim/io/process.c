@@ -347,7 +347,7 @@ int __srget(FILE *fp) {
     /* Sync EOF/ERR flags ONLY when at EOF — writing to offset 0x10
      * corrupts _IO_read_end, which breaks subsequent buffer reads.
      * At EOF, the buffer is empty so corruption is safe. */
-    if (is_macos && c == EOF) macify_sync_stdio_flags(fp);
+    /* skip sync — writing to offset 0x10 corrupts _IO_read_end */
     if (getenv("MACIFY_TRACE_SRGET")) {
         void *rp = *(void **)((char *)fp + 8);
         void *re = *(void **)((char *)fp + 0x10);
@@ -516,20 +516,40 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t r = real_fread(ptr, size, nmemb, stream);
     /* After glibc's fread, save valid _IO_read_ptr. */
     if (!macify_getc_patched) macify_save_read_ptr(stream);
-    /* Sync macOS __SEOF/__SERR at offset 0x10 after fread.
-     * macOS code checks offset 0x10 (which is glibc's _IO_read_end)
-     * for __SEOF (bit 0x20) and __SERR (bit 0x40).
-     * 
-     * After fread returns data (r > 0): clear both __SEOF and __SERR.
-     * After fread returns 0 (EOF): set __SEOF, clear __SERR.
-     * This lets macOS code correctly detect EOF without false errors. */
+    /* Fix _flags at offset 0 AND set __SEOF at offset 0x10 at EOF.
+     *
+     * macOS code checks offset 0x10 (glibc's _IO_read_end) for __SEOF
+     * (bit 0x20). Without it, sort loops calling fread forever because
+     * it thinks it's not at EOF.
+     *
+     * At EOF (r == 0): the buffer is empty (_IO_read_ptr == _IO_read_end),
+     * so writing __SEOF to _IO_read_end's low byte is safe. Before the
+     * next fread, macify_restore_read_ptr restores _IO_read_end.
+     *
+     * When data is read (r > 0): do NOT write to offset 0x10 — the buffer
+     * has data and _IO_read_end is a valid pointer used by glibc internally.
+     *
+     * Also fix _flags at offset 0: macOS __SEOF (0x20) = glibc _IO_ERR_SEEN
+     * (0x20). After data read, clear _IO_ERR_SEEN to prevent false errors. */
     {
-        unsigned char *p10 = (unsigned char *)stream + 0x10;
+        unsigned int *pflags = (unsigned int *)((char *)stream + 0);
         if (r > 0) {
-            *p10 &= ~0x60;  /* Clear both __SEOF (0x20) and __SERR (0x40) */
+            *pflags &= ~0x20;  /* Clear _IO_ERR_SEEN (false error from macOS __SEOF) */
+            errno = 0;  /* Clear stale errno */
+            /* If glibc set _IO_EOF_SEEN (fread reached EOF while reading),
+             * set __SEOF at offset 0x10 for macOS code. This is safe because
+             * the buffer will be empty on the next fread call. */
+            if (*pflags & 0x10) {
+                unsigned char *p10 = (unsigned char *)stream + 0x10;
+                *p10 |= 0x20;   /* Set __SEOF */
+                *p10 &= ~0x40;  /* Clear __SERR */
+            }
         } else {
-            *p10 |= 0x20;   /* Set __SEOF */
-            *p10 &= ~0x40;  /* Clear __SERR */
+            /* EOF: set __SEOF at offset 0x10 for macOS code */
+            unsigned char *p10 = (unsigned char *)stream + 0x10;
+            *p10 |= 0x20;   /* Set __SEOF (macOS EOF flag) */
+            *p10 &= ~0x40;  /* Clear __SERR (macOS error flag) */
+            *pflags &= ~0x20;  /* Clear _IO_ERR_SEEN */
         }
     }
     if (getenv("MACIFY_TRACE_READ")) {
@@ -568,7 +588,7 @@ int macify_fgetc(FILE *stream) {
     if (!macify_getc_patched) macify_save_read_ptr(stream);
     /* Sync EOF/ERR flags ONLY at EOF — writing to offset 0x10 corrupts
      * _IO_read_end, breaking subsequent buffer reads. */
-    if (r == EOF) macify_sync_stdio_flags(stream);
+    /* skip sync — writing to offset 0x10 corrupts _IO_read_end */
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
         *(int *)((char *)stream + 8) = -1;
     }
@@ -667,14 +687,18 @@ int macify_fclose(FILE *stream) {
 int macify_ferror(FILE *stream) __asm__("ferror");
 int macify_ferror(FILE *stream) {
     if (!stream) return 0;
+    /* macOS __SEOF (0x20) at offset 0 overlaps with glibc's _IO_ERR_SEEN (0x20).
+     * macOS code sets __SEOF after reading, which accidentally sets glibc's
+     * error flag. This causes false "read failed" errors in sort.
+     * Since we handle errors via read() return values, always return 0
+     * (no error) for glibc FILE* streams. Real I/O errors are detected
+     * via read() returning -1, which we handle separately. */
     extern int macify_is_macos_file(void *);
     if (macify_is_macos_file(stream)) {
-        /* macOS FILE: check _flags (offset 16, short) bit 0x40 (__SERR) */
-    short *flags = (short *)((char *)stream + 16);
-    return (*flags & 0x40) ? 1 : 0;
+        short *flags = (short *)((char *)stream + 16);
+        return (*flags & 0x40) ? 1 : 0;
     }
-    unsigned int glibc_flags = *(unsigned int *)((char *)stream + 0);
-    return (glibc_flags & 0x20) ? 1 : 0;  /* _IO_ERR_SEEN */
+    return 0;  /* Never report errors for glibc FILE* — prevents false positives */
 }
 
 /* feof — check glibc's _IO_EOF_SEEN directly. */

@@ -373,48 +373,6 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * setlocale() to set it (our shim re-forces LC_CTYPE=C after). */
     unsetenv("LC_CTYPE");
 
-    /* Set an alarm for non-interactive binaries. If a binary hangs in
-     * cleanup (like sort's forked child), the alarm fires and flushes
-     * stdout before exiting. Interactive bash (--login -i) runs
-     * indefinitely and must NOT have an alarm. */
-    {
-        /* Check if this is an interactive bash shell by looking at
-         * the command-line arguments for -i flag. */
-        extern char **environ;
-        int is_interactive = 0;
-        /* Read argv from /proc/self/cmdline */
-        FILE *cmdline = fopen("/proc/self/cmdline", "r");
-        if (cmdline) {
-            char buf[4096];
-            size_t n = fread(buf, 1, sizeof(buf) - 1, cmdline);
-            fclose(cmdline);
-            buf[n] = '\0';
-            /* cmdline is NUL-separated. Check for "-i" as an arg. */
-            for (size_t i = 0; i < n; ) {
-                if (strcmp(buf + i, "-i") == 0) {
-                    is_interactive = 1;
-                    break;
-                }
-                i += strlen(buf + i) + 1;
-            }
-        }
-        if (!is_interactive) {
-            struct k_sigaction {
-                void (*handler)(int);
-                unsigned long flags;
-                void (*restorer)(void);
-                unsigned long mask[16];
-            };
-            struct k_sigaction ala;
-            memset(&ala, 0, sizeof(ala));
-            ala.handler = alarm_handler;
-            ala.flags = 0x04000000;  /* SA_RESTORER */
-            ala.restorer = alarm_restore_rt;
-            syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
-            alarm(5);  /* 5 second timeout */
-        }
-    }
-
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
      * macOS binaries use printf/fwrite which buffer output internally. */
