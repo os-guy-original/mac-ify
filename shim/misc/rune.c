@@ -72,7 +72,7 @@ int16_t macify_maplower[256];
 int16_t macify_mapupper[256];
 
 struct _macify_RuneLocale _DefaultRuneLocale = {
-    .magic = "RuneMag1",
+    .magic = {'R','u','n','e','M','a','g','1'},
     .encoding = 0,
     .sgetrune = NULL,
     .sputrune = NULL,
