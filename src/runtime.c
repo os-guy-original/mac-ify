@@ -373,23 +373,43 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * setlocale() to set it (our shim re-forces LC_CTYPE=C after). */
     unsetenv("LC_CTYPE");
 
-    /* Set a 10-second alarm for all binaries. If a binary hangs in
+    /* Set an alarm for non-interactive binaries. If a binary hangs in
      * cleanup (like sort's forked child), the alarm fires and flushes
-     * stdout before exiting. Normal binaries exit before 10 seconds. */
+     * stdout before exiting. Interactive bash (--login -i) runs
+     * indefinitely and must NOT have an alarm. */
     {
-        struct k_sigaction {
-            void (*handler)(int);
-            unsigned long flags;
-            void (*restorer)(void);
-            unsigned long mask[16];
-        };
-        struct k_sigaction ala;
-        memset(&ala, 0, sizeof(ala));
-        ala.handler = alarm_handler;
-        ala.flags = 0x04000000;  /* SA_RESTORER */
-        ala.restorer = alarm_restore_rt;
-        syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
-        alarm(3);  /* 3 second timeout — kills hung cleanup fast */
+        /* Check if this is an interactive bash shell */
+        int is_interactive = 0;
+        extern char **environ;
+        /* Check argv for -i or --login -i */
+        extern int g_argc;
+        extern char **g_argv;
+        if (g_argv) {
+            for (int i = 1; i < g_argc; i++) {
+                if (g_argv[i] && (strcmp(g_argv[i], "-i") == 0 ||
+                    strcmp(g_argv[i], "--login") == 0)) {
+                    /* Check if next arg or this is interactive */
+                    if (strcmp(g_argv[i], "-i") == 0) is_interactive = 1;
+                    if (i + 1 < g_argc && g_argv[i+1] && strcmp(g_argv[i+1], "-i") == 0)
+                        is_interactive = 1;
+                }
+            }
+        }
+        if (!is_interactive) {
+            struct k_sigaction {
+                void (*handler)(int);
+                unsigned long flags;
+                void (*restorer)(void);
+                unsigned long mask[16];
+            };
+            struct k_sigaction ala;
+            memset(&ala, 0, sizeof(ala));
+            ala.handler = alarm_handler;
+            ala.flags = 0x04000000;  /* SA_RESTORER */
+            ala.restorer = alarm_restore_rt;
+            syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
+            alarm(5);  /* 5 second timeout */
+        }
     }
 
     /* The asm block switches to the macOS binary's stack, calls main(),
