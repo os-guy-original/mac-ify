@@ -210,12 +210,10 @@ static void alarm_restore_rt(void) {
 
 static void alarm_handler(int sig) {
     (void)sig;
+    /* Try fflush first — it handles glibc's internal buffering correctly. */
     extern FILE *stdout;
     if (stdout) {
-        char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
-        char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
-        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576)
-            write(1, *base, *ptr - *base);
+        fflush(stdout);
     }
     _exit(0);
 }
@@ -391,7 +389,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         ala.flags = 0x04000000;  /* SA_RESTORER */
         ala.restorer = alarm_restore_rt;
         syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
-        alarm(30);  /* 10 second timeout */
+        alarm(10);  /* 10 second timeout */
     }
 
     /* The asm block switches to the macOS binary's stack, calls main(),

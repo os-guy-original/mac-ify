@@ -516,15 +516,21 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t r = real_fread(ptr, size, nmemb, stream);
     /* After glibc's fread, save valid _IO_read_ptr. */
     if (!macify_getc_patched) macify_save_read_ptr(stream);
-    /* Clear macOS __SERR (bit 0x40) at offset 0x10 after fread.
-     * macOS sort checks offset 0x10 for __SERR after fread returns
-     * less than requested. If _IO_read_end's low byte has bit 0x40
-     * set, sort thinks there was a read error. Clearing just the
-     * error bit prevents false "read failed" errors without
-     * corrupting the EOF detection (which uses the return value). */
-    if (r > 0 || r == 0) {
+    /* Sync macOS __SEOF/__SERR at offset 0x10 after fread.
+     * macOS code checks offset 0x10 (which is glibc's _IO_read_end)
+     * for __SEOF (bit 0x20) and __SERR (bit 0x40).
+     * 
+     * After fread returns data (r > 0): clear both __SEOF and __SERR.
+     * After fread returns 0 (EOF): set __SEOF, clear __SERR.
+     * This lets macOS code correctly detect EOF without false errors. */
+    {
         unsigned char *p10 = (unsigned char *)stream + 0x10;
-        *p10 &= ~0x40;  /* Clear __SERR */
+        if (r > 0) {
+            *p10 &= ~0x60;  /* Clear both __SEOF (0x20) and __SERR (0x40) */
+        } else {
+            *p10 |= 0x20;   /* Set __SEOF */
+            *p10 &= ~0x40;  /* Clear __SERR */
+        }
     }
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
