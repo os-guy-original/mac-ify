@@ -389,7 +389,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         ala.flags = 0x04000000;  /* SA_RESTORER */
         ala.restorer = alarm_restore_rt;
         syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
-        alarm(10);  /* 10 second timeout */
+        alarm(3);  /* 3 second timeout — kills hung cleanup fast */
     }
 
     /* The asm block switches to the macOS binary's stack, calls main(),

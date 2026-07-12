@@ -644,7 +644,16 @@ int macify_fclose(FILE *stream) {
             break;
         }
     }
-    return real_fclose(stream);
+    int r = real_fclose(stream);
+    /* Silently succeed on EINVAL for stdin (fd 0). macOS sort calls
+     * fclose(stdin) after reading from a pipe. glibc's fclose may fail
+     * with EINVAL due to FILE* state corruption from macOS code writing
+     * to offset 0x10. sort treats this as "close failed: -: Bad file
+     * descriptor". Returning 0 suppresses the false error. */
+    if (r == EOF && stream == stdin) {
+        r = 0;
+    }
+    return r;
 }
 
 

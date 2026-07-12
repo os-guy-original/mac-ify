@@ -953,6 +953,15 @@ int macify_close(int fd) {
     static int (*real)(int) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "close");
     int r = real(fd);
+    /* Silently succeed on EBADF for fd 0 (stdin). macOS sort closes
+     * stdin after reading from a pipe, and the pipe may already be
+     * closed by the kernel, causing EBADF. sort treats this as an
+     * error and prints "close failed: -: Bad file descriptor".
+     * Returning 0 (success) suppresses the false error. */
+    if (r == -1 && errno == EBADF && fd == 0) {
+        r = 0;
+        errno = 0;
+    }
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
             "macify: close(%d) = %d errno=%d\n", fd, r, r ? errno : 0);
