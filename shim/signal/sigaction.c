@@ -46,7 +46,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     {
         /* Block macOS code from replacing our handlers */
         if (signum == 11 /* SIGSEGV */ || signum == 6 /* SIGABRT */ ||
-            (signum == 14 /* SIGALRM */ && getenv("MACIFY_NO_FORK"))) {
+            (signum == 14 /* SIGALRM */)) {
             if (act) {
                 return 0;
             }
@@ -223,7 +223,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 sighandler_t macify_signal(int signum, sighandler_t handler) __asm__("signal");
 sighandler_t macify_signal(int signum, sighandler_t handler) {
     /* Block SIGALRM override when MACIFY_NO_FORK is set */
-    if (signum == 14 /* SIGALRM */ && getenv("MACIFY_NO_FORK")) {
+    if (signum == 14 /* SIGALRM */) {
         return SIG_DFL;
     }
     if (signum == SIGSEGV || signum == SIGBUS || signum == SIGABRT) {

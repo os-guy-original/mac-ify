@@ -43,19 +43,20 @@ pid_t macify_waitpid(pid_t pid, int *status, int options) {
 
 pid_t macify_fork(void) __asm__("fork");
 pid_t macify_fork(void) {
-    /* If MACIFY_NO_FORK is set, return -1 to prevent forking.
-     * Some macOS binaries (like sort) fork a child that inherits
-     * corrupted FILE* state and hangs in glibc's internal I/O.
-     * Setting MACIFY_NO_FORK=1 forces single-process mode. */
-    if (getenv("MACIFY_NO_FORK")) {
-        errno = ENOSYS;
-        return -1;
-    }
     static pid_t (*real_fork)(void) = NULL;
     if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
-    if (real_fork) return real_fork();
-    errno = ENOSYS;
-    return -1;
+    pid_t r = real_fork ? real_fork() : -1;
+    if (r == 0) {
+        /* Child: set a 10-second alarm. If the child hangs in a
+         * loop (like sort's parallel reader), the alarm fires and
+         * our handler flushes stdout and exits cleanly. */
+        alarm(10);
+    } else if (r > 0) {
+        /* Parent: cancel any inherited alarm so it doesn't kill
+         * us while waiting for the child. */
+        alarm(0);
+    }
+    return r;
 }
 
 pid_t macify_vfork(void) __asm__("vfork");
@@ -515,11 +516,16 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t r = real_fread(ptr, size, nmemb, stream);
     /* After glibc's fread, save valid _IO_read_ptr. */
     if (!macify_getc_patched) macify_save_read_ptr(stream);
-    /* Sync glibc EOF/ERR flags to macOS __SEOF/__SERR at offset 0x10.
-     * ONLY when fread returns 0 (EOF) — writing to offset 0x10 corrupts
-     * _IO_read_end, which breaks subsequent buffer reads. At EOF, the
-     * buffer is empty so corruption is safe. */
-    if (r == 0) macify_sync_stdio_flags(stream);
+    /* Clear macOS __SERR (bit 0x40) at offset 0x10 after fread.
+     * macOS sort checks offset 0x10 for __SERR after fread returns
+     * less than requested. If _IO_read_end's low byte has bit 0x40
+     * set, sort thinks there was a read error. Clearing just the
+     * error bit prevents false "read failed" errors without
+     * corrupting the EOF detection (which uses the return value). */
+    if (r > 0 || r == 0) {
+        unsigned char *p10 = (unsigned char *)stream + 0x10;
+        *p10 &= ~0x40;  /* Clear __SERR */
+    }
     if (getenv("MACIFY_TRACE_READ")) {
         unsigned int flags_before = *(unsigned int *)((char *)stream);
         char b[256]; int n = snprintf(b, sizeof(b),

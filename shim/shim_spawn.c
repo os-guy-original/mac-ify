@@ -291,12 +291,6 @@ static int do_posix_spawn(pid_t *pid, const char *path,
         if (macify_bin) {
             char **new_argv = build_macify_argv(eff_path, argv);
             if (new_argv) {
-                /* If the binary is 'sort', set MACIFY_NO_FORK=1. */
-                const char *base = strrchr(eff_path, '/');
-                base = base ? base + 1 : eff_path;
-                if (strcmp(base, "sort") == 0) {
-                    setenv("MACIFY_NO_FORK", "1", 1);
-                }
                 /* Use fork + execve since posix_spawn can't handle
                  * re-execing through macify with file_actions. */
                 pid_t child = fork();
@@ -559,34 +553,7 @@ int macify_execve(const char *path, char *const argv[], char *const envp[]) {
         if (macify_bin) {
             char **new_argv = build_macify_argv(eff_path, argv);
             if (new_argv) {
-                /* If the binary is 'sort', set MACIFY_NO_FORK=1 to prevent
-                 * the child process from hanging in glibc's internal I/O
-                 * due to FILE* layout corruption. Sort forks a child for
-                 * parallel file reading; the child inherits corrupted
-                 * FILE* state and loops forever. */
-                const char *base = strrchr(eff_path, '/');
-                base = base ? base + 1 : eff_path;
-                char **new_envp = (char **)envp;
-                if (strcmp(base, "sort") == 0) {
-                    /* Build a new envp with MACIFY_NO_FORK=1 added.
-                     * We can't use setenv because envp may differ from environ. */
-                    int nenv = 0;
-                    if (envp) while (envp[nenv]) nenv++;
-                    new_envp = calloc(nenv + 2, sizeof(char *));
-                    if (new_envp) {
-                        int j = 0;
-                        for (int i = 0; i < nenv; i++) {
-                            if (strncmp(envp[i], "MACIFY_NO_FORK=", 15) != 0)
-                                new_envp[j++] = envp[i];
-                        }
-                        new_envp[j++] = "MACIFY_NO_FORK=1";
-                        new_envp[j] = NULL;
-                    } else {
-                        new_envp = (char **)envp;
-                    }
-                }
-                int ret = real_execve ? real_execve(macify_bin, new_argv, new_envp) : -1;
-                if (new_envp != envp) free(new_envp);
+                int ret = real_execve ? real_execve(macify_bin, new_argv, envp) : -1;
                 free(new_argv);
                 return ret;
             }
@@ -616,31 +583,10 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
         if (macify_bin) {
             char **new_argv = build_macify_argv(resolved, argv);
             if (new_argv) {
-                /* If the binary is 'sort', build new envp with MACIFY_NO_FORK=1. */
-                const char *base = strrchr(resolved, '/');
-                base = base ? base + 1 : resolved;
-                char **new_envp = (char **)envp;
-                if (strcmp(base, "sort") == 0) {
-                    int nenv = 0;
-                    if (envp) while (envp[nenv]) nenv++;
-                    new_envp = calloc(nenv + 2, sizeof(char *));
-                    if (new_envp) {
-                        int j = 0;
-                        for (int i = 0; i < nenv; i++) {
-                            if (strncmp(envp[i], "MACIFY_NO_FORK=", 15) != 0)
-                                new_envp[j++] = envp[i];
-                        }
-                        new_envp[j++] = "MACIFY_NO_FORK=1";
-                        new_envp[j] = NULL;
-                    } else {
-                        new_envp = (char **)envp;
-                    }
-                }
                 static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
                 if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
                 /* Make sure LD_LIBRARY_PATH is set so macify can find the shim */
                 if (!getenv("LD_LIBRARY_PATH")) {
-                    /* Find the directory of macify_bin and set it */
                     char libpath[4096];
                     strncpy(libpath, macify_bin, sizeof(libpath) - 1);
                     libpath[sizeof(libpath) - 1] = '\0';
@@ -648,8 +594,7 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
                     if (slash) *slash = '\0';
                     setenv("LD_LIBRARY_PATH", libpath, 1);
                 }
-                int ret = real_execve ? real_execve(macify_bin, new_argv, new_envp) : -1;
-                if (new_envp != envp) free(new_envp);
+                int ret = real_execve ? real_execve(macify_bin, new_argv, envp) : -1;
                 free(new_argv);
                 return ret;
             }

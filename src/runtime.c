@@ -375,13 +375,10 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
      * setlocale() to set it (our shim re-forces LC_CTYPE=C after). */
     unsetenv("LC_CTYPE");
 
-    /* If MACIFY_NO_FORK is set, the binary (like sort) has FILE* layout
-     * issues that cause it to hang in glibc's internal I/O during cleanup.
-     * Set a 5-second alarm — if the binary hasn't exited by then, SIGALRM
-     * fires and our crash handler flushes stdout and exits cleanly.
-     * The binary has already produced its output by then. */
-    if (getenv("MACIFY_NO_FORK")) {
-        /* Install SIGALRM handler that flushes stdout and exits. */
+    /* Set a 10-second alarm for all binaries. If a binary hangs in
+     * cleanup (like sort's forked child), the alarm fires and flushes
+     * stdout before exiting. Normal binaries exit before 10 seconds. */
+    {
         struct k_sigaction {
             void (*handler)(int);
             unsigned long flags;
@@ -394,7 +391,7 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         ala.flags = 0x04000000;  /* SA_RESTORER */
         ala.restorer = alarm_restore_rt;
         syscall(13, 14, &ala, NULL, 8);  /* SIGALRM = 14 */
-        alarm(5);  /* 5 second timeout */
+        alarm(30);  /* 10 second timeout */
     }
 
     /* The asm block switches to the macOS binary's stack, calls main(),
