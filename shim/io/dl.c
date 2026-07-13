@@ -81,8 +81,12 @@ void *dlopen(const char *filename, int flag) {
         return macify_sc_fake_handle;
     }
     static void *(*real_dlopen)(const char *, int) = NULL;
-    if (!real_dlopen) real_dlopen = dlsym(RTLD_DEFAULT, "dlopen");
-    return real_dlopen(filename, flag);
+    if (!real_dlopen) {
+        if (!real_dlsym) dl_iterate_phdr(find_dlsym_cb, &real_dlsym);
+        if (real_dlsym) real_dlopen = real_dlsym(RTLD_DEFAULT, "dlopen");
+    }
+    if (real_dlopen) return real_dlopen(filename, flag);
+    return NULL;
 }
 
 void *dlsym(void *handle, const char *symbol) {
@@ -124,13 +128,16 @@ void *dlsym(void *handle, const char *symbol) {
     if (handle == MACOS_RTLD_DEFAULT || handle == MACOS_RTLD_SELF)
         handle = NULL;
 
-    /* ALWAYS check our shim's overrides first, regardless of handle.
-     * Go's runtime uses dlsym to look up C functions (pthread_mutex_lock,
-     * sigaction, etc.). If it gets glibc's versions directly, it bypasses
-     * our macOS→Linux translation (mutex layout, signal struct layout,
-     * signal number translation), causing crashes.
-     * macify_get_shim_symbol returns NULL for symbols we don't override,
-     * so this is safe for all lookups. */
+    /* Only intercept dlsym for macOS code.
+     * glibc's NSS subsystem calls dlsym internally during getpwuid().
+     * If we intercept those calls, we call real_dlsym which acquires
+     * glibc's dlsym lock — but the lock is already held by the NSS
+     * code → futex deadlock. */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        return real_dlsym(handle, symbol);
+    }
+
+    /* For macOS callers: check our shim's overrides first. */
     {
         void *shim_sym = macify_get_shim_symbol(symbol);
         if (shim_sym) return shim_sym;
