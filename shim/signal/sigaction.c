@@ -19,13 +19,18 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
      * the wrong offsets, causing signal handlers to be installed with
      * wrong flags (no SA_ONSTACK, no SA_SIGINFO, no SA_RESTORER). */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        /* Non-macOS caller: pass through to kernel via raw rt_sigaction syscall.
-         * We can't use glibc's sigaction() because our dlsym override might
-         * return our shim's sigaction instead of glibc's. The raw syscall
-         * goes directly to the kernel.
-         * CRITICAL: We must set SA_RESTORER and sa_restorer, because the
-         * kernel requires it on modern Linux. Glibc's sigaction wrapper
-         * normally does this, but we're bypassing it. */
+        /* Non-macOS caller: use glibc's real sigaction (NOT raw syscall).
+         * Using raw syscall(13, ...) bypasses glibc's internal locking,
+         * which corrupts glibc's signal handler state and causes futex
+         * deadlocks on some systems. We use real_dlsym to get glibc's
+         * sigaction without hitting our own override. */
+        if (!real_sigaction) {
+            real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
+        }
+        if (real_sigaction) {
+            return real_sigaction(signum, act, oldact);
+        }
+        /* Fallback: raw syscall only if dlsym failed */
         if (act) {
             struct sigaction modified_act = *act;
             if (!(modified_act.sa_flags & 0x04000000) && macify_sa_restorer) {

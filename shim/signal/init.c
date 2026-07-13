@@ -156,31 +156,32 @@ static void macify_init_stdio(void) {
     ss.ss_flags = 0;
     syscall(131, &ss, NULL);  /* sigaltstack */
 
-    /* Install crash handler via raw rt_sigaction syscall.
-     * Do NOT use SA_ONSTACK — it causes SI_KERNEL SIGSEGV after fork
-     * because the signal stack state is corrupted during fork.
-     * Without SA_ONSTACK, the crash handler runs on the regular stack. */
-    struct k_sigaction {
-        void (*handler)(int, siginfo_t *, void *);
-        unsigned long flags;
-        void (*restorer)(void);
-        unsigned long mask[16];
-    };
-    struct k_sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.handler = macify_crash_handler;
-    sa.flags = 0x04000004;  /* SA_SIGINFO(0x4) | SA_RESTORER(0x04000000) — NO SA_ONSTACK */
-    sa.restorer = macify_sa_restorer ? macify_sa_restorer : macify_restore_rt;
-    memset(sa.mask, 0xff, sizeof(sa.mask));
-    long r;
-    r = syscall(13, 11, &sa, NULL, 8);  /* SIGSEGV */
-    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGSEGV failed: %ld\n",r); write(2,b,n); }
-    r = syscall(13, 7,  &sa, NULL, 8);  /* SIGBUS */
-    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGBUS failed: %ld\n",r); write(2,b,n); }
-    r = syscall(13, 6,  &sa, NULL, 8);  /* SIGABRT */
-    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGABRT failed: %ld\n",r); write(2,b,n); }
-    r = syscall(13, 8,  &sa, NULL, 8);  /* SIGFPE */
-    if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGFPE failed: %ld\n",r); write(2,b,n); }
+    /* Install crash handler using glibc's sigaction (NOT raw syscall).
+     * Using raw syscall(13) bypasses glibc's internal locks, causing
+     * futex deadlocks when glibc later tries to use its signal state. */
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = macify_crash_handler;
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER;  /* NO SA_ONSTACK */
+        if (macify_sa_restorer) {
+            sa.sa_flags |= 0x04000000;  /* SA_RESTORER */
+            sa.sa_restorer = macify_sa_restorer;
+        }
+        sigemptyset(&sa.sa_mask);
+        sigaddset(&sa.sa_mask, SIGSEGV);
+        sigaddset(&sa.sa_mask, SIGBUS);
+        sigaddset(&sa.sa_mask, SIGABRT);
+        sigaddset(&sa.sa_mask, SIGFPE);
+
+        /* Use the real_sigaction already initialized at line 122 */
+        if (real_sa) {
+            real_sa(SIGSEGV, &sa, NULL);
+            real_sa(SIGBUS,  &sa, NULL);
+            real_sa(SIGABRT, &sa, NULL);
+            real_sa(SIGFPE,  &sa, NULL);
+        }
+    }
 
     atfork_child_exit();
 }
