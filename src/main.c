@@ -381,7 +381,7 @@ int main(int argc, char **argv, char **envp) {
      * Loading the shim here ensures it's available as g_dylibs[0]
      * before ANY dylib's GOT is resolved. */
     {
-        void *shim_h = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
+        void *shim_h = dlopen("libmacify_shim.so", RTLD_NOW);
         void *libc_h = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
         void *libm_h = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (shim_h) {
@@ -503,7 +503,7 @@ int main(int argc, char **argv, char **envp) {
             void *libc_handle = NULL;
             void *libm_handle = NULL;
             if (g_ndylibs == 0) {
-                shim_handle = dlopen("libmacify_shim.so", RTLD_NOW | RTLD_GLOBAL);
+                shim_handle = dlopen("libmacify_shim.so", RTLD_NOW);
                 libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
                 libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
             } else {
