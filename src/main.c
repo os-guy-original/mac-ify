@@ -1438,6 +1438,7 @@ int main(int argc, char **argv, char **envp) {
         }
     }
         errno = 0;
+        fprintf(stderr, "macify: entering bash main...\n"); fflush(stderr);
         call_main_and_exit(g_entry_rip, stack_top);
     } else {
         errno = 0;
