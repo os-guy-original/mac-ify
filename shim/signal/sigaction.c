@@ -51,6 +51,9 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
                 return 0;
             }
         }
+        /* For SIGCHLD (macOS 20 → Linux 17): install a WRAPPER that defers
+         * the signal if we're inside a terminal read. This prevents the
+         * readline crash caused by SIGCHLD delivery during read(). */
         static const int sig_xlate[32] = {
             [0]  = 0, [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5, [6] = 6,
             [7]  = 0,   /* SIGEMT — no Linux equiv */
@@ -185,8 +188,13 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
                 linux_act.sa_sigaction = macify_go_signal_wrapper;
                 linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
             } else {
-                /* Non-Go: just add SA_ONSTACK and pass through */
-                linux_act.sa_flags |= SA_ONSTACK;
+                /* Non-Go: Do NOT add SA_ONSTACK.
+                 * SA_ONSTACK causes the signal handler to run on the
+                 * alternate signal stack. After fork(), the signal stack
+                 * state can be corrupted, causing the kernel to generate
+                 * SI_KERNEL SIGSEGV when trying to deliver a signal.
+                 * Using the regular stack avoids this issue. */
+                /* linux_act.sa_flags |= SA_ONSTACK; — DISABLED */
             }
             /* CRITICAL: Add SA_RESTORER and set sa_restorer. */
             if (macify_sa_restorer) {
@@ -244,12 +252,40 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
         /* Never let the macOS binary replace our SIGILL handler. */
         return SIG_DFL;
     }
-    /* For other signals: convert signal() to raw rt_sigaction syscall
-     * with SA_ONSTACK and SA_RESTORER. */
+    /* For other signals: convert signal() to raw rt_sigaction syscall.
+     *
+     * CRITICAL: Translate macOS signal numbers to Linux! Without this,
+     * signal(SIGCHLD=20, handler) would install the handler for Linux
+     * signal 20 (SIGTSTP), not signal 17 (SIGCHLD).
+     *
+     * Also, for SIGCHLD, install our wrapper instead of the real handler. */
+    {
+        /* Translate macOS signal number to Linux */
+        static const int sig_xlate[32] = {
+            [0]  = 0, [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5, [6] = 6,
+            [7]  = 0, [8] = 8, [9] = 9, [10] = 7, [11] = 11, [12] = 31,
+            [13] = 13, [14] = 14, [15] = 15, [16] = 23, [17] = 19,
+            [18] = 20, [19] = 18, [20] = 17, [21] = 21, [22] = 22,
+            [23] = 29, [24] = 24, [25] = 25, [26] = 26, [27] = 27,
+            [28] = 28, [29] = 0, [30] = 10, [31] = 12,
+        };
+        if (signum >= 0 && signum < 32 && sig_xlate[signum]) {
+            signum = sig_xlate[signum];
+        }
+    }
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = handler;
-    sa.sa_flags = SA_ONSTACK;
+    /* For SIGCHLD, install our wrapper */
+    if (signum == 17 /* Linux SIGCHLD */ && handler != SIG_DFL && handler != SIG_IGN) {
+        extern void (*macify_saved_sigchld_handler)(int, siginfo_t *, void *);
+        extern void macify_sigchld_wrapper(int, siginfo_t *, void *);
+        macify_saved_sigchld_handler = (void (*)(int, siginfo_t *, void *))handler;
+        sa.sa_sigaction = macify_sigchld_wrapper;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;  /* NO SA_ONSTACK */
+    } else {
+        sa.sa_handler = handler;
+        sa.sa_flags = 0;  /* NO SA_ONSTACK */
+    }
     if (macify_sa_restorer) {
         sa.sa_flags |= 0x04000000;  /* SA_RESTORER */
         sa.sa_restorer = macify_sa_restorer;

@@ -338,11 +338,13 @@ int main(int argc, char **argv, char **envp) {
                     unwind_h, cxxabi, libcxx);
     }
 
-    /* Pre-load libtinfo (termcap functions) so readline can resolve
-     * tgetent, tgoto, tputs, tgetstr, tgetflag, tgetnum.
-     * These are needed by bash's readline in interactive mode.
-     * Without this, readline crashes when calling termcap functions
-     * (they resolve to NULL). */
+    /* Pre-load libtinfo (termcap functions) as a fallback.
+     *
+     * Mach-O dylibs (macOS libncurses) are now checked BEFORE extra handles
+     * in resolve_symbol, so it's safe to register libtinfo here. For binaries
+     * that load macOS libncurses, tgetent resolves to the macOS version.
+     * For binaries that DON'T load macOS libncurses, tgetent resolves to
+     * Linux libtinfo. */
     {
         void *tinfo = dlopen("libtinfo.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (!tinfo) tinfo = dlopen("libtinfo.so.5", RTLD_NOW | RTLD_GLOBAL);
@@ -352,6 +354,19 @@ int main(int argc, char **argv, char **envp) {
         if (g_verbose)
             fprintf(stderr, "macify: preloaded libtinfo=%p\n", tinfo);
     }
+
+    /* Pre-load macOS libncurses from the prefix.
+     *
+     * CRITICAL: This must be done AFTER the shim is loaded (below) so that
+     * macOS libncurses's imports (fopen, fread, etc.) resolve to our shim's
+     * versions, not glibc's. Without this, macOS libncurses's fopen bypasses
+     * our path translation, and it can't find terminfo files (macOS uses hex
+     * directory names, Linux uses char names).
+     *
+     * Also, readline is loaded BEFORE libncurses in the LC_LOAD_DYLIB order.
+     * Pre-loading libncurses here ensures its termcap functions (tgetent,
+     * tgetstr, tputs) are available when readline's GOT is resolved. */
+    /* (Moved below shim pre-load) */
 
     /* Pre-load the shim BEFORE processing LC_LOAD_DYLIB entries.
      * macOS binaries list dylibs in dependency order — readline comes
@@ -376,6 +391,20 @@ int main(int argc, char **argv, char **envp) {
         if (g_verbose)
             fprintf(stderr, "macify: preloaded shim=%p libc=%p libm=%p\n",
                     shim_h, libc_h, libm_h);
+    }
+
+    /* Pre-load macOS libncurses AFTER the shim is loaded.
+     * This ensures macOS libncurses's imports (fopen, fread, etc.) resolve
+     * to our shim's versions, enabling terminfo hex→char path translation. */
+    {
+        const char *mprefix = macify_get_prefix();
+        char ncurses_path[4096];
+        snprintf(ncurses_path, sizeof(ncurses_path),
+                 "%s/usr/local/opt/ncurses/lib/libncursesw.6.dylib", mprefix);
+        int rc = macho_load_dylib(ncurses_path);
+        if (g_verbose)
+            fprintf(stderr, "macify: pre-loaded macOS libncurses: %s (rc=%d)\n",
+                    ncurses_path, rc);
     }
 
     for (uint32_t i = 0; i < hdr->ncmds && lc + 8 <= lc_end; i++) {
@@ -532,16 +561,20 @@ int main(int argc, char **argv, char **envp) {
                  * main walk. Nothing to do here. */
                 extra1 = NULL;
             } else if (strstr(name, "libncurses")) {
+                /* macOS libncurses is loaded as a Mach-O dylib when the
+                 * @@HOMEBREW_PREFIX@@ path is used. This branch is only
+                 * reached for non-Homebrew libncurses paths (e.g., bare
+                 * "libncurses.dylib" without @rpath resolution).
+                 *
+                 * CRITICAL: Do NOT load Linux libtinfo as an extra handle.
+                 * If we do, tgetent/tgetstr/tputs resolve to Linux libtinfo
+                 * instead of macOS libncurses, causing a buffer overflow
+                 * in macOS libedit (readline) due to internal struct layout
+                 * differences. libtinfo is already preloaded via RTLD_GLOBAL
+                 * as a last-resort fallback. */
                 extra1 = dlopen("libncursesw.so.6", RTLD_NOW | RTLD_GLOBAL);
                 if (!extra1) extra1 = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
-                /* Also load libtinfo — termcap functions (tgetent, tgoto,
-                 * tputs, tgetstr, tgetflag, tgetnum) live in libtinfo on
-                 * Linux, not libncurses. Without this, readline's termcap
-                 * calls resolve to NULL and bash crashes in interactive mode. */
-                if (extra1) {
-                    void *tinfo = dlopen("libtinfo.so.6", RTLD_NOW | RTLD_GLOBAL);
-                    if (tinfo) register_extra_handle(tinfo);
-                }
+                /* Do NOT register libtinfo — see comment above. */
             } else if (strstr(name, "libz")) {
                 extra1 = dlopen("libz.so.1", RTLD_NOW | RTLD_GLOBAL);
             } else if (strstr(name, "libresolv")) {
@@ -1336,6 +1369,11 @@ int main(int argc, char **argv, char **envp) {
      * Linux binaries on the host. */
     setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin", 1);
     setenv("MACIFY_PATH_SET", "1", 1);
+
+    /* TERMCAP is now handled automatically by the fopen shim, which
+     * translates macOS-style hex terminfo paths (e.g., /usr/share/terminfo/76/vt100)
+     * to Linux-style char paths (e.g., /usr/share/terminfo/v/vt100).
+     * No need to set TERMCAP manually. */
 
     void *stack_base = NULL;
     size_t stack_size = 0;

@@ -1,4 +1,5 @@
 #include <string.h>
+#include <ctype.h>
 /* process.c — process management: fork, clone, wait4, pipe, read, write,
  * writev, readv, fopen */
 #include "io_internal.h"
@@ -38,13 +39,25 @@ pid_t macify_waitpid(pid_t pid, int *status, int options) {
     }
     static pid_t (*real_waitpid)(pid_t, int *, int) = NULL;
     if (!real_waitpid) real_waitpid = dlsym(RTLD_NEXT, "waitpid");
-    return real_waitpid ? real_waitpid(pid, status, options) : -1;
+    pid_t r = real_waitpid ? real_waitpid(pid, status, options) : -1;
+    if (getenv("MACIFY_TRACE_FORK")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: waitpid returned %d, status=%d\n",
+            r, status ? *status : -1);
+        (void)write(2, b, n);
+    }
+    return r;
 }
 
 pid_t macify_fork(void) __asm__("fork");
 pid_t macify_fork(void) {
     static pid_t (*real_fork)(void) = NULL;
     if (!real_fork) real_fork = dlsym(RTLD_NEXT, "fork");
+    if (getenv("MACIFY_TRACE_FORK")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: fork() called from pid=%d\n", getpid());
+        (void)write(2, b, n);
+    }
     pid_t r = real_fork ? real_fork() : -1;
     if (r == 0) {
         /* Child: set a 10-second alarm. If the child hangs in a
@@ -126,13 +139,36 @@ ssize_t macify_read(int fd, void *buf, size_t count) __asm__("read");
 ssize_t macify_read(int fd, void *buf, size_t count) {
     static ssize_t (*real_read)(int, void *, size_t) = NULL;
     if (!real_read) real_read = dlsym(RTLD_NEXT, "read");
-    ssize_t r = real_read(fd, buf, count);
-    if (getenv("MACIFY_TRACE_READ")) {
-        char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: read(%d, %zu) = %zd errno=%d\n",
-            fd, count, r, r < 0 ? errno : 0);
-        (void)write(2, b, n);
+
+    /* If reading from a TTY, block SIGCHLD during the read to prevent
+     * the readline crash. macOS libedit (readline) crashes when SIGCHLD
+     * is delivered during read() — the signal handler return corrupts
+     * the stack, causing a crash at &_terminating_signal. */
+    int is_tty = isatty(fd);
+    sigset_t old_mask, block_mask;
+    if (is_tty) {
+        sigemptyset(&block_mask);
+        sigaddset(&block_mask, 17);  /* Linux SIGCHLD */
+        pthread_sigmask(SIG_BLOCK, &block_mask, &old_mask);
+        /* Verify SIGCHLD is actually blocked */
+        sigset_t check;
+        pthread_sigmask(SIG_BLOCK, NULL, &check);
+        if (getenv("MACIFY_TRACE_TTY_READ")) {
+            int blocked = sigismember(&check, 17);
+            char b[128]; int n = snprintf(b, sizeof(b),
+                "TTY read(%d): SIGCHLD blocked=%d\n", fd, blocked);
+            (void)write(2, b, n);
+        }
     }
+
+    ssize_t r = real_read(fd, buf, count);
+
+    if (is_tty) {
+        pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+        /* If SIGCHLD was pending, it will be delivered now — AFTER read()
+         * returns, not during it. This prevents the readline crash. */
+    }
+
     return r;
 }
 
@@ -170,6 +206,13 @@ FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = dlsym(RTLD_NEXT, "fopen");
+    /* Unconditional trace — first line of function */
+    if (path) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "FOPEN: \"%s\" mode=\"%s\" from %p\n",
+            path, mode ? mode : "(null)", __builtin_return_address(0));
+        (void)write(2, b, n);
+    }
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -177,6 +220,41 @@ FILE *macify_fopen(const char *path, const char *mode) {
         if (macify_should_hide_path(path)) { errno = ENOENT; return NULL; }
         extern int macify_translate_path(const char *, char *, size_t);
         if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
+
+        /* macOS libncurses terminfo path translation.
+         * macOS uses hex directory names: /usr/share/terminfo/76/vt100
+         * (where 0x76 = 'v'). Linux uses char names: /usr/share/terminfo/v/
+         * If the fopen fails and the path looks like a terminfo hex path,
+         * retry with the char-directory version. */
+        if (!real_fopen(eff, mode)) {
+            /* Check if path matches /usr/share/terminfo/XX/name or
+             * /lib/terminfo/XX/name pattern (XX = 2 hex digits) */
+            const char *p = eff;
+            const char *terminfo = NULL;
+            if ((terminfo = strstr(p, "/terminfo/")) != NULL) {
+                const char *hex_start = terminfo + 10;  /* after "/terminfo/" */
+                if (hex_start[0] && hex_start[1] == '/' &&
+                    isxdigit((unsigned char)hex_start[0])) {
+                    /* It's a hex directory — translate to char */
+                    char alt_path[4096];
+                    char dir = (char)strtol(hex_start, NULL, 16);
+                    if (dir >= 'a' && dir <= 'z') {
+                        snprintf(alt_path, sizeof(alt_path), "%.*s%c%s",
+                                 (int)(hex_start - p), p, dir, hex_start + 2);
+                        FILE *fp2 = real_fopen(alt_path, mode);
+                        if (fp2) {
+                            if (getenv("MACIFY_TRACE_OPEN")) {
+                                char b[512]; int n = snprintf(b, sizeof(b),
+                                    "macify: fopen terminfo hex->char: %s -> %s = %p\n",
+                                    path, alt_path, (void*)fp2);
+                                (void)write(2, b, n);
+                            }
+                            return fp2;
+                        }
+                    }
+                }
+            }
+        }
     }
     FILE *fp = real_fopen(eff, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {

@@ -31,6 +31,12 @@ void linux_to_macos_sigset(const sigset_t *linux_set, void *macos_set);
 /* atfork support */
 int is_forked_child(void);
 
+/* SIGCHLD wrapper — defers signal during terminal reads to prevent
+ * readline crash. */
+extern void (*macify_saved_sigchld_handler)(int, siginfo_t *, void *);
+extern volatile int macify_in_terminal_read;
+void macify_sigchld_wrapper(int sig, siginfo_t *info, void *uctx);
+
 /* Function declarations for macify_get_shim_symbol */
 sighandler_t macify_signal(int signum, sighandler_t handler) __asm__("signal");
 int macify_sigaltstack(const void *ss, void *oss) __asm__("sigaltstack");

@@ -156,7 +156,10 @@ static void macify_init_stdio(void) {
     ss.ss_flags = 0;
     syscall(131, &ss, NULL);  /* sigaltstack */
 
-    /* Install crash handler via raw rt_sigaction syscall */
+    /* Install crash handler via raw rt_sigaction syscall.
+     * Do NOT use SA_ONSTACK — it causes SI_KERNEL SIGSEGV after fork
+     * because the signal stack state is corrupted during fork.
+     * Without SA_ONSTACK, the crash handler runs on the regular stack. */
     struct k_sigaction {
         void (*handler)(int, siginfo_t *, void *);
         unsigned long flags;
@@ -166,7 +169,7 @@ static void macify_init_stdio(void) {
     struct k_sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.handler = macify_crash_handler;
-    sa.flags = 0x0C000004;  /* SA_SIGINFO(0x4) | SA_ONSTACK(0x08000000) | SA_RESTORER(0x04000000) */
+    sa.flags = 0x04000004;  /* SA_SIGINFO(0x4) | SA_RESTORER(0x04000000) — NO SA_ONSTACK */
     sa.restorer = macify_sa_restorer ? macify_sa_restorer : macify_restore_rt;
     memset(sa.mask, 0xff, sizeof(sa.mask));
     long r;
@@ -180,4 +183,56 @@ static void macify_init_stdio(void) {
     if (r) { char b[64]; int n=snprintf(b,sizeof(b),"sigaction SIGFPE failed: %ld\n",r); write(2,b,n); }
 
     atfork_child_exit();
+}
+
+/* ── SIGCHLD wrapper ────────────────────────────────────────────
+ * macOS libedit (readline) crashes when SIGCHLD is delivered during
+ * a terminal read(). The signal handler return (sigreturn) corrupts
+ * the stack, causing a crash at &_terminating_signal on the next
+ * readline call.
+ *
+ * Fix: install a wrapper for SIGCHLD that defers the signal if we're
+ * inside a terminal read. The macify_in_terminal_read flag is set by
+ * our read() shim when reading from a TTY. When the flag is set, the
+ * wrapper adds SIGCHLD to a pending mask and returns immediately
+ * (via sigreturn). After read() returns, our shim delivers the
+ * pending signal by calling the original handler directly. */
+
+void (*macify_saved_sigchld_handler)(int, siginfo_t *, void *) = NULL;
+volatile int macify_in_terminal_read = 0;
+static volatile int macify_sigchld_pending = 0;
+
+void macify_sigchld_wrapper(int sig, siginfo_t *info, void *uctx) {
+    if (getenv("MACIFY_TRACE_SIGNAL")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: SIGCHLD wrapper called, in_terminal_read=%d\n",
+            macify_in_terminal_read);
+        (void)write(2, b, n);
+    }
+    if (macify_in_terminal_read) {
+        /* Defer the signal — set pending flag and return. */
+        macify_sigchld_pending = 1;
+        return;
+    }
+    /* Not in terminal read — call the original handler */
+    if (macify_saved_sigchld_handler) {
+        macify_saved_sigchld_handler(sig, info, uctx);
+    }
+}
+
+/* Called by our read() shim after a terminal read completes.
+ * If SIGCHLD was deferred during the read, deliver it now by
+ * calling the handler directly. */
+void macify_deliver_pending_sigchld(void) {
+    if (macify_sigchld_pending) {
+        macify_sigchld_pending = 0;
+        if (macify_saved_sigchld_handler) {
+            /* Call the handler with a minimal siginfo */
+            siginfo_t si;
+            memset(&si, 0, sizeof(si));
+            si.si_signo = 17;  /* Linux SIGCHLD */
+            si.si_code = SI_USER;
+            macify_saved_sigchld_handler(17, &si, NULL);
+        }
+    }
 }

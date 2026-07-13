@@ -1029,11 +1029,30 @@ long macify_sysconf(int name) {
 }
 
 /* ── termios: tcgetattr / tcsetattr ────────────────────────────
- * macOS and Linux have DIFFERENT struct termios layouts:
+ * macOS and Linux have DIFFERENT struct termios layouts AND different
+ * flag bit values. Without translating BOTH the struct layout AND the
+ * individual flag bits, bash's readline ends up in a broken half-raw
+ * mode where pressing ENTER echoes "^M" instead of submitting the line.
+ *
+ * Struct layout:
  *   macOS: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[20] c_ispeed(4) c_ospeed(4) = 60 bytes
- *   Linux: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[19] c_line(1) = 36 bytes
- * Without translation, bash's readline reads garbage terminal settings
- * and crashes when entering interactive mode. */
+ *   Linux: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[19] c_line(1) c_ispeed(4) c_ospeed(4) = 44 bytes
+ *
+ * Flag bits — CRITICAL differences (sample):
+ *   macOS ICANON=0x100, Linux ICANON=0x002      (canonical mode)
+ *   macOS ISIG  =0x080, Linux ISIG  =0x001      (signal handling)
+ *   macOS IXON  =0x200, Linux IXON  =0x400      (XON/XOFF flow control)
+ *   macOS ECHOCTL=0x40, Linux ECHOCTL=0x200     (echo control chars as ^X)
+ *
+ * c_cc indices — also totally different:
+ *   macOS VINTR=6,  Linux VINTR=0
+ *   macOS VQUIT=7,  Linux VQUIT=1
+ *   macOS VERASE=3, Linux VERASE=2
+ *   macOS VMIN=14,  Linux VMIN=6
+ *   macOS VTIME=15, Linux VTIME=5
+ *
+ * If we don't translate these, bash's readline manipulates the wrong
+ * bits and the terminal ends up in a broken state. */
 
 struct macos_termios {
     unsigned int  c_iflag;    /* 0  */
@@ -1046,6 +1065,251 @@ struct macos_termios {
     /* padding to 60 bytes */
 };
 
+/* ── c_iflag bit translation ──
+ * macOS and Linux share the low 9 bits (IGNBRK..ICRNL), then diverge:
+ *   macOS IXON  =0x200 → Linux IXON  =0x400
+ *   macOS IXOFF =0x400 → Linux IXOFF =0x1000
+ *   (macOS has no IUCLC, Linux IUCLC=0x200 — not used by macOS apps)
+ * Bits 0x800 (IXANY), 0x2000 (IMAXBEL), 0x4000 (IUTF8) match. */
+static unsigned int iflag_linux_to_mac(unsigned int lf) {
+    unsigned int mf = lf & ~(0x400 | 0x1000);  /* clear IXON, IXOFF */
+    if (lf & 0x400)  mf |= 0x200;              /* Linux IXON  → macOS IXON  */
+    if (lf & 0x1000) mf |= 0x400;              /* Linux IXOFF → macOS IXOFF */
+    return mf;
+}
+static unsigned int iflag_mac_to_linux(unsigned int mf) {
+    unsigned int lf = mf & ~(0x200 | 0x400);   /* clear macOS IXON, IXOFF */
+    if (mf & 0x200) lf |= 0x400;               /* macOS IXON  → Linux IXON  */
+    if (mf & 0x400) lf |= 0x1000;              /* macOS IXOFF → Linux IXOFF */
+    return lf;
+}
+
+/* ── c_oflag bit translation ──
+ * Bits 0x1 (OPOST) and 0x2 (ONLCR) match. Beyond that they diverge:
+ *   macOS OXTABS=0x004 (no exact Linux equiv; Linux uses TABDLY=0x1800, TAB3=0x1800)
+ *   macOS ONOEOT=0x008 (no Linux equiv)
+ *   macOS OCRNL =0x010 ↔ Linux OCRNL =0x004
+ *   macOS ONOCR =0x020 ↔ Linux ONOCR =0x008
+ *   macOS ONLRET=0x040 ↔ Linux ONLRET=0x010
+ *   macOS OFILL =0x080 ↔ Linux OFILL =0x040
+ *   macOS OFDEL =0x100 ↔ Linux OFDEL =0x080
+ * For output flags, mismatched bits mainly affect CR/NL handling on output.
+ * We translate the well-known ones; OXTABS/ONOEOT are dropped (rarely used). */
+static unsigned int oflag_linux_to_mac(unsigned int lf) {
+    unsigned int mf = lf & 0x3;  /* keep OPOST|ONLCR */
+    if (lf & 0x004) mf |= 0x010;  /* OCRNL */
+    if (lf & 0x008) mf |= 0x020;  /* ONOCR */
+    if (lf & 0x010) mf |= 0x040;  /* ONLRET */
+    if (lf & 0x040) mf |= 0x080;  /* OFILL */
+    if (lf & 0x080) mf |= 0x100;  /* OFDEL */
+    return mf;
+}
+static unsigned int oflag_mac_to_linux(unsigned int mf) {
+    unsigned int lf = mf & 0x3;  /* keep OPOST|ONLCR */
+    if (mf & 0x010) lf |= 0x004;  /* OCRNL */
+    if (mf & 0x020) lf |= 0x008;  /* ONOCR */
+    if (mf & 0x040) lf |= 0x010;  /* ONLRET */
+    if (mf & 0x080) lf |= 0x040;  /* OFILL */
+    if (mf & 0x100) lf |= 0x080;  /* OFDEL */
+    /* OXTABS (0x4) and ONOEOT (0x8) have no direct Linux equivalent — dropped */
+    return lf;
+}
+
+/* ── c_cflag bit translation ──
+ * CSIZE mask: macOS 0x300 ↔ Linux 0x030 (with shifted CS5/CS6/CS7/CS8)
+ * CSTOPB:     macOS 0x400  ↔ Linux 0x040
+ * CREAD:      macOS 0x800  ↔ Linux 0x080
+ * PARENB:     macOS 0x1000 ↔ Linux 0x100
+ * PARODD:     macOS 0x2000 ↔ Linux 0x200
+ * HUPCL:      macOS 0x4000 ↔ Linux 0x400
+ * CLOCAL:     macOS 0x8000 ↔ Linux 0x800
+ * macOS CIGNORE (0x1) has no Linux equivalent — dropped. */
+static unsigned int cflag_linux_to_mac(unsigned int lf) {
+    unsigned int mf = 0;
+    /* CSIZE translation: Linux values 0/0x10/0x20/0x30 → macOS 0/0x100/0x200/0x300 */
+    switch (lf & 0x30) {
+        case 0x00: mf |= 0x000; break;  /* CS5 */
+        case 0x10: mf |= 0x100; break;  /* CS6 */
+        case 0x20: mf |= 0x200; break;  /* CS7 */
+        case 0x30: mf |= 0x300; break;  /* CS8 */
+    }
+    if (lf & 0x040) mf |= 0x400;    /* CSTOPB */
+    if (lf & 0x080) mf |= 0x800;    /* CREAD  */
+    if (lf & 0x100) mf |= 0x1000;   /* PARENB */
+    if (lf & 0x200) mf |= 0x2000;   /* PARODD */
+    if (lf & 0x400) mf |= 0x4000;   /* HUPCL  */
+    if (lf & 0x800) mf |= 0x8000;   /* CLOCAL */
+    return mf;
+}
+static unsigned int cflag_mac_to_linux(unsigned int mf) {
+    unsigned int lf = 0;
+    switch (mf & 0x300) {
+        case 0x000: lf |= 0x00; break;  /* CS5 */
+        case 0x100: lf |= 0x10; break;  /* CS6 */
+        case 0x200: lf |= 0x20; break;  /* CS7 */
+        case 0x300: lf |= 0x30; break;  /* CS8 */
+    }
+    if (mf & 0x400)  lf |= 0x040;   /* CSTOPB */
+    if (mf & 0x800)  lf |= 0x080;   /* CREAD  */
+    if (mf & 0x1000) lf |= 0x100;   /* PARENB */
+    if (mf & 0x2000) lf |= 0x200;   /* PARODD */
+    if (mf & 0x4000) lf |= 0x400;   /* HUPCL  */
+    if (mf & 0x8000) lf |= 0x800;   /* CLOCAL */
+    return lf;
+}
+
+/* ── c_lflag bit translation ──
+ * Almost every bit is in a different position. The single matching bit
+ * is ECHO (0x08) on both systems. All others need explicit translation.
+ *
+ *   macOS bit   Linux bit   Flag
+ *   0x001       0x800       ECHOKE
+ *   0x002       0x010       ECHOE
+ *   0x004       0x020       ECHOK
+ *   0x008       0x008       ECHO     (same)
+ *   0x010       0x040       ECHONL
+ *   0x020       0x400       ECHOPRT
+ *   0x040       0x200       ECHOCTL
+ *   0x080       0x001       ISIG
+ *   0x100       0x002       ICANON
+ *   0x200       —           ALTWERASE (macOS only, dropped)
+ *   0x400       0x8000      IEXTEN
+ *   0x800       0x10000     EXTPROC
+ *   0x400000    0x100       TOSTOP
+ *   0x800000    0x1000      FLUSHO
+ *   0x4000000   0x4000      PENDIN
+ *   0x80000000  0x80        NOFLSH
+ */
+static unsigned int lflag_linux_to_mac(unsigned int lf) {
+    unsigned int mf = 0;
+    if (lf & 0x800)  mf |= 0x001;       /* ECHOKE */
+    if (lf & 0x010)  mf |= 0x002;       /* ECHOE  */
+    if (lf & 0x020)  mf |= 0x004;       /* ECHOK  */
+    if (lf & 0x008)  mf |= 0x008;       /* ECHO   */
+    if (lf & 0x040)  mf |= 0x010;       /* ECHONL */
+    if (lf & 0x400)  mf |= 0x020;       /* ECHOPRT */
+    if (lf & 0x200)  mf |= 0x040;       /* ECHOCTL */
+    if (lf & 0x001)  mf |= 0x080;       /* ISIG   */
+    if (lf & 0x002)  mf |= 0x100;       /* ICANON */
+    if (lf & 0x8000) mf |= 0x400;       /* IEXTEN */
+    if (lf & 0x10000) mf |= 0x800;      /* EXTPROC */
+    if (lf & 0x100)  mf |= 0x400000;    /* TOSTOP */
+    if (lf & 0x1000) mf |= 0x800000;    /* FLUSHO */
+    if (lf & 0x4000) mf |= 0x4000000;   /* PENDIN */
+    if (lf & 0x80)   mf |= 0x80000000;  /* NOFLSH */
+    return mf;
+}
+static unsigned int lflag_mac_to_linux(unsigned int mf) {
+    unsigned int lf = 0;
+    if (mf & 0x001) lf |= 0x800;       /* ECHOKE */
+    if (mf & 0x002) lf |= 0x010;       /* ECHOE  */
+    if (mf & 0x004) lf |= 0x020;       /* ECHOK  */
+    if (mf & 0x008) lf |= 0x008;       /* ECHO   */
+    if (mf & 0x010) lf |= 0x040;       /* ECHONL */
+    if (mf & 0x020) lf |= 0x400;       /* ECHOPRT */
+    if (mf & 0x040) lf |= 0x200;       /* ECHOCTL */
+    if (mf & 0x080) lf |= 0x001;       /* ISIG   */
+    if (mf & 0x100) lf |= 0x002;       /* ICANON */
+    if (mf & 0x400) lf |= 0x8000;      /* IEXTEN */
+    if (mf & 0x800) lf |= 0x10000;     /* EXTPROC */
+    if (mf & 0x400000) lf |= 0x100;    /* TOSTOP */
+    if (mf & 0x800000) lf |= 0x1000;   /* FLUSHO */
+    if (mf & 0x4000000) lf |= 0x4000;  /* PENDIN */
+    if (mf & 0x80000000) lf |= 0x80;   /* NOFLSH */
+    /* macOS ALTWERASE (0x200), NOKERNINFO (0x2000000) — no Linux equivalent, dropped */
+    return lf;
+}
+
+/* ── c_cc index translation ──
+ * Each control-character slot has a different index in the c_cc[] array.
+ * We translate by *symbolic name*, not by raw index. Entries that exist
+ * on only one side are silently dropped.
+ *
+ *   macOS idx → Linux idx   Symbol
+ *   0  → 4                  VEOF
+ *   1  → 11                 VEOL
+ *   2  → 16                 VEOL2
+ *   3  → 2                  VERASE
+ *   4  → 14                 VWERASE
+ *   5  → 12                 VREPRINT
+ *   6  → 0                  VINTR
+ *   7  → 1                  VQUIT
+ *   8  → 10                 VSUSP
+ *   10 → 8                  VSTART
+ *   11 → 9                  VSTOP
+ *   12 → 15                 VLNEXT
+ *   13 → 13                 VDISCARD  (same index)
+ *   14 → 6                  VMIN
+ *   15 → 5                  VTIME
+ *   (9 VDSUSP, 16 VSTATUS, 17 VERASE2 — macOS only, dropped)
+ */
+static void c_cc_linux_to_mac(const unsigned char lc[19], unsigned char mc[20]) {
+    memset(mc, 0, 20);
+    mc[0]  = lc[4];    /* VEOF   */
+    mc[1]  = lc[11];   /* VEOL   */
+    mc[2]  = lc[16];   /* VEOL2  */
+    mc[3]  = lc[2];    /* VERASE */
+    mc[4]  = lc[14];   /* VWERASE */
+    mc[5]  = lc[12];   /* VREPRINT */
+    mc[6]  = lc[0];    /* VINTR  */
+    mc[7]  = lc[1];    /* VQUIT  */
+    mc[8]  = lc[10];   /* VSUSP  */
+    mc[10] = lc[8];    /* VSTART */
+    mc[11] = lc[9];    /* VSTOP  */
+    mc[12] = lc[15];   /* VLNEXT */
+    mc[13] = lc[13];   /* VDISCARD */
+    mc[14] = lc[6];    /* VMIN   */
+    mc[15] = lc[5];    /* VTIME  */
+    /* mc[9] (VDSUSP), mc[16] (VSTATUS), mc[17] (VERASE2) — no Linux equiv, left 0 */
+    /* mc[18], mc[19] — reserved, left 0 */
+}
+static void c_cc_mac_to_linux(const unsigned char mc[20], unsigned char lc[19]) {
+    memset(lc, 0, 19);
+    lc[4]  = mc[0];    /* VEOF   */
+    lc[11] = mc[1];    /* VEOL   */
+    lc[16] = mc[2];    /* VEOL2  */
+    lc[2]  = mc[3];    /* VERASE */
+    lc[14] = mc[4];    /* VWERASE */
+    lc[12] = mc[5];    /* VREPRINT */
+    lc[0]  = mc[6];    /* VINTR  */
+    lc[1]  = mc[7];    /* VQUIT  */
+    lc[10] = mc[8];    /* VSUSP  */
+    lc[8]  = mc[10];   /* VSTART */
+    lc[9]  = mc[11];   /* VSTOP  */
+    lc[15] = mc[12];   /* VLNEXT */
+    lc[13] = mc[13];   /* VDISCARD */
+    lc[6]  = mc[14];   /* VMIN   */
+    lc[5]  = mc[15];   /* VTIME  */
+    /* lc[3] (VKILL), lc[7] (VSWTC), lc[17] (VPOLL) — no macOS equiv, left 0 */
+    /* lc[18] — reserved, left 0 */
+}
+
+/* ── speed_t translation ──
+ * For the legacy speeds B0..B38400 (values 0..15), macOS and Linux use
+ * identical numeric constants, so no translation is needed for them.
+ * For the high speeds (B57600, B115200, etc.) the encodings differ:
+ *   macOS B57600=16, Linux B57600=0x1001
+ *   macOS B115200=18, Linux B115200=0x1002
+ * We translate the common high speeds explicitly. */
+static unsigned int speed_linux_to_mac(unsigned int ls) {
+    switch (ls) {
+        case 0x1001: return 16;   /* B57600   */
+        case 0x1002: return 18;   /* B115200  */
+        case 0x1003: return 19;   /* B230400  */
+        /* Less common high speeds — best-effort pass-through */
+        default: return ls & 0xFFFF;
+    }
+}
+static unsigned int speed_mac_to_linux(unsigned int ms) {
+    switch (ms) {
+        case 16: return 0x1001;   /* B57600   */
+        case 17: return 0x1003;   /* B76800 — no exact Linux equiv, map to B230400 */
+        case 18: return 0x1002;   /* B115200  */
+        case 19: return 0x1003;   /* B230400  */
+        default: return ms & 0xFFFF;
+    }
+}
+
 int macify_tcgetattr(int fd, struct macos_termios *termios_p) __asm__("tcgetattr");
 int macify_tcgetattr(int fd, struct macos_termios *termios_p) {
     static int (*real_tcgetattr)(int, struct termios *) = NULL;
@@ -1055,15 +1319,22 @@ int macify_tcgetattr(int fd, struct macos_termios *termios_p) {
     int ret = real_tcgetattr(fd, &lt);
     if (ret == 0 && termios_p) {
         memset(termios_p, 0, sizeof(*termios_p));
-        termios_p->c_iflag = lt.c_iflag;
-        termios_p->c_oflag = lt.c_oflag;
-        termios_p->c_cflag = lt.c_cflag;
-        termios_p->c_lflag = lt.c_lflag;
-        /* Copy c_cc: macOS has 20 entries, Linux has 19 + c_line */
-        memcpy(termios_p->c_cc, lt.c_cc, 19);
-        termios_p->c_cc[19] = lt.c_line;  /* Linux c_line → macOS c_cc[19] */
-        termios_p->c_ispeed = cfgetispeed(&lt);
-        termios_p->c_ospeed = cfgetospeed(&lt);
+        termios_p->c_iflag = iflag_linux_to_mac(lt.c_iflag);
+        termios_p->c_oflag = oflag_linux_to_mac(lt.c_oflag);
+        termios_p->c_cflag = cflag_linux_to_mac(lt.c_cflag);
+        termios_p->c_lflag = lflag_linux_to_mac(lt.c_lflag);
+        c_cc_linux_to_mac(lt.c_cc, termios_p->c_cc);
+        termios_p->c_ispeed = speed_linux_to_mac(cfgetispeed(&lt));
+        termios_p->c_ospeed = speed_linux_to_mac(cfgetospeed(&lt));
+    }
+    if (getenv("MACIFY_TRACE_TERMIOS")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: tcgetattr(fd=%d) iflag=0x%x oflag=0x%x cflag=0x%x lflag=0x%x\n",
+            fd, termios_p ? termios_p->c_iflag : 0,
+            termios_p ? termios_p->c_oflag : 0,
+            termios_p ? termios_p->c_cflag : 0,
+            termios_p ? termios_p->c_lflag : 0);
+        (void)write(2, b, n);
     }
     return ret;
 }
@@ -1075,13 +1346,38 @@ int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *t
     if (!real_tcsetattr || !termios_p) return -1;
     struct termios lt;
     memset(&lt, 0, sizeof(lt));
-    lt.c_iflag = termios_p->c_iflag;
-    lt.c_oflag = termios_p->c_oflag;
-    lt.c_cflag = termios_p->c_cflag;
-    lt.c_lflag = termios_p->c_lflag;
-    memcpy(lt.c_cc, termios_p->c_cc, 19);
-    lt.c_line = termios_p->c_cc[19];  /* macOS c_cc[19] → Linux c_line */
+    lt.c_iflag = iflag_mac_to_linux(termios_p->c_iflag);
+    lt.c_oflag = oflag_mac_to_linux(termios_p->c_oflag);
+    lt.c_cflag = cflag_mac_to_linux(termios_p->c_cflag);
+    lt.c_lflag = lflag_mac_to_linux(termios_p->c_lflag);
+    c_cc_mac_to_linux(termios_p->c_cc, lt.c_cc);
+    /* macOS-compatibility quirk: macOS libedit (used by bash's readline)
+     * clears ICRNL but leaves ICANON on, expecting the BSD line discipline
+     * to still treat \r as a line terminator. On Linux, \r is NOT a line
+     * terminator in canonical mode — only \n and c_cc[VEOL] are.
+     *
+     * Fix: ALWAYS force ICRNL on so \r is translated to \n on input. */
+    lt.c_iflag |= 0x100;  /* FORCE ICRNL on */
+    if ((lt.c_lflag & 0x002) && !(lt.c_iflag & 0x100)) {
+        lt.c_cc[11] = '\r';  /* VEOL = CR (safety net) */
+    }
+    /* Translate speeds via cfsetispeed/cfsetospeed so the kernel sees
+     * the proper CBAUD bits in c_cflag as well as the c_ispeed/c_ospeed
+     * fields used by glibc. */
+    cfsetispeed(&lt, speed_mac_to_linux(termios_p->c_ispeed));
+    cfsetospeed(&lt, speed_mac_to_linux(termios_p->c_ospeed));
     /* Translate macOS optional_actions to Linux:
      *   TCSANOW=0, TCSADRAIN=1, TCSAFLUSH=2 (same on both) */
+    if (getenv("MACIFY_TRACE_TERMIOS")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: tcsetattr(fd=%d, act=%d) mac[iflag=0x%x oflag=0x%x cflag=0x%x lflag=0x%x] "
+            "-> linux[iflag=0x%x oflag=0x%x cflag=0x%x lflag=0x%x] "
+            "cc[VEOF=%d VMIN=%d VTIME=%d VERASE=%d VINTR=%d VQUIT=%d VEOL=%d]\n",
+            fd, optional_actions,
+            termios_p->c_iflag, termios_p->c_oflag, termios_p->c_cflag, termios_p->c_lflag,
+            lt.c_iflag, lt.c_oflag, lt.c_cflag, lt.c_lflag,
+            lt.c_cc[4], lt.c_cc[6], lt.c_cc[5], lt.c_cc[2], lt.c_cc[0], lt.c_cc[1], lt.c_cc[11]);
+        (void)write(2, b, n);
+    }
     return real_tcsetattr(fd, optional_actions, &lt);
 }

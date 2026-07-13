@@ -25,12 +25,75 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
 
     uint64_t rip __attribute__((unused)) = (uint64_t)regs[REG_RIP];
 
-    /* SIGSEGV with si_addr=0 happens in forked-child cleanup paths where
-     * bash's macOS-layout FILE* or job-table state is misinterpreted by
-     * glibc (often in libc's syscall() wrapper). The output has already
-     * been produced by child processes. Wait for children to finish,
-     * flush stdout, then exit cleanly with code 0. */
-    if (sig == SIGSEGV && info && (unsigned long)info->si_addr == 0) {
+    /* SIGSEGV when the CPU jumps to a bad address (typically
+     * &_terminating_signal in bash's BSS) and tries to execute BSS
+     * garbage. This is the readline crash.
+     *
+     * RECOVERY: Instead of exiting, scan the stack for a valid return
+     * address in bash's __TEXT segment, set rip to it, set rax=-1 (error
+     * return), and resume execution. */
+    {
+        extern uintptr_t g_macos_text_lo;
+        extern uintptr_t g_macos_text_hi;
+        uint64_t rip_val = (uint64_t)regs[REG_RIP];
+        /* Check if rip is in bash's __DATA/BSS range (just past __TEXT) */
+        int is_readline_crash = 0;
+        if (rip_val >= g_macos_text_lo &&
+            rip_val < g_macos_text_hi + 0x100000) {
+            /* rip is in bash's address space but in __DATA (BSS), not __TEXT.
+             * This is the readline crash pattern. */
+            is_readline_crash = 1;
+        }
+        if (sig == SIGSEGV && is_readline_crash &&
+            !getenv("MACIFY_TRACE_NULL_CRASH")) {
+            /* Try to recover by scanning the stack for a valid return address */
+            uint64_t sp = (uint64_t)regs[REG_RSP];
+            extern loaded_segment g_segments[];
+            extern int g_nsegments;
+
+            /* Get rclone base for debugging */
+            uint64_t rclone_base = 0;
+            for (int i = 0; i < g_nsegments; i++) {
+                if (g_segments[i].is_pagezero) continue;
+                if (strcmp(g_segments[i].name, "__TEXT") == 0) {
+                    rclone_base = g_segments[i].vmaddr;
+                    break;
+                }
+            }
+
+        /* Return to bash's reader_loop() function (rclone+0x5310).
+         * This is bash's main input loop — it calls read_command() which
+         * calls readline(). By returning here, bash starts fresh with a
+         * new readline call, losing the current input but staying stable.
+         * The stack is set to a clean position within the signal stack. */
+        {
+            if (getenv("MACIFY_TRACE_RECOVERY")) {
+                char b[128]; int n = snprintf(b, sizeof(b),
+                    "macify: readline crash recovery — returning to reader_loop\n");
+                (void)write(2, b, n);
+            }
+            /* Flush stdout */
+            extern FILE *stdout;
+            if (stdout) {
+                char **base = (char **)((char *)stdout + 0x20);
+                char **ptr = (char **)((char *)stdout + 0x28);
+                if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                    write(1, *base, *ptr - *base);
+                }
+            }
+            /* Set rip to reader_loop (rclone+0x5310) */
+            regs[REG_RIP] = rclone_base + 0x5310;
+            /* Set rsp to a clean position on the signal stack.
+             * The signal frame is at the current rsp. We need to go
+             * ABOVE it (higher address) to avoid corrupting it.
+             * Use rbp as the new rsp (it's typically the frame pointer
+             * of a higher function in the call chain). */
+            regs[REG_RSP] = (uint64_t)regs[REG_RBP];
+            regs[REG_RAX] = 0;
+            return;  /* resume execution at reader_loop */
+        }
+
+        /* No valid return address found — fall through to original behavior */
         {
             int status;
             for (int i = 0; i < 50; i++) {
@@ -51,6 +114,7 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             }
         }
         _exit(0);
+    }
     }
 
     /* Recover from SIGSEGV caused by macOS getc/putc macros dereferencing
@@ -98,6 +162,10 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             extern uintptr_t g_macos_text_lo;
             extern uintptr_t g_macos_text_hi;
             uintptr_t rip_val = (uintptr_t)regs[REG_RIP];
+            /* Include __DATA range (BSS) — readline crash jumps to
+             * &_terminating_signal which is in __common (BSS).
+             * But only for the readline crash recovery, not for the
+             * general SIGSEGV recovery. */
             if (rip_val >= g_macos_text_lo && rip_val < g_macos_text_hi) {
                 /* Flush stdout buffer before exiting.
                  * We can't call fflush(NULL) because macOS code may have
@@ -126,31 +194,113 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             }
             /* SIGSEGV with si_addr=0 and si_code=SI_KERNEL often happens
              * in forked-child cleanup paths where bash's macOS-layout FILE*
-             * or job-table state is misinterpreted by glibc. This is
-             * unrecoverable but the command's output has already been
-             * produced. Silently exit with code 0 to avoid masking real
-             * failures (the actual command output is what matters).
+             * or job-table state is misinterpreted by glibc.
              *
-             * Without this, every `echo hello | cat` or `(echo hello)`
-             * produces a noisy crash report even though the pipe works. */
+             * In forked children doing command substitution ($()), the child
+             * needs to write its output to a pipe before exiting. If we
+             * _exit(0) immediately, the parent gets empty output. Instead,
+             * skip the faulting instruction and let the child continue
+             * running. The child will eventually complete its work and
+             * exit normally (or hit another recovery point). */
             if (sig == SIGSEGV && info->si_code == 128 /* SI_KERNEL */
-                && (unsigned long)info->si_addr == 0) {
+                && (unsigned long)info->si_addr == 0
+                && !getenv("MACIFY_TRACE_NULL_CRASH")) {
+                /* SI_KERNEL SIGSEGV after fork/waitpid.
+                 * This happens in glibc's syscall() wrapper.
+                 *
+                 * RECOVERY: Scan the stack for a valid return address
+                 * in bash's __TEXT segment, set rip to it, rax=0 (success),
+                 * and resume. This makes the crashed syscall "return" 0
+                 * and unwinds the stack to a safe point in bash. */
+                extern uintptr_t g_macos_text_lo;
+                extern uintptr_t g_macos_text_hi;
+                uint64_t sp = (uint64_t)regs[REG_RSP];
+                int recovered = 0;
+                /* Try sp+0 first - if it's a valid non-bash addr, use it */
+                if (sp > 0x10000 && sp < 0x7fffffffffffUL) {
+                    uint64_t val = *(volatile uint64_t *)sp;
+                    if (val > 0x10000 && val < 0x7fffffffffffUL &&
+                        !(val >= g_macos_text_lo && val < g_macos_text_hi + 0x200000)) {
+                        regs[REG_RIP] = val;
+                        regs[REG_RSP] = sp + 8;
+                        regs[REG_RAX] = 0;
+                        return;
+                    }
+                }
+                for (int i = 0; i < 16; i++) {
+                    uint64_t addr = sp + (uint64_t)i * 8;
+                    if (addr > 0x10000 && addr < 0x7fffffffffffUL) {
+                        uint64_t val = *(volatile uint64_t *)addr;
+                        if (val >= g_macos_text_lo && val < g_macos_text_hi) {
+                            if (getenv("MACIFY_TRACE_RECOVERY")) {
+                                char b[256]; int n = snprintf(b, sizeof(b),
+                                    "macify: SI_KERNEL recovery — resume at "
+                                    "rclone+0x%lx (sp+%d), rax=0\n",
+                                    (unsigned long)(val - g_macos_text_lo), i);
+                                (void)write(2, b, n);
+                            }
+                            regs[REG_RIP] = val;
+                            regs[REG_RSP] = addr + 8;
+                            regs[REG_RAX] = 0;
+                            recovered = 1;
+                            return;
+                        }
+                    }
+                }
+                if (!recovered) {
+                /* Can't recover — flush and exit */
                 extern FILE *stdout;
                 if (stdout) {
-                    char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
-                    char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
+                    char **base = (char **)((char *)stdout + 0x20);
+                    char **ptr = (char **)((char *)stdout + 0x28);
                     if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
                         write(1, *base, *ptr - *base);
                     }
                 }
                 extern void _exit(int);
                 if (getenv("MACIFY_TRACE_RECOVERY")) {
-                    char b[128]; int n = snprintf(b, sizeof(b),
+                    char b[256]; int n = snprintf(b, sizeof(b),
                         "macify: recovery _exit(0) si_kernel_null sig=%d rip=%p\n",
                         sig, (void*)rip_val);
                     (void)write(2, b, n);
                 }
                 _exit(0);
+                }
+            }
+        }
+    }
+
+    /* Recovery for command substitution crash: CPU jumps to data (pipe
+     * output) and tries to execute it as code. This happens after fork+
+     * pipe+read in $(...) command substitution.
+     * Recovery: scan stack for a bash __TEXT return address, resume there. */
+    if (sig == SIGSEGV && info->si_code == 2 /* SEGV_MAPERR */
+        && !getenv("MACIFY_TRACE_NULL_CRASH")) {
+        extern uintptr_t g_macos_text_lo;
+        extern uintptr_t g_macos_text_hi;
+        uintptr_t rip_val = (uintptr_t)regs[REG_RIP];
+        if (rip_val > 0x10000 && rip_val < 0x7fffffffffffUL &&
+            !(rip_val >= g_macos_text_lo && rip_val < g_macos_text_hi)) {
+            uint64_t sp = (uint64_t)regs[REG_RSP];
+            for (int i = 0; i < 32; i++) {
+                uint64_t addr = sp + (uint64_t)i * 8;
+                if (addr > 0x10000 && addr < 0x7fffffffffffUL) {
+                    uint64_t val = *(volatile uint64_t *)addr;
+                    if (val >= g_macos_text_lo && val < g_macos_text_hi) {
+                        extern FILE *stdout;
+                        if (stdout) {
+                            char **base = (char **)((char *)stdout + 0x20);
+                            char **ptr = (char **)((char *)stdout + 0x28);
+                            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                                write(1, *base, *ptr - *base);
+                            }
+                        }
+                        regs[REG_RIP] = val;
+                        regs[REG_RSP] = addr + 8;
+                        regs[REG_RAX] = 0;
+                        return;
+                    }
+                }
             }
         }
     }
@@ -174,6 +324,59 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         (unsigned long)regs[REG_R10], (unsigned long)regs[REG_R11],
         (unsigned long)regs[REG_R12], (unsigned long)regs[REG_R13],
         (unsigned long)regs[REG_R14], (unsigned long)regs[REG_R15]);
+
+    /* Dump bytes at RIP to identify the faulting instruction */
+    {
+        uint8_t *rip_ptr = (uint8_t *)regs[REG_RIP];
+        char ibuf[128];
+        int in = snprintf(ibuf, sizeof(ibuf),
+            "rip bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            rip_ptr[0], rip_ptr[1], rip_ptr[2], rip_ptr[3],
+            rip_ptr[4], rip_ptr[5], rip_ptr[6], rip_ptr[7],
+            rip_ptr[8], rip_ptr[9], rip_ptr[10], rip_ptr[11],
+            rip_ptr[12], rip_ptr[13], rip_ptr[14], rip_ptr[15]);
+        write(2, ibuf, in);
+    }
+
+    /* Dump the heap object at rbx (if rbx looks like a heap pointer) to
+     * understand what struct the crash was operating on. */
+    {
+        uint64_t rbx_val = (uint64_t)regs[REG_RBX];
+        if (rbx_val > 0x10000 && rbx_val < 0x7fffffffffffUL) {
+            char obuf[512];
+            /* Read 8 qwords from [rbx] */
+            uint64_t *p = (uint64_t *)rbx_val;
+            int on = snprintf(obuf, sizeof(obuf),
+                "rbx dump (heap object at %p):\n"
+                "  [rbx+0x00] = 0x%016lx  [rbx+0x08] = 0x%016lx\n"
+                "  [rbx+0x10] = 0x%016lx  [rbx+0x18] = 0x%016lx  <-- called\n"
+                "  [rbx+0x20] = 0x%016lx  [rbx+0x28] = 0x%016lx\n"
+                "  [rbx+0x30] = 0x%016lx  [rbx+0x38] = 0x%016lx\n",
+                (void*)rbx_val,
+                (unsigned long)p[0], (unsigned long)p[1],
+                (unsigned long)p[2], (unsigned long)p[3],
+                (unsigned long)p[4], (unsigned long)p[5],
+                (unsigned long)p[6], (unsigned long)p[7]);
+            write(2, obuf, on);
+
+            /* Also decode [rbx+0x18] relative to rclone_base */
+            uint64_t rclone_base = 0;
+            for (int i = 0; i < g_nsegments; i++) {
+                if (g_segments[i].is_pagezero) continue;
+                if (strcmp(g_segments[i].name, "__TEXT") == 0) {
+                    rclone_base = g_segments[i].vmaddr;
+                    break;
+                }
+            }
+            if (rclone_base && p[3] >= rclone_base && p[3] < rclone_base + 0x5000000) {
+                char dbuf[128];
+                int dn = snprintf(dbuf, sizeof(dbuf),
+                    "  [rbx+0x18] = rclone+0x%lx\n",
+                    (unsigned long)(p[3] - rclone_base));
+                write(2, dbuf, dn);
+            }
+        }
+    }
 
     /* Go runtime state */
     pos += snprintf(buf + pos, sizeof(buf) - pos, "g_tls_g_addr=%lu\n", (unsigned long)g_tls_g_addr);

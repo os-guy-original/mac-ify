@@ -330,7 +330,12 @@ void *macify_CFStringCreateWithBytesNoCopy(void *alloc, const void *bytes,
 #define CF_TYPEID_UNKNOWN  0
 
 unsigned long CFGetTypeID(void *cf) {
-    if (!cf) return CF_TYPEID_UNKNOWN;
+    /* Check for NULL or obviously invalid pointers.
+     * macOS code sometimes passes -1 (0xffffffffffffffff) or other
+     * garbage values from failed function calls. Without this check,
+     * dereferencing the pointer crashes. */
+    if (!cf || (uintptr_t)cf < 0x10000 || (uintptr_t)cf > 0x7fffffffffffUL)
+        return CF_TYPEID_UNKNOWN;
     const struct sc_obj *o = (const struct sc_obj *)cf;
     switch (o->tag) {
         case SC_TAG_STRING: return CF_TYPEID_STRING;

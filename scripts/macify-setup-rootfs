@@ -124,6 +124,21 @@ cat > "$PREFIX/etc/shells" << 'EOF'
 /bin/sh
 EOF
 
+# ── Generate termcap file for macOS libncurses ──────────────────
+# macOS libncurses looks for terminfo files in hex-named directories
+# (/usr/share/terminfo/76/vt100 where 0x76='v'). Linux uses char names
+# (/usr/share/terminfo/v/). Without hex symlinks, tgetent fails and
+# readline crashes. Setting TERMCAP to a file bypasses the file lookup.
+echo "  Generating termcap file..."
+TERMCAP_FILE="$PREFIX/etc/termcap"
+> "$TERMCAP_FILE"
+for term in vt100 vt102 vt220 vt52 xterm xterm-256color xterm-color \
+            dumb ansi linux screen screen-256color tmux tmux-256color \
+            cygwin rxvt rxvt-unicode; do
+    infocmp -C "$term" 2>/dev/null >> "$TERMCAP_FILE"
+done
+echo "    $(wc -l < "$TERMCAP_FILE") entries"
+
 # ── Pass-through symlinks ───────────────────────────────────────
 ln -sf /dev "$PREFIX/dev" 2>/dev/null || true
 ln -sf /tmp "$PREFIX/tmp" 2>/dev/null || true

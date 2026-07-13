@@ -899,6 +899,13 @@ void *macho_dylib_lookup(const char *sym) {
         macho_dylib *md = &g_macho_dylibs[i];
         for (int j = 0; j < md->n_exports; j++) {
             if (strcmp(md->exports[j].name, sym) == 0) {
+                if (getenv("MACIFY_TRACE_TERMCAP") &&
+                    (strcmp(sym, "tgetent") == 0 || strcmp(sym, "tputs") == 0)) {
+                    char b[256]; int n = snprintf(b, sizeof(b),
+                        "macify: macho_dylib_lookup(%s) FOUND in dylib %d at %p (export %d: %s)\n",
+                        sym, i, md->exports[j].addr, j, md->exports[j].name);
+                    (void)write(2, b, n);
+                }
                 return md->exports[j].addr;
             }
             /* If sym starts with '_' (e.g. C++ _Z...), also try without it */
@@ -906,6 +913,13 @@ void *macho_dylib_lookup(const char *sym) {
                 return md->exports[j].addr;
             }
         }
+    }
+    if (getenv("MACIFY_TRACE_TERMCAP") &&
+        (strcmp(sym, "tgetent") == 0 || strcmp(sym, "tputs") == 0)) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: macho_dylib_lookup(%s) NOT FOUND (%d dylibs searched)\n",
+            sym, g_n_macho_dylibs);
+        (void)write(2, b, n);
     }
     return NULL;
 }

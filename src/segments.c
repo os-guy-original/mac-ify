@@ -81,6 +81,48 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
      * This ensures our overrides (mmap, open, connect, etc.) take
      * priority over glibc's versions, which don't translate macOS flags. */
     if (ordinal_idx == -1) {
+        /* Trace ALL termcap-related symbol resolutions */
+        if (getenv("MACIFY_TRACE_TERMCAP") &&
+            (strstr(sym, "tget") == sym || strcmp(sym, "tputs") == 0 ||
+             strcmp(sym, "tgoto") == 0 || strcmp(sym, "tparm") == 0)) {
+            char b[128]; int n = snprintf(b, sizeof(b),
+                "macify: resolve_symbol(-1, %s) called\n", sym);
+            (void)write(2, b, n);
+        }
+        if (getenv("MACIFY_TRACE_DOLLAR") && strchr(sym, '$')) {
+            char b[256]; int n = snprintf(b, sizeof(b),
+                "macify: resolve_symbol(-1, %s) — has $ suffix\n", sym);
+            (void)write(2, b, n);
+        }
+        /* Check loaded Mach-O dylibs FIRST.
+         *
+         * CRITICAL: Mach-O dylibs (like macOS libncurses) must be checked
+         * BEFORE dlsym(dy->handle, sym). The shim handle is loaded with
+         * RTLD_GLOBAL, which makes Linux libtinfo's symbols (tgetent,
+         * tgetstr, tputs) visible via dlsym(shim_handle, ...). If we
+         * check the shim first, termcap functions resolve to Linux
+         * libtinfo instead of macOS libncurses, causing a buffer
+         * overflow in macOS libedit (readline).
+         *
+         * Mach-O dylibs only export their own functions (tgetent, tputs,
+         * etc.) which the shim does NOT override. The shim overrides libc
+         * functions (open, read, mmap, etc.) which are NOT exported by
+         * macOS dylibs. So checking Mach-O dylibs first is safe. */
+        {
+            extern void *macho_dylib_lookup(const char *);
+            void *addr = macho_dylib_lookup(sym);
+            if (addr) {
+                if (getenv("MACIFY_TRACE_TERMCAP") &&
+                    (strcmp(sym,"tgetent")==0 || strcmp(sym,"tgetstr")==0 ||
+                     strcmp(sym,"tputs")==0 || strcmp(sym,"tgoto")==0 ||
+                     strcmp(sym,"tgetflag")==0 || strcmp(sym,"tgetnum")==0)) {
+                    char b[128]; int n = snprintf(b, sizeof(b),
+                        "macify: %s resolved to Mach-O dylib at %p\n", sym, addr);
+                    (void)write(2, b, n);
+                }
+                return addr;
+            }
+        }
         /* Check shim → libc → libm for each dylib entry */
         for (int i = 0; i < g_ndylibs; i++) {
             void *addr = dlsym(g_dylibs[i].handle, sym);
@@ -92,19 +134,14 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             void *addr = dlsym(g_extra_handles[i], sym);
             if (addr) return addr;
         }
-        /* Last resort: RTLD_DEFAULT (searches all loaded libraries) */
+        /* Last resort: RTLD_DEFAULT (searches all loaded Linux libraries) */
         {
             void *addr = dlsym(RTLD_DEFAULT, sym);
             if (addr) return addr;
         }
-        /* Search loaded Mach-O dylibs */
-        {
-            extern void *macho_dylib_lookup(const char *);
-            void *addr = macho_dylib_lookup(sym);
-            if (addr) return addr;
-        }
         /* Try stripping $-suffix for flat namespace too
-         * (e.g. fdopendir$INODE64 -> fdopendir, realpath$DARWIN_EXTSN -> realpath) */
+         *
+         * CRITICAL: Check Mach-O dylibs and shim BEFORE RTLD_DEFAULT. */
         {
             char base_sym[256];
             strncpy(base_sym, sym, 255);
@@ -112,17 +149,56 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             char *dollar = strchr(base_sym, '$');
             if (dollar) {
                 *dollar = '\0';
-                void *addr = dlsym(RTLD_DEFAULT, base_sym);
-                if (addr) return addr;
+                /* Check Mach-O dylibs first */
+                {
+                    extern void *macho_dylib_lookup(const char *);
+                    void *addr = macho_dylib_lookup(base_sym);
+                    if (addr) {
+                        if (getenv("MACIFY_TRACE_DOLLAR")) {
+                            char b[256]; int n = snprintf(b, sizeof(b),
+                                "macify: %s -> %s -> Mach-O dylib at %p\n", sym, base_sym, addr);
+                            (void)write(2, b, n);
+                        }
+                        return addr;
+                    }
+                }
+                /* Check shim → libc → libm */
                 for (int i = 0; i < g_ndylibs; i++) {
-                    addr = dlsym(g_dylibs[i].handle, base_sym);
+                    void *addr = dlsym(g_dylibs[i].handle, base_sym);
                     if (!addr && g_dylibs[i].libc_handle) addr = dlsym(g_dylibs[i].libc_handle, base_sym);
                     if (!addr && g_dylibs[i].libm_handle) addr = dlsym(g_dylibs[i].libm_handle, base_sym);
-                    if (addr) return addr;
+                    if (addr) {
+                        if (getenv("MACIFY_TRACE_DOLLAR")) {
+                            char b[256]; int n = snprintf(b, sizeof(b),
+                                "macify: %s -> %s -> dylib[%d] at %p\n", sym, base_sym, i, addr);
+                            (void)write(2, b, n);
+                        }
+                        return addr;
+                    }
                 }
+                /* Check extra handles */
                 for (int i = 0; i < g_n_extra_handles; i++) {
-                    addr = dlsym(g_extra_handles[i], base_sym);
-                    if (addr) return addr;
+                    void *addr = dlsym(g_extra_handles[i], base_sym);
+                    if (addr) {
+                        if (getenv("MACIFY_TRACE_DOLLAR")) {
+                            char b[256]; int n = snprintf(b, sizeof(b),
+                                "macify: %s -> %s -> extra[%d] at %p\n", sym, base_sym, i, addr);
+                            (void)write(2, b, n);
+                        }
+                        return addr;
+                    }
+                }
+                /* Last resort: RTLD_DEFAULT */
+                {
+                    void *addr = dlsym(RTLD_DEFAULT, base_sym);
+                    if (addr) {
+                        if (getenv("MACIFY_TRACE_DOLLAR")) {
+                            char b[256]; int n = snprintf(b, sizeof(b),
+                                "macify: %s -> %s -> RTLD_DEFAULT at %p\n", sym, base_sym, addr);
+                            (void)write(2, b, n);
+                        }
+                        return addr;
+                    }
                 }
             }
         }
@@ -139,6 +215,26 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
     if (strcmp(sym, "environ") == 0 || strcmp(sym, "__environ") == 0) {
         addr = dlsym(RTLD_DEFAULT, sym);
     }
+
+    /* Search loaded Mach-O dylibs BEFORE dlsym(dy->handle, sym).
+     * See flat-namespace comment above for why this order matters. */
+    if (!addr) {
+        extern void *macho_dylib_lookup(const char *);
+        addr = macho_dylib_lookup(sym);
+        if (addr) {
+            if (getenv("MACIFY_TRACE_TERMCAP") &&
+                (strcmp(sym,"tgetent")==0 || strcmp(sym,"tgetstr")==0 ||
+                 strcmp(sym,"tputs")==0 || strcmp(sym,"tgoto")==0 ||
+                 strcmp(sym,"tgetflag")==0 || strcmp(sym,"tgetnum")==0)) {
+                char b[128]; int n = snprintf(b, sizeof(b),
+                    "macify: %s resolved to Mach-O dylib at %p (ordinal %d)\n",
+                    sym, addr, ordinal_idx);
+                (void)write(2, b, n);
+            }
+            return addr;
+        }
+    }
+
     if (!addr) addr = dlsym(dy->handle, sym);
     if (!addr && dy->libc_handle) addr = dlsym(dy->libc_handle, sym);
     if (!addr && dy->libm_handle) addr = dlsym(dy->libm_handle, sym);
@@ -151,14 +247,8 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         }
     }
 
-    /* Search loaded Mach-O dylibs */
-    if (!addr) {
-        extern void *macho_dylib_lookup(const char *);
-        addr = macho_dylib_lookup(sym);
-        if (addr) return addr;
-    }
-
-    /* Try stripping $-suffix (e.g. _open$NOCANCEL -> _open) */
+    /* Try stripping $-suffix (e.g. _open$NOCANCEL -> _open)
+     * Check Mach-O dylibs first, then shim/libc/libm, then extra, then RTLD_DEFAULT */
     if (!addr) {
         char base_sym[256];
         strncpy(base_sym, sym, 255);
@@ -166,7 +256,13 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         char *dollar = strchr(base_sym, '$');
         if (dollar) {
             *dollar = '\0';
-            addr = dlsym(dy->handle, base_sym);
+            /* Check Mach-O dylibs first */
+            {
+                extern void *macho_dylib_lookup(const char *);
+                addr = macho_dylib_lookup(base_sym);
+            }
+            /* Check shim → libc → libm */
+            if (!addr) addr = dlsym(dy->handle, base_sym);
             if (!addr && dy->libc_handle) addr = dlsym(dy->libc_handle, base_sym);
             if (!addr && dy->libm_handle) addr = dlsym(dy->libm_handle, base_sym);
             if (!addr) {

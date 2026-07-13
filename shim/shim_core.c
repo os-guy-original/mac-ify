@@ -324,7 +324,11 @@ char *UP = (char *)"\033[A"; /* ESC [ A = cursor up */
 
 /* Termcap global variables — exported for readline's GOT */
 
-/* Helper: get the real tgetent from libtinfo/libncursesw */
+/* Helper: get the real termcap functions.
+ * CRITICAL: Try macOS libncurses (Mach-O dylib) FIRST, then Linux libtinfo.
+ * macOS libedit (readline) was compiled against macOS libncurses and expects
+ * its internal buffer management. Using Linux libtinfo's tgetent causes a
+ * buffer overflow that crashes bash. */
 static int (*real_tgetent)(char *, const char *) = NULL;
 static int (*real_tgetflag)(const char *) = NULL;
 static int (*real_tgetnum)(const char *) = NULL;
@@ -334,6 +338,18 @@ static int (*real_tputs)(const char *, int, int (*)(int)) = NULL;
 
 static void init_real_termcap(void) {
     if (real_tgetent) return;  /* already initialized */
+    /* Try macOS libncurses (Mach-O dylib) first.
+     * macho_dylib_lookup is provided by the macify loader. */
+    extern void *macho_dylib_lookup(const char *);
+    real_tgetent  = macho_dylib_lookup("tgetent");
+    real_tgetflag = macho_dylib_lookup("tgetflag");
+    real_tgetnum  = macho_dylib_lookup("tgetnum");
+    real_tgetstr  = macho_dylib_lookup("tgetstr");
+    real_tgoto    = macho_dylib_lookup("tgoto");
+    real_tputs    = macho_dylib_lookup("tputs");
+    if (real_tgetent) return;  /* macOS libncurses found */
+
+    /* Fallback: Linux libtinfo/libncursesw */
     void *h = dlopen("libtinfo.so.6", RTLD_NOW);
     if (!h) h = dlopen("libtinfo.so.5", RTLD_NOW);
     if (!h) h = dlopen("libncursesw.so.6", RTLD_NOW);
@@ -349,19 +365,52 @@ static void init_real_termcap(void) {
 
 int tgetent(char *buf, const char *name) {
     init_real_termcap();
+    if (getenv("MACIFY_TRACE_TERMCAP")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: shim tgetent(buf=%p, name=\"%s\") called, real_tgetent=%p\n",
+            buf, name ? name : "(null)", real_tgetent);
+        (void)write(2, b, n);
+    }
     if (real_tgetent) {
-        int r = real_tgetent(buf, name);
-        /* Sync BC/PC/UP from the real library's globals */
-        void *h = dlopen("libtinfo.so.6", RTLD_NOW);
-        if (!h) h = dlopen("libncursesw.so.6", RTLD_NOW);
-        if (h) {
-            char **pBC = dlsym(h, "BC");
-            char  *pPC = dlsym(h, "PC");
-            char **pUP = dlsym(h, "UP");
-            if (pBC) BC = *pBC;
-            if (pPC) PC = *pPC;
-            if (pUP) UP = *pUP;
+        /* Use a LARGE internal buffer to prevent overflow.
+         * macOS libedit (readline) typically provides a 1024-byte buffer
+         * for tgetent. But macOS libncurses's tgetent may write more
+         * (up to 4096 bytes for complex terminals like xterm-256color).
+         * This overflow corrupts readline's stack, causing a crash at
+         * &_terminating_signal on the next readline call.
+         *
+         * Fix: call real_tgetent with a large internal buffer, then
+         * copy only the first 1024 bytes to the caller's buffer. */
+        static char large_buf[8192];
+        int r = real_tgetent(large_buf, name);
+        if (buf) {
+            /* Copy to caller's buffer (truncate to 1024 bytes) */
+            memcpy(buf, large_buf, 1024);
         }
+        if (getenv("MACIFY_TRACE_TERMCAP")) {
+            char b[128]; int n = snprintf(b, sizeof(b),
+                "macify: real_tgetent returned %d (used 8192-byte buffer)\n", r);
+            (void)write(2, b, n);
+        }
+        /* Sync BC/PC/UP from macOS libncurses's globals (if available),
+         * falling back to Linux libtinfo. */
+        extern void *macho_dylib_lookup(const char *);
+        char **pBC = macho_dylib_lookup("BC");
+        char  *pPC = macho_dylib_lookup("PC");
+        char **pUP = macho_dylib_lookup("UP");
+        if (!pBC || !pPC || !pUP) {
+            /* Fallback: Linux libtinfo */
+            void *h = dlopen("libtinfo.so.6", RTLD_NOW);
+            if (!h) h = dlopen("libncursesw.so.6", RTLD_NOW);
+            if (h) {
+                if (!pBC) pBC = dlsym(h, "BC");
+                if (!pPC) pPC = dlsym(h, "PC");
+                if (!pUP) pUP = dlsym(h, "UP");
+            }
+        }
+        if (pBC) BC = *pBC;
+        if (pPC) PC = *pPC;
+        if (pUP) UP = *pUP;
         return r;
     }
     /* Fallback: pretend we found an xterm-compatible terminal.

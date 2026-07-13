@@ -301,14 +301,72 @@ void px_proxy_factory_free_proxies(char **proxies) {
 }
 
 /* sigsetjmp - macOS uses sigsetjmp directly. glibc has __sigsetjmp (internal)
- * and sigsetjmp as a macro that calls __sigsetjmp. We need to undef the
- * macro to actually create a sigsetjmp symbol. */
+ * and sigsetjmp as a macro that calls __sigsetjmp.
+ *
+ * CRITICAL: sigsetjmp MUST NOT be a regular wrapper function!
+ * If we wrap it like `int sigsetjmp(...) { return __sigsetjmp(...); }`,
+ * __sigsetjmp saves the wrapper's return address (inside the shim)
+ * instead of the caller's. When siglongjmp later restores this address,
+ * the CPU returns into the shim function whose stack frame is long
+ * gone — causing a crash at a garbage address (typically an
+ * uninitialized global in __common, which is all-zeros BSS).
+ *
+ * This was the root cause of the libedit crash in interactive bash:
+ * bash called sigsetjmp(_top_level, 1) at startup, then siglongjmp'd
+ * back to it after signal handling. Our wrapper broke the pairing,
+ * and the CPU ended up jumping to &_terminating_signal (a zero-init
+ * BSS variable), trying to execute 0x0000... as code.
+ *
+ * The fix: make sigsetjmp a naked function that tail-calls __sigsetjmp
+ * via jmp (not call). This preserves the caller's return address in
+ * place, so __sigsetjmp saves the REAL caller, not the shim. */
 #include <setjmp.h>
 #undef sigsetjmp
 extern int __sigsetjmp(sigjmp_buf env, int savesigs);
+__attribute__((naked))
 int sigsetjmp(sigjmp_buf env, int savesigs) __asm__("sigsetjmp");
+__attribute__((naked))
 int sigsetjmp(sigjmp_buf env, int savesigs) {
-    return __sigsetjmp(env, savesigs);
+    __asm__ volatile(
+        "jmp __sigsetjmp\n\t"
+        :::
+    );
+}
+
+/* siglongjmp - macOS uses siglongjmp directly. glibc's siglongjmp is
+ * an alias for longjmp (same address) BUT it also restores the signal
+ * mask if savesigs was 1 in sigsetjmp.
+ *
+ * Our sigsetjmp calls __sigsetjmp(env, savesigs). If savesigs=1,
+ * __sigsetjmp saves the signal mask at offset 72 in the jmp_buf
+ * (glibc's jmp_buf layout: rbx/rbp/r12/r13/r14/r15/rsp/rip = 64 bytes,
+ * then 8 bytes for savesigs flag, then sigset_t for the mask).
+ *
+ * We restore the signal mask before calling longjmp. */
+extern void longjmp(jmp_buf env, int val);
+void siglongjmp(sigjmp_buf env, int val) __asm__("siglongjmp");
+void siglongjmp(sigjmp_buf env, int val) {
+    if (getenv("MACIFY_TRACE_JMP")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b),
+            "macify: siglongjmp(env=%p, val=%d) caller=%p\n",
+            env, val, __builtin_return_address(0));
+        (void)write(2, b, n);
+    }
+    /* Restore signal mask if savesigs was 1.
+     * glibc's __sigsetjmp stores savesigs at offset 64 (after the 8
+     * register slots = 64 bytes). If savesigs is nonzero, the signal
+     * mask is stored at offset 72. */
+    {
+        /* Check the savesigs flag at offset 64 */
+        int savesigs = *(int *)((char *)env + 64);
+        if (savesigs) {
+            /* The signal mask is at offset 72 (sizeof(sigset_t) = 128 bytes) */
+            sigset_t *mask = (sigset_t *)((char *)env + 72);
+            pthread_sigmask(SIG_SETMASK, mask, NULL);
+        }
+    }
+    longjmp(env, val);
 }
 
 /* ___darwin_check_fd_set_overflow - macOS fd_set overflow checker.
@@ -339,10 +397,38 @@ int __darwin_check_fd_set_overflow(int fd, const void *fdset, int silent) {
 }
 
 /* __longjmp / __setjmp - macOS uses these instead of longjmp/setjmp.
- * Map to glibc's longjmp/setjmp. */
+ *
+ * CRITICAL: __setjmp MUST NOT be a regular wrapper function (see the
+ * sigsetjmp comment above for the full explanation). Use a naked
+ * function that tail-jumps to glibc's setjmp.
+ *
+ * __longjmp is safe to wrap because longjmp never returns to its
+ * caller — it restores the saved frame and continues from there.
+ * The wrapper's frame is simply abandoned. */
 #include <setjmp.h>
-void __longjmp(jmp_buf env, int val) { longjmp(env, val); }
-int __setjmp(jmp_buf env) { return setjmp(env); }
+void __longjmp(jmp_buf env, int val) {
+    if (getenv("MACIFY_TRACE_JMP")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b),
+            "macify: __longjmp(env=%p, val=%d) caller=%p\n",
+            env, val, __builtin_return_address(0));
+        (void)write(2, b, n);
+    }
+    longjmp(env, val);
+}
+extern int __sigsetjmp(sigjmp_buf env, int savesigs);
+__attribute__((naked))
+int __setjmp(jmp_buf env) __asm__("__setjmp");
+__attribute__((naked))
+int __setjmp(jmp_buf env) {
+    /* glibc's setjmp is a macro that calls __sigsetjmp(env, 1).
+     * Tail-jump to __sigsetjmp with savesigs=1 (ESI=1). */
+    __asm__ volatile(
+        "mov $1, %%esi\n\t"
+        "jmp __sigsetjmp\n\t"
+        :::
+    );
+}
 
 /* ___strncpy_chk - fortified strncpy */
 char *___strncpy_chk(char *dst, const char *src, size_t n, size_t dstlen) {
