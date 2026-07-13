@@ -213,11 +213,20 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         p_linux_oldact = &linux_oldact;
     }
 
-    /* Use raw rt_sigaction syscall instead of real_sigaction, because
-     * real_sigaction might be NULL (glibc loaded before shim, so
-     * real_dlsym(RTLD_NEXT, "sigaction") returns NULL).
-     * The linux_act already has SA_RESTORER and sa_restorer set. */
-    int result = syscall(13, signum, p_linux_act, p_linux_oldact, 8);
+    /* Use glibc's real sigaction for the actual kernel call.
+     * We've already translated the macOS sigaction to Linux format,
+     * so we can pass it directly to glibc's sigaction.
+     * CRITICAL: Do NOT use raw syscall(13) — it bypasses glibc's
+     * internal locks, causing futex deadlocks. */
+    if (!real_sigaction) {
+        real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
+    }
+    int result;
+    if (real_sigaction) {
+        result = real_sigaction(signum, p_linux_act, p_linux_oldact);
+    } else {
+        result = syscall(13, signum, p_linux_act, p_linux_oldact, 8);
+    }
 
     if (oldact && result == 0) {
         struct macos_sigaction *macos_old = (struct macos_sigaction *)oldact;
@@ -250,7 +259,8 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
             sa.sa_restorer = macify_sa_restorer;
         }
         sigemptyset(&sa.sa_mask);
-        syscall(13, signum, &sa, NULL, 8);
+        if (real_sigaction) real_sigaction(signum, &sa, NULL);
+        else syscall(13, signum, &sa, NULL, 8);
         return SIG_DFL;
     }
     if (signum == SIGILL) {
@@ -296,7 +306,8 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
         sa.sa_restorer = macify_sa_restorer;
     }
     sigemptyset(&sa.sa_mask);
-    syscall(13, signum, &sa, NULL, 8);
+    if (real_sigaction) real_sigaction(signum, &sa, NULL);
+    else syscall(13, signum, &sa, NULL, 8);
     return SIG_DFL;
 }
 

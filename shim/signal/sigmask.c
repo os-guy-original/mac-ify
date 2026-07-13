@@ -166,7 +166,9 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
     }
 
     /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
-    int result = syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
+    static int (*real_psm)(int, const sigset_t *, sigset_t *) = NULL;
+    if (!real_psm) real_psm = real_dlsym(RTLD_NEXT, "pthread_sigmask");
+    int result = real_psm ? real_psm(linux_how, p_linux_set, p_linux_oldset) : syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
     if (oldset && result == 0) {
         linux_to_macos_sigset(&linux_oldset, oldset);
@@ -220,7 +222,9 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
     }
 
     /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
-    int result = syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
+    static int (*real_psm)(int, const sigset_t *, sigset_t *) = NULL;
+    if (!real_psm) real_psm = real_dlsym(RTLD_NEXT, "pthread_sigmask");
+    int result = real_psm ? real_psm(linux_how, p_linux_set, p_linux_oldset) : syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
     if (getenv("MACIFY_TRACE_SIGNAL")) {
         char b[256]; int n = snprintf(b, sizeof(b),
