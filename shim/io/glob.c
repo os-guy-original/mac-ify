@@ -77,7 +77,7 @@ int macify_glob(const char *pattern, int flags,
     static int (*real_glob)(const char *, int,
                             int (*)(const char *, int),
                             glob_t *) = NULL;
-    if (!real_glob) real_glob = dlsym(RTLD_NEXT, "glob");
+    if (!real_glob) real_glob = real_dlsym(RTLD_NEXT, "glob");
 
     if (!macos_pglob) {
         /* No output struct — just call real glob with NULL.
@@ -132,7 +132,7 @@ int macify_glob(const char *pattern, int flags,
 void macify_globfree(struct macos_glob_t *macos_pglob) __asm__("globfree");
 void macify_globfree(struct macos_glob_t *macos_pglob) {
     static void (*real_globfree)(glob_t *) = NULL;
-    if (!real_globfree) real_globfree = dlsym(RTLD_NEXT, "globfree");
+    if (!real_globfree) real_globfree = real_dlsym(RTLD_NEXT, "globfree");
     if (!macos_pglob || !macos_pglob->gl_pathv) return;
 
     /* Build a Linux glob_t with just the gl_pathv to free it.

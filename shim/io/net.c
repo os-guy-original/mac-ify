@@ -49,7 +49,7 @@ int macify_select(int nfds, void *readfds, void *writefds, void *exceptfds,
         }
     }
     static int (*real_select)(int, fd_set *, fd_set *, fd_set *, struct timeval *) = NULL;
-    if (!real_select) real_select = dlsym(RTLD_NEXT, "__select");
+    if (!real_select) real_select = real_dlsym(RTLD_NEXT, "__select");
     if (!real_select) return -1;
     int r = real_select(nfds, (fd_set *)readfds, (fd_set *)writefds,
                        (fd_set *)exceptfds, linux_tv_ptr);
@@ -83,7 +83,7 @@ int macify_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         (void)write(2, b, strlen(b));
     }
     static int (*real_poll)(struct pollfd *, nfds_t, int) = NULL;
-    if (!real_poll) real_poll = dlsym(RTLD_NEXT, "__poll");
+    if (!real_poll) real_poll = real_dlsym(RTLD_NEXT, "__poll");
     if (!real_poll) return -1;
     int r = real_poll(fds, nfds, timeout);
     if (macify_net_debug_enabled < 0) {
@@ -152,9 +152,14 @@ int macify_getaddrinfo(const char *node, const char *service,
                        const void *hints, void **res) __asm__("getaddrinfo");
 int macify_getaddrinfo(const char *node, const char *service,
                        const void *hints, void **res) {
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static int (*real_gai)(const char *, const char *, const void *, void **) = NULL;
+        if (!real_gai) real_gai = real_dlsym(RTLD_NEXT, "getaddrinfo");
+        return real_gai ? real_gai(node, service, hints, res) : -1;
+    }
     macify_net_dbg("getaddrinfo: enter\n");
     static int (*real_gai)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
-    if (!real_gai) real_gai = dlsym(RTLD_NEXT, "getaddrinfo");
+    if (!real_gai) real_gai = real_dlsym(RTLD_NEXT, "getaddrinfo");
 
     /* Translate macOS hints → Linux hints.
      * The first 16 bytes (flags/family/socktype/protocol) are at the same
@@ -263,7 +268,7 @@ int macify_getaddrinfo(const char *node, const char *service,
 
     /* Free glibc's linked list — we no longer need it. */
     static void (*real_free)(struct addrinfo *) = NULL;
-    if (!real_free) real_free = dlsym(RTLD_NEXT, "freeaddrinfo");
+    if (!real_free) real_free = real_dlsym(RTLD_NEXT, "freeaddrinfo");
     real_free(linux_res);
 
     if (r != 0 && macos_head) {
@@ -379,7 +384,7 @@ int macify_setsockopt(int sockfd, int level, int optname,
     }
 
     static int (*real_setsockopt)(int, int, int, const void *, socklen_t) = NULL;
-    if (!real_setsockopt) real_setsockopt = dlsym(RTLD_NEXT, "setsockopt");
+    if (!real_setsockopt) real_setsockopt = real_dlsym(RTLD_NEXT, "setsockopt");
     int ret = real_setsockopt(sockfd, level, optname, optval, optlen);
     int saved_errno = errno;
     /* If setsockopt fails with ENOPROTOOPT or EINVAL, the option doesn't
@@ -413,7 +418,7 @@ int macify_getsockopt(int sockfd, int level, int optname,
         if (translated != optname) optname = translated;
     }
     static int (*real_getsockopt)(int, int, int, void *, socklen_t *) = NULL;
-    if (!real_getsockopt) real_getsockopt = dlsym(RTLD_NEXT, "getsockopt");
+    if (!real_getsockopt) real_getsockopt = real_dlsym(RTLD_NEXT, "getsockopt");
     int ret = real_getsockopt(sockfd, level, optname, optval, optlen);
     if (ret == -1) {
         int saved = errno;
@@ -527,7 +532,7 @@ int macify_connect(int sockfd, const void *addr, socklen_t addrlen) {
 
     macify_net_dbg_hex("connect: linux addr:", linux_addr, addrlen > 32 ? 32 : addrlen);
     static int (*real_connect)(int, const struct sockaddr *, socklen_t) = NULL;
-    if (!real_connect) real_connect = dlsym(RTLD_NEXT, "connect");
+    if (!real_connect) real_connect = real_dlsym(RTLD_NEXT, "connect");
     int r = real_connect(sockfd, (const struct sockaddr *)linux_addr, addrlen);
     int saved_errno = errno;
     char buf[128];
@@ -570,7 +575,7 @@ int macify_bind(int sockfd, const void *addr, socklen_t addrlen) {
         memcpy(linux_addr, p, cl);
     }
     static int (*real_bind)(int, const struct sockaddr *, socklen_t) = NULL;
-    if (!real_bind) real_bind = dlsym(RTLD_NEXT, "bind");
+    if (!real_bind) real_bind = real_dlsym(RTLD_NEXT, "bind");
     return real_bind(sockfd, (const struct sockaddr *)linux_addr, addrlen);
 }
 
@@ -609,7 +614,7 @@ ssize_t macify_sendto(int sockfd, const void *buf, size_t len, int flags,
         p_addr = (const struct sockaddr *)linux_addr;
     }
     static ssize_t (*real_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t) = NULL;
-    if (!real_sendto) real_sendto = dlsym(RTLD_NEXT, "sendto");
+    if (!real_sendto) real_sendto = real_dlsym(RTLD_NEXT, "sendto");
     ssize_t r = real_sendto(sockfd, buf, len, flags, p_addr, linux_addrlen);
     int saved = errno;
     {
@@ -628,7 +633,7 @@ ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) {
     macify_net_dbg("send: entered\n");
     flags |= MSG_NOSIGNAL;  /* prevent SIGPIPE since SO_NOSIGPIPE is no-op */
     static ssize_t (*real_send)(int, const void *, size_t, int) = NULL;
-    if (!real_send) real_send = dlsym(RTLD_NEXT, "send");
+    if (!real_send) real_send = real_dlsym(RTLD_NEXT, "send");
     ssize_t r = real_send(sockfd, buf, len, flags);
     int saved = errno;
     {
@@ -648,7 +653,7 @@ ssize_t macify_send(int sockfd, const void *buf, size_t len, int flags) {
 ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) __asm__("recv");
 ssize_t macify_recv(int sockfd, void *buf, size_t len, int flags) {
     static ssize_t (*real_recv)(int, void *, size_t, int) = NULL;
-    if (!real_recv) real_recv = dlsym(RTLD_NEXT, "recv");
+    if (!real_recv) real_recv = real_dlsym(RTLD_NEXT, "recv");
     ssize_t r = real_recv(sockfd, buf, len, flags);
     int saved = errno;
     {
@@ -670,7 +675,7 @@ ssize_t macify_recvfrom(int sockfd, void *buf, size_t len, int flags,
 ssize_t macify_recvfrom(int sockfd, void *buf, size_t len, int flags,
                         void *src_addr, socklen_t *addrlen) {
     static ssize_t (*real_recvfrom)(int, void *, size_t, int, struct sockaddr *, socklen_t *) = NULL;
-    if (!real_recvfrom) real_recvfrom = dlsym(RTLD_NEXT, "recvfrom");
+    if (!real_recvfrom) real_recvfrom = real_dlsym(RTLD_NEXT, "recvfrom");
     ssize_t ret = real_recvfrom(sockfd, buf, len, flags, (struct sockaddr *)src_addr, addrlen);
     if (ret == -1) {
         if (macify_caller_is_macos_text(__builtin_return_address(0))) {
@@ -689,7 +694,7 @@ ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) __asm__("sendmsg"
 ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) {
     macify_net_dbg("sendmsg: entered\n");
     static ssize_t (*real_sendmsg)(int, const struct msghdr *, int) = NULL;
-    if (!real_sendmsg) real_sendmsg = dlsym(RTLD_NEXT, "sendmsg");
+    if (!real_sendmsg) real_sendmsg = real_dlsym(RTLD_NEXT, "sendmsg");
     ssize_t r = real_sendmsg(sockfd, (const struct msghdr *)msg, flags);
     int saved = errno;
     {
@@ -706,7 +711,7 @@ ssize_t macify_sendmsg(int sockfd, const void *msg, int flags) {
 ssize_t macify_recvmsg(int sockfd, void *msg, int flags) __asm__("recvmsg");
 ssize_t macify_recvmsg(int sockfd, void *msg, int flags) {
     static ssize_t (*real_recvmsg)(int, struct msghdr *, int) = NULL;
-    if (!real_recvmsg) real_recvmsg = dlsym(RTLD_NEXT, "recvmsg");
+    if (!real_recvmsg) real_recvmsg = real_dlsym(RTLD_NEXT, "recvmsg");
     ssize_t r = real_recvmsg(sockfd, (struct msghdr *)msg, flags);
     int saved = errno;
     {
@@ -723,7 +728,7 @@ ssize_t macify_recvmsg(int sockfd, void *msg, int flags) {
 int macify_accept(int sockfd, void *addr, socklen_t *addrlen) __asm__("accept");
 int macify_accept(int sockfd, void *addr, socklen_t *addrlen) {
     static int (*real_accept)(int, struct sockaddr *, socklen_t *) = NULL;
-    if (!real_accept) real_accept = dlsym(RTLD_NEXT, "accept");
+    if (!real_accept) real_accept = real_dlsym(RTLD_NEXT, "accept");
     int ret = real_accept(sockfd, (struct sockaddr *)addr, addrlen);
     if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
         linux_to_macos_sockaddr(addr, *addrlen);
@@ -750,7 +755,7 @@ void linux_to_macos_sockaddr(void *addr, socklen_t addrlen) {
 int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) __asm__("getsockname");
 int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) {
     static int (*real)(int, struct sockaddr *, socklen_t *) = NULL;
-    if (!real) real = dlsym(RTLD_NEXT, "getsockname");
+    if (!real) real = real_dlsym(RTLD_NEXT, "getsockname");
     
     int ret = real(sockfd, (struct sockaddr *)addr, addrlen);
     if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
@@ -762,7 +767,7 @@ int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) {
 int macify_getpeername(int sockfd, void *addr, socklen_t *addrlen) __asm__("getpeername");
 int macify_getpeername(int sockfd, void *addr, socklen_t *addrlen) {
     static int (*real)(int, struct sockaddr *, socklen_t *) = NULL;
-    if (!real) real = dlsym(RTLD_NEXT, "getpeername");
+    if (!real) real = real_dlsym(RTLD_NEXT, "getpeername");
     int ret = real(sockfd, (struct sockaddr *)addr, addrlen);
     if (ret >= 0 && addr && addrlen && *addrlen >= 2) {
         linux_to_macos_sockaddr(addr, *addrlen);
@@ -784,7 +789,7 @@ int macify_socket(int domain, int type, int protocol) {
      * specifying IPPROTO_TCP (6) explicitly. Some macOS binaries pass 6. */
     if (protocol == 6) protocol = 0;  /* IPPROTO_TCP → default */
     static int (*real_socket)(int, int, int) = NULL;
-    if (!real_socket) real_socket = dlsym(RTLD_NEXT, "socket");
+    if (!real_socket) real_socket = real_dlsym(RTLD_NEXT, "socket");
     int r = real_socket(domain, type, protocol);
     int saved_errno = errno;
     /* Only translate errno on FAILURE. On success, errno may contain a
@@ -813,7 +818,7 @@ const char *macify_inet_ntop(int af, const void *src, char *dst, socklen_t size)
     if (af == 16) af = 2;       /* sa_len=16 → AF_INET */
     else if (af == 28) af = 10; /* sa_len=28 → AF_INET6 (Linux) */
     static const char *(*real)(int, const void *, char *, socklen_t) = NULL;
-    if (!real) real = dlsym(RTLD_NEXT, "inet_ntop");
+    if (!real) real = real_dlsym(RTLD_NEXT, "inet_ntop");
     const char *result = real(af, src, dst, size);
     if (macify_net_debug_enabled) {
         char b[256];
@@ -830,6 +835,6 @@ int macify_inet_pton(int af, const char *src, void *dst) __asm__("inet_pton");
 int macify_inet_pton(int af, const char *src, void *dst) {
     if (af == MACOS_AF_INET6) af = LINUX_AF_INET6;
     static int (*real)(int, const char *, void *) = NULL;
-    if (!real) real = dlsym(RTLD_NEXT, "inet_pton");
+    if (!real) real = real_dlsym(RTLD_NEXT, "inet_pton");
     return real(af, src, dst);
 }

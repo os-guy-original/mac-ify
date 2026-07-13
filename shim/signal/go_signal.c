@@ -84,7 +84,7 @@ void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
     memset(&mask, 0, sizeof(mask));
     /* Use the real glibc sigaddset, not our override (which writes only 4 bytes) */
     static int (*real_sigaddset_glibc)(sigset_t *, int) = NULL;
-    if (!real_sigaddset_glibc) real_sigaddset_glibc = dlsym(RTLD_NEXT, "sigaddset");
+    if (!real_sigaddset_glibc) real_sigaddset_glibc = real_dlsym(RTLD_NEXT, "sigaddset");
     if (real_sigaddset_glibc) {
         real_sigaddset_glibc(&mask, sig);
     } else {
@@ -95,7 +95,7 @@ void macify_go_signal_wrapper(int sig, siginfo_t *info, void *uctx) {
     /* Call glibc's sigprocmask directly (bypass our override which might
      * mistranslate when called from the shim). */
     static int (*real_sigprocmask_glibc)(int, const sigset_t *, sigset_t *) = NULL;
-    if (!real_sigprocmask_glibc) real_sigprocmask_glibc = dlsym(RTLD_NEXT, "sigprocmask");
+    if (!real_sigprocmask_glibc) real_sigprocmask_glibc = real_dlsym(RTLD_NEXT, "sigprocmask");
     if (real_sigprocmask_glibc) {
         real_sigprocmask_glibc(SIG_BLOCK, &mask, NULL);
     }

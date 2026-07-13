@@ -19,7 +19,7 @@ int macify_clock_gettime(int clk_id, struct timespec *tp) {
         case MACOS_CLOCK_MONOTONIC_RAW: clk_id = CLOCK_MONOTONIC_RAW; break;
     }
     static int (*real_clock_gettime)(int, struct timespec *) = NULL;
-    if (!real_clock_gettime) real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
+    if (!real_clock_gettime) real_clock_gettime = real_dlsym(RTLD_NEXT, "clock_gettime");
     if (!real_clock_gettime) { errno = ENOSYS; return -1; }
     return real_clock_gettime(clk_id, tp);
 }
@@ -38,7 +38,7 @@ int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(vo
     static int (*real_atfork)(void (*)(void), void (*)(void), void (*)(void)) = NULL;
     if (!real_atfork) {
         real_atfork = dlvsym(RTLD_NEXT, "pthread_atfork", "GLIBC_2.2.5");
-        if (!real_atfork) real_atfork = dlsym(RTLD_NEXT, "pthread_atfork");
+        if (!real_atfork) real_atfork = real_dlsym(RTLD_NEXT, "pthread_atfork");
     }
     if (!real_atfork) return ENOSYS;
     return real_atfork(prepare, parent, child);
@@ -55,7 +55,7 @@ int macify_pthread_setname_np(const char *name) {
     static int (*real_setname)(pthread_t, const char *) = NULL;
     if (!real_setname) {
         real_setname = dlvsym(RTLD_NEXT, "pthread_setname_np", "GLIBC_2.2.5");
-        if (!real_setname) real_setname = dlsym(RTLD_NEXT, "pthread_setname_np");
+        if (!real_setname) real_setname = real_dlsym(RTLD_NEXT, "pthread_setname_np");
     }
     if (real_setname) return real_setname(pthread_self(), name);
     return 0;
@@ -68,7 +68,7 @@ int macify_pthread_kill(pthread_t thread, int sig) {
         if (linux_sig > 0) sig = linux_sig;
     }
     static int (*real_pthread_kill)(pthread_t, int) = NULL;
-    if (!real_pthread_kill) real_pthread_kill = dlsym(RTLD_NEXT, "pthread_kill");
+    if (!real_pthread_kill) real_pthread_kill = real_dlsym(RTLD_NEXT, "pthread_kill");
     if (!real_pthread_kill) return -1;
     return real_pthread_kill(thread, sig);
 }
@@ -78,7 +78,7 @@ int macify_pthread_getname_np(pthread_t thread, char *name, size_t len) {
     static int (*real_getname)(pthread_t, char *, size_t) = NULL;
     if (!real_getname) {
         real_getname = dlvsym(RTLD_NEXT, "pthread_getname_np", "GLIBC_2.2.5");
-        if (!real_getname) real_getname = dlsym(RTLD_NEXT, "pthread_getname_np");
+        if (!real_getname) real_getname = real_dlsym(RTLD_NEXT, "pthread_getname_np");
     }
     if (real_getname) return real_getname(thread, name, len);
     if (name && len > 0) name[0] = '\0';

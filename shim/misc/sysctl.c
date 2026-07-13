@@ -434,7 +434,7 @@ int macify_uname(struct utsname *buf) {
     /* Only translate for macOS callers */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         static int (*real_uname)(struct utsname *) = NULL;
-        if (!real_uname) real_uname = dlsym(RTLD_NEXT, "uname");
+        if (!real_uname) real_uname = real_dlsym(RTLD_NEXT, "uname");
         return real_uname ? real_uname(buf) : -1;
     }
     memset(buf, 0, sizeof(*buf));

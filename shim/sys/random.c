@@ -60,7 +60,7 @@ struct macos_statfs {
 int macify_statfs(const char *path, struct macos_statfs *buf) __asm__("statfs");
 int macify_statfs(const char *path, struct macos_statfs *buf) {
     static int (*real_statfs)(const char *, struct statfs *) = NULL;
-    if (!real_statfs) real_statfs = dlsym(RTLD_NEXT, "statfs");
+    if (!real_statfs) real_statfs = real_dlsym(RTLD_NEXT, "statfs");
     struct statfs linux_st;
     int ret = real_statfs(path, &linux_st);
     if (ret == 0 && buf) {
@@ -83,7 +83,7 @@ int macify_statfs(const char *path, struct macos_statfs *buf) {
 int macify_fstatfs(int fd, struct macos_statfs *buf) __asm__("fstatfs");
 int macify_fstatfs(int fd, struct macos_statfs *buf) {
     static int (*real_fstatfs)(int, struct statfs *) = NULL;
-    if (!real_fstatfs) real_fstatfs = dlsym(RTLD_NEXT, "fstatfs");
+    if (!real_fstatfs) real_fstatfs = real_dlsym(RTLD_NEXT, "fstatfs");
     struct statfs linux_st;
     int ret = real_fstatfs(fd, &linux_st);
     if (ret == 0 && buf) {

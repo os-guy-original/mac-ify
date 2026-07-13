@@ -101,7 +101,7 @@ int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg) {
     if (!real_pthread_create) {
-        real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
+        real_pthread_create = real_dlsym(RTLD_NEXT, "pthread_create");
     }
     if (getenv("MACIFY_TRACE_PTHREAD") || getenv("MACIFY_NET_DEBUG")) {
         char b[128];

@@ -40,7 +40,7 @@ void macify_init_real_dlsym(void) {
 }
 
 /* Find glibc's real dlsym by walking libc.so's ELF dynamic symbol table.
- * We can't use dlsym(RTLD_NEXT, "dlsym") because that would recurse. */
+ * We can't use real_dlsym(RTLD_NEXT, "dlsym") because that would recurse. */
 static int find_dlsym_cb(struct dl_phdr_info *info, size_t size, void *data) {
     (void)size;
     if (!info->dlpi_name || !strstr(info->dlpi_name, "libc.so"))

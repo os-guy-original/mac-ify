@@ -18,22 +18,22 @@ int   (*real_rwlock_init)(pthread_rwlock_t *, const pthread_rwlockattr_t *);
 int   (*real_rwlock_destroy)(pthread_rwlock_t *);
 
 void init_real_pthread_funcs(void) {
-    real_mutex_lock     = dlsym(RTLD_NEXT, "pthread_mutex_lock");
-    real_mutex_trylock  = dlsym(RTLD_NEXT, "pthread_mutex_trylock");
-    real_mutex_unlock   = dlsym(RTLD_NEXT, "pthread_mutex_unlock");
-    real_mutex_init     = dlsym(RTLD_NEXT, "pthread_mutex_init");
-    real_mutex_destroy  = dlsym(RTLD_NEXT, "pthread_mutex_destroy");
-    real_cond_wait      = dlsym(RTLD_NEXT, "pthread_cond_wait");
-    real_cond_timedwait = dlsym(RTLD_NEXT, "pthread_cond_timedwait");
-    real_cond_signal    = dlsym(RTLD_NEXT, "pthread_cond_signal");
-    real_cond_broadcast = dlsym(RTLD_NEXT, "pthread_cond_broadcast");
-    real_cond_init      = dlsym(RTLD_NEXT, "pthread_cond_init");
-    real_cond_destroy   = dlsym(RTLD_NEXT, "pthread_cond_destroy");
-    real_rwlock_rdlock  = dlsym(RTLD_NEXT, "pthread_rwlock_rdlock");
-    real_rwlock_wrlock  = dlsym(RTLD_NEXT, "pthread_rwlock_wrlock");
-    real_rwlock_unlock  = dlsym(RTLD_NEXT, "pthread_rwlock_unlock");
-    real_rwlock_init    = dlsym(RTLD_NEXT, "pthread_rwlock_init");
-    real_rwlock_destroy = dlsym(RTLD_NEXT, "pthread_rwlock_destroy");
+    real_mutex_lock     = real_dlsym(RTLD_NEXT, "pthread_mutex_lock");
+    real_mutex_trylock  = real_dlsym(RTLD_NEXT, "pthread_mutex_trylock");
+    real_mutex_unlock   = real_dlsym(RTLD_NEXT, "pthread_mutex_unlock");
+    real_mutex_init     = real_dlsym(RTLD_NEXT, "pthread_mutex_init");
+    real_mutex_destroy  = real_dlsym(RTLD_NEXT, "pthread_mutex_destroy");
+    real_cond_wait      = real_dlsym(RTLD_NEXT, "pthread_cond_wait");
+    real_cond_timedwait = real_dlsym(RTLD_NEXT, "pthread_cond_timedwait");
+    real_cond_signal    = real_dlsym(RTLD_NEXT, "pthread_cond_signal");
+    real_cond_broadcast = real_dlsym(RTLD_NEXT, "pthread_cond_broadcast");
+    real_cond_init      = real_dlsym(RTLD_NEXT, "pthread_cond_init");
+    real_cond_destroy   = real_dlsym(RTLD_NEXT, "pthread_cond_destroy");
+    real_rwlock_rdlock  = real_dlsym(RTLD_NEXT, "pthread_rwlock_rdlock");
+    real_rwlock_wrlock  = real_dlsym(RTLD_NEXT, "pthread_rwlock_wrlock");
+    real_rwlock_unlock  = real_dlsym(RTLD_NEXT, "pthread_rwlock_unlock");
+    real_rwlock_init    = real_dlsym(RTLD_NEXT, "pthread_rwlock_init");
+    real_rwlock_destroy = real_dlsym(RTLD_NEXT, "pthread_rwlock_destroy");
 }
 
 /* Convert a macOS-format mutex to glibc format in-place. The macOS mutex

@@ -201,7 +201,7 @@ char *libintl_setlocale(int category, const char *locale) {
 char *macify_setlocale(int category, const char *locale) __asm__("setlocale");
 char *macify_setlocale(int category, const char *locale) {
     static char *(*real_setlocale)(int, const char *) = NULL;
-    if (!real_setlocale) real_setlocale = dlsym(RTLD_NEXT, "setlocale");
+    if (!real_setlocale) real_setlocale = real_dlsym(RTLD_NEXT, "setlocale");
     char *r = real_setlocale ? real_setlocale(category, locale) : NULL;
     if (r && real_setlocale) {
         /* Force LC_NUMERIC=C (prevents strtold loops with "," decimal point)
@@ -266,7 +266,7 @@ static int macos_to_linux_nl_item(int macos_item) {
 
 char *nl_langinfo(int item) {
     static char *(*real_nl_langinfo)(int) = NULL;
-    if (!real_nl_langinfo) real_nl_langinfo = dlsym(RTLD_NEXT, "nl_langinfo");
+    if (!real_nl_langinfo) real_nl_langinfo = real_dlsym(RTLD_NEXT, "nl_langinfo");
     /* If item is in macOS range (small int), translate to glibc value. */
     if (item >= 0 && item < 100) {
         /* Force RADIXCHAR (macOS item 50) to always return "." regardless

@@ -76,14 +76,14 @@ int linux_sig_to_macos(int linux_sig) {
 void macos_to_linux_sigset(const void *macos_set, sigset_t *linux_set) {
     uint32_t macos_mask = *(const uint32_t *)macos_set;
     static int (*real_sigemptyset)(sigset_t *) = NULL;
-    if (!real_sigemptyset) real_sigemptyset = dlsym(RTLD_NEXT, "sigemptyset");
+    if (!real_sigemptyset) real_sigemptyset = real_dlsym(RTLD_NEXT, "sigemptyset");
     real_sigemptyset(linux_set);
     for (int macos_sig = 1; macos_sig <= 31; macos_sig++) {
         if (macos_mask & (1u << (macos_sig - 1))) {
             int linux_sig = macos_sig_to_linux(macos_sig);
             if (linux_sig > 0) {
                 static int (*real_sigaddset)(sigset_t *, int) = NULL;
-                if (!real_sigaddset) real_sigaddset = dlsym(RTLD_NEXT, "sigaddset");
+                if (!real_sigaddset) real_sigaddset = real_dlsym(RTLD_NEXT, "sigaddset");
                 real_sigaddset(linux_set, linux_sig);
             }
         }
@@ -95,7 +95,7 @@ void macos_to_linux_sigset(const void *macos_set, sigset_t *linux_set) {
 void linux_to_macos_sigset(const sigset_t *linux_set, void *macos_set) {
     uint32_t macos_mask = 0;
     static int (*real_sigismember)(const sigset_t *, int) = NULL;
-    if (!real_sigismember) real_sigismember = dlsym(RTLD_NEXT, "sigismember");
+    if (!real_sigismember) real_sigismember = real_dlsym(RTLD_NEXT, "sigismember");
     for (int linux_sig = 1; linux_sig <= 31; linux_sig++) {
         if (real_sigismember(linux_set, linux_sig)) {
             int macos_sig = linux_sig_to_macos(linux_sig);
