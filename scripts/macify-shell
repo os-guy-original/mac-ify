@@ -71,7 +71,7 @@ fi
 # crashes on the second interactive command due to termcap/ABI issues.
 # Users can override with MACIFY_USE_READLINE=1.
 if [ $# -gt 0 ]; then
-    exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" -c "$*"
+    exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --norc --noprofile -c "$*"
 else
     if [ -n "$MACIFY_USE_READLINE" ]; then
         exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --norc --noprofile -i

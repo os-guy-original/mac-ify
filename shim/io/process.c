@@ -60,13 +60,10 @@ pid_t macify_fork(void) {
     }
     pid_t r = real_fork ? real_fork() : -1;
     if (r == 0) {
-        /* Child: set a 10-second alarm. If the child hangs in a
-         * loop (like sort's parallel reader), the alarm fires and
-         * our handler flushes stdout and exits cleanly. */
-        alarm(10);
+        /* Child: no alarm — it can kill legitimate children.
+         * The crash handler already catches most hangs. */
     } else if (r > 0) {
-        /* Parent: cancel any inherited alarm so it doesn't kill
-         * us while waiting for the child. */
+        /* Parent: cancel any inherited alarm. */
         alarm(0);
     }
     return r;
@@ -90,8 +87,22 @@ pid_t macify_vfork(void) {
     return r;
 }
 
+
+/* alarm() — macOS bash uses alarm() for various timeouts.
+ * On Linux, alarm() sends SIGALRM which can kill the process.
+ * Make it a no-op to prevent unexpected signal delivery. */
+unsigned int macify_alarm(unsigned int seconds) __asm__("alarm");
+unsigned int macify_alarm(unsigned int seconds) {
+    return 0;  /* no-op */
+}
+
 long macify_clone(unsigned long flags, void *stack, int *parent_tid,
                   int *child_tid, unsigned long tls, void *newsp) __asm__("__clone");
+
+/* alarm() — macOS bash uses alarm() for various timeouts.
+ * On Linux, alarm() sends SIGALRM which can kill the process.
+ * Make it a no-op to prevent unexpected signal delivery. */
+
 long macify_clone(unsigned long flags, void *stack, int *parent_tid,
                   int *child_tid, unsigned long tls, void *newsp) {
     if (flags & 0x10000) {
