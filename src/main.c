@@ -167,7 +167,6 @@ int main(int argc, char **argv, char **envp) {
         uint64_t max_vmend = 0;
         uint8_t *scan = file_data + sizeof(mach_header_64);
         uint8_t *scan_end = scan + hdr->sizeofcmds;
-        fprintf(stderr, "macify: processing load commands...\n"); fflush(stderr);
     for (uint32_t i = 0; i < hdr->ncmds && scan + 8 <= scan_end; i++) {
             uint32_t cmd     = *(uint32_t *)(void *)scan;
             uint32_t cmdsize = *(uint32_t *)(void *)(scan + 4);
@@ -339,7 +338,6 @@ int main(int argc, char **argv, char **envp) {
                     unwind_h, cxxabi, libcxx);
     }
 
-    fprintf(stderr, "macify: preloading libraries...\n"); fflush(stderr);
     /* Pre-load libtinfo (termcap functions) as a fallback.
      *
      * Mach-O dylibs (macOS libncurses) are now checked BEFORE extra handles
@@ -1350,7 +1348,6 @@ int main(int argc, char **argv, char **envp) {
      * with the real Linux system. */
     macify_init_prefix();
 
-    fprintf(stderr, "macify: calling main...\n"); fflush(stderr);
     /* Set MACIFY_BINARY so exec/posix_spawn shims can re-run through macify.
      * Use /proc/self/exe to get the absolute path to the macify binary. */
     {
@@ -1438,7 +1435,6 @@ int main(int argc, char **argv, char **envp) {
         }
     }
         errno = 0;
-        fprintf(stderr, "macify: entering bash main...\n"); fflush(stderr);
         call_main_and_exit(g_entry_rip, stack_top);
     } else {
         errno = 0;

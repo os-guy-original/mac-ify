@@ -1,0 +1,20 @@
+{
+  global:
+    /* Only export symbols that macOS code needs via GOT resolution */
+    *;
+  local:
+    /* But NOT these — glibc must use its own versions */
+    getpwuid;
+    getpwuid_r;
+    getpwnam;
+    getaddrinfo;
+    freeaddrinfo;
+    dlsym;
+    dlopen;
+    dlclose;
+    sigaction;
+    signal;
+    sigprocmask;
+    pthread_sigmask;
+    alarm;
+};

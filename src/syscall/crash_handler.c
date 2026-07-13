@@ -246,7 +246,7 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
      * output) and tries to execute it as code. This happens after fork+
      * pipe+read in $(...) command substitution.
      * Recovery: scan stack for a bash __TEXT return address, resume there. */
-    if (sig == SIGSEGV && info->si_code == 2 /* SEGV_MAPERR */
+    if (sig == SIGSEGV && (info->si_code == 1 || info->si_code == 2)
         && !getenv("MACIFY_TRACE_NULL_CRASH")) {
         extern uintptr_t g_macos_text_lo;
         extern uintptr_t g_macos_text_hi;

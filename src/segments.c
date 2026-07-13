@@ -216,7 +216,7 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         addr = dlsym(RTLD_DEFAULT, sym);
     }
 
-    /* Search loaded Mach-O dylibs BEFORE dlsym(dy->handle, sym).
+    /* Check loaded Mach-O dylibs BEFORE dlsym(dy->handle, sym).
      * See flat-namespace comment above for why this order matters. */
     if (!addr) {
         extern void *macho_dylib_lookup(const char *);
@@ -232,6 +232,28 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
                 (void)write(2, b, n);
             }
             return addr;
+        }
+    }
+
+    /* Check shim's non-exported overrides (getpwuid, getpwnam, etc.)
+     * These are NOT globally exported to prevent glibc NSS deadlocks,
+     * but bash's GOT needs them. Resolve via dlsym on shim handle. */
+    if (!addr && g_ndylibs > 0 && g_dylibs[0].handle) {
+        static void *(*get_shim_sym)(const char *) = NULL;
+        if (!get_shim_sym)
+            get_shim_sym = dlsym(g_dylibs[0].handle, "macify_get_shim_symbol");
+        if (get_shim_sym) {
+            addr = get_shim_sym(sym);
+            if (addr) return addr;
+            char base_sym[256];
+            strncpy(base_sym, sym, 255);
+            base_sym[255] = '\0';
+            char *dollar = strchr(base_sym, '$');
+            if (dollar) {
+                *dollar = '\0';
+                addr = get_shim_sym(base_sym);
+                if (addr) return addr;
+            }
         }
     }
 

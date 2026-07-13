@@ -149,8 +149,6 @@ struct macos_addrinfo {
 };
 
 int macify_getaddrinfo(const char *node, const char *service,
-                       const void *hints, void **res) __asm__("getaddrinfo");
-int macify_getaddrinfo(const char *node, const char *service,
                        const void *hints, void **res) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         static int (*real_gai)(const char *, const char *, const void *, void **) = NULL;
@@ -308,7 +306,7 @@ int macify_getaddrinfo(const char *node, const char *service,
     return r;
 }
 
-void macify_freeaddrinfo(void *ai) __asm__("freeaddrinfo");
+void macify_freeaddrinfo(void *ai) ;
 void macify_freeaddrinfo(void *ai) {
     /* Free the macOS-layout addrinfo list that we allocated in
      * macify_getaddrinfo. We must NOT call glibc's freeaddrinfo because the

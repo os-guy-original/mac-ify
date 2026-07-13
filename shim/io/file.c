@@ -761,7 +761,6 @@ struct macos_passwd {
 static __thread struct macos_passwd macos_pw;
 static __thread char macos_pw_name[256], macos_pw_dir[256], macos_pw_shell[256];
 
-struct passwd *macify_getpwuid(uid_t uid) __asm__("getpwuid");
 struct passwd *macify_getpwuid(uid_t uid) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         static struct passwd *(*real)(uid_t) = NULL;
@@ -789,7 +788,6 @@ struct passwd *macify_getpwuid(uid_t uid) {
     return (struct passwd *)&macos_pw;
 }
 
-int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) __asm__("getpwuid_r");
 int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
@@ -850,7 +848,6 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
     return r;
 }
 
-struct passwd *macify_getpwnam(const char *name) __asm__("getpwnam");
 struct passwd *macify_getpwnam(const char *name) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         static struct passwd *(*real)(const char *) = NULL;

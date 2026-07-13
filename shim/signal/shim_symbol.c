@@ -3,6 +3,8 @@
 #include <signal.h>
 #include <pthread.h>
 #include <sys/epoll.h>
+#include <pwd.h>
+#include <sys/types.h>
 
 
 /* macify_get_shim_symbol — return our shim's override for a given symbol.
@@ -137,6 +139,25 @@ void *macify_get_shim_symbol(const char *symbol) {
     if (strcmp(symbol, "munlockall") == 0) {
         extern int munlockall(void);
         return (void *)munlockall;
+    }
+
+    /* NSS functions — NOT exported globally (to prevent glibc deadlock),
+     * but available via dlsym for bash's GOT resolution */
+    if (strcmp(symbol, "getpwuid") == 0) {
+        extern struct passwd *macify_getpwuid(uid_t);
+        return (void *)macify_getpwuid;
+    }
+    if (strcmp(symbol, "getpwuid_r") == 0) {
+        extern int macify_getpwuid_r(uid_t, struct passwd *, char *, size_t, struct passwd **);
+        return (void *)macify_getpwuid_r;
+    }
+    if (strcmp(symbol, "getpwnam") == 0) {
+        extern struct passwd *macify_getpwnam(const char *);
+        return (void *)macify_getpwnam;
+    }
+    if (strcmp(symbol, "getaddrinfo") == 0) {
+        extern int macify_getaddrinfo(const char *, const char *, const void *, void **);
+        return (void *)macify_getaddrinfo;
     }
 
     return NULL;
