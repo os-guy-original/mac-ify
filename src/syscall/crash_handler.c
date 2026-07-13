@@ -46,33 +46,10 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         }
         if (sig == SIGSEGV && is_readline_crash &&
             !getenv("MACIFY_TRACE_NULL_CRASH")) {
-            /* Try to recover by scanning the stack for a valid return address */
-            uint64_t sp = (uint64_t)regs[REG_RSP];
-            extern loaded_segment g_segments[];
-            extern int g_nsegments;
-
-            /* Get rclone base for debugging */
-            uint64_t rclone_base = 0;
-            for (int i = 0; i < g_nsegments; i++) {
-                if (g_segments[i].is_pagezero) continue;
-                if (strcmp(g_segments[i].name, "__TEXT") == 0) {
-                    rclone_base = g_segments[i].vmaddr;
-                    break;
-                }
-            }
-
-        /* Return to bash's reader_loop() function (rclone+0x5310).
-         * This is bash's main input loop — it calls read_command() which
-         * calls readline(). By returning here, bash starts fresh with a
-         * new readline call, losing the current input but staying stable.
-         * The stack is set to a clean position within the signal stack. */
-        {
-            if (getenv("MACIFY_TRACE_RECOVERY")) {
-                char b[128]; int n = snprintf(b, sizeof(b),
-                    "macify: readline crash recovery — returning to reader_loop\n");
-                (void)write(2, b, n);
-            }
-            /* Flush stdout */
+            /* Readline crash: CPU jumped to bash BSS (all-zeros).
+             * Flush stdout and exit cleanly. We can't recover from
+             * this crash reliably — returning to reader_loop causes
+             * infinite loops when stdin is /dev/null or a pipe. */
             extern FILE *stdout;
             if (stdout) {
                 char **base = (char **)((char *)stdout + 0x20);
@@ -81,17 +58,12 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                     write(1, *base, *ptr - *base);
                 }
             }
-            /* Set rip to reader_loop (rclone+0x5310) */
-            regs[REG_RIP] = rclone_base + 0x5310;
-            /* Set rsp to a clean position on the signal stack.
-             * The signal frame is at the current rsp. We need to go
-             * ABOVE it (higher address) to avoid corrupting it.
-             * Use rbp as the new rsp (it's typically the frame pointer
-             * of a higher function in the call chain). */
-            regs[REG_RSP] = (uint64_t)regs[REG_RBP];
-            regs[REG_RAX] = 0;
-            return;  /* resume execution at reader_loop */
-        }
+            if (getenv("MACIFY_TRACE_RECOVERY")) {
+                char b[128]; int n = snprintf(b, sizeof(b),
+                    "macify: readline crash — flushing and exiting\n");
+                (void)write(2, b, n);
+            }
+            _exit(0);
 
         /* No valid return address found — fall through to original behavior */
         {
