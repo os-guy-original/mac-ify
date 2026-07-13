@@ -112,9 +112,16 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
     /* If the caller is NOT macOS text, pass through to glibc.
      * glibc internally calls pthread_sigmask with 128-byte sigsets. */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        /* Non-macOS caller: use raw rt_sigprocmask syscall.
-         * CRITICAL: Can't use dlsym(RTLD_NEXT, "pthread_sigmask") because our
-         * dlsym override returns our own function, causing infinite recursion. */
+        /* Non-macOS caller: use glibc's real pthread_sigmask.
+         * Using raw syscall(14) bypasses glibc's internal locks, causing
+         * futex deadlocks. Use real_dlsym to avoid infinite recursion. */
+        static int (*real_pthread_sigmask)(int, const sigset_t *, sigset_t *) = NULL;
+        if (!real_pthread_sigmask) {
+            real_pthread_sigmask = real_dlsym(RTLD_NEXT, "pthread_sigmask");
+        }
+        if (real_pthread_sigmask) {
+            return real_pthread_sigmask(how, (const sigset_t *)set, (sigset_t *)oldset);
+        }
         return syscall(14, how, set, oldset, 8);
     }
 
@@ -171,7 +178,14 @@ int macify_sigprocmask(int how, const void *set, void *oldset) __asm__("sigprocm
 int macify_sigprocmask(int how, const void *set, void *oldset) {
     /* If the caller is NOT macOS text, pass through to glibc. */
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        /* Non-macOS caller: use raw rt_sigprocmask syscall */
+        /* Use glibc's real sigprocmask to avoid futex deadlocks */
+        static int (*real_sigprocmask)(int, const sigset_t *, sigset_t *) = NULL;
+        if (!real_sigprocmask) {
+            real_sigprocmask = real_dlsym(RTLD_NEXT, "sigprocmask");
+        }
+        if (real_sigprocmask) {
+            return real_sigprocmask(how, (const sigset_t *)set, (sigset_t *)oldset);
+        }
         return syscall(14, how, set, oldset, 8);
     }
 

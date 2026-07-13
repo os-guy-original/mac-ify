@@ -309,36 +309,32 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
             );
         }
 
-        struct k_sigaction sa;
+        /* Install crash handler using glibc's sigaction (NOT raw syscall).
+         * Using raw syscall(13) bypasses glibc's internal locks, causing
+         * futex deadlocks on some systems. */
+        struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
-        sa.handler = crash_handler;
-        /* SA_SIGINFO=0x4 | SA_NODEFER=0x40000000 | SA_RESTORER=0x04000000
-         * SA_ONSTACK=0x08000000 — always use sigaltstack so the handler
-         * runs on a valid stack even if the main stack is corrupted. */
-        extern uint64_t g_tls_g_addr;
-        sa.flags = 0x4C000004;  /* SA_SIGINFO | SA_NODEFER | SA_RESTORER | SA_ONSTACK */
-        sa.restorer = local_restore_rt;
-        memset(sa.mask, 0, sizeof(sa.mask));
-        /* Raw rt_sigaction syscall: syscall(13, signum, act, oldact, sigsetsize) */
-        long r1 = syscall(13, 11, &sa, NULL, 8);  /* SIGSEGV */
-        long r2 = syscall(13, 6,  &sa, NULL, 8);  /* SIGABRT */
-        long r3 = syscall(13, 7,  &sa, NULL, 8);  /* SIGBUS */
-        long r4 = syscall(13, 8,  &sa, NULL, 8);  /* SIGFPE */
+        sa.sa_sigaction = crash_handler;
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+        sa.sa_restorer = local_restore_rt;
+        sa.sa_flags |= 0x04000000;  /* SA_RESTORER */
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGABRT, &sa, NULL);
+        sigaction(SIGBUS,  &sa, NULL);
+        sigaction(SIGFPE,  &sa, NULL);
 
-        /* Unblock SIGSEGV and SIGABRT via raw rt_sigprocmask syscall */
-        unsigned long unblock_mask[16];
-        memset(unblock_mask, 0, sizeof(unblock_mask));
-        /* Signal N is bit (N-1) in the sigset. SIGSEGV=11 → bit 10, SIGABRT=6 → bit 5 */
-        unblock_mask[0] = (1UL << 10) | (1UL << 5);
-        /* rt_sigprocmask: syscall(14, how, set, oldset, sigsetsize)
-         * how=1 = SIG_UNBLOCK */
-        long r5 = syscall(14, 1, unblock_mask, NULL, 8);
+        /* Unblock SIGSEGV and SIGABRT using glibc's sigprocmask */
+        sigset_t unblock_set;
+        sigemptyset(&unblock_set);
+        sigaddset(&unblock_set, SIGSEGV);
+        sigaddset(&unblock_set, SIGABRT);
+        sigprocmask(SIG_UNBLOCK, &unblock_set, NULL);
 
         if (getenv("MACIFY_VERIFY_HANDLER")) {
             char b[256];
             int n = snprintf(b, sizeof(b),
-                "macify: raw sigaction: SEGV=%ld ABRT=%ld BUS=%ld FPE=%ld unblock=%ld\n",
-                r1, r2, r3, r4, r5);
+                "macify: sigaction installed, signals unblocked\n");
             (void)write(2, b, n);
         }
 
