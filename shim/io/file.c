@@ -769,13 +769,34 @@ struct passwd *(*glibc_getpwnam)(const char *) = NULL;
 int (*glibc_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
 
 struct passwd *macify_getpwuid(uid_t uid) {
+    if (getenv("MACIFY_TRACE_PASSWD")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwuid(%u) called, caller=%p is_macos=%d glibc=%p\n",
+            uid, __builtin_return_address(0),
+            macify_caller_is_macos_text(__builtin_return_address(0)),
+            (void*)glibc_getpwuid);
+        (void)write(2, b, n);
+    }
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         return glibc_getpwuid ? glibc_getpwuid(uid) : NULL;
     }
-    if (!glibc_getpwuid) return NULL;
+    if (!glibc_getpwuid) {
+        if (getenv("MACIFY_TRACE_PASSWD")) {
+            char b[128]; int n = snprintf(b, sizeof(b),
+                "macify: getpwuid(%u) — glibc_getpwuid is NULL, returning NULL\n", uid);
+            (void)write(2, b, n);
+        }
+        return NULL;
+    }
     struct passwd *(*real)(uid_t) = glibc_getpwuid;
     if (!real) return NULL;
     struct passwd *lp = real(uid);
+    if (getenv("MACIFY_TRACE_PASSWD")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwuid(%u) — glibc returned %p (name=%s dir=%s)\n",
+            uid, (void*)lp, lp ? lp->pw_name : "(null)", lp ? lp->pw_dir : "(null)");
+        (void)write(2, b, n);
+    }
     if (!lp) return NULL;
     strncpy(macos_pw_name, lp->pw_name, 255); macos_pw_name[255] = '\0';
     strncpy(macos_pw_dir, lp->pw_dir, 255); macos_pw_dir[255] = '\0';
@@ -794,15 +815,23 @@ struct passwd *macify_getpwuid(uid_t uid) {
 }
 
 int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+    if (getenv("MACIFY_TRACE_PASSWD")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwuid_r(%u) called, caller=%p is_macos=%d glibc=%p\n",
+            uid, __builtin_return_address(0),
+            macify_caller_is_macos_text(__builtin_return_address(0)),
+            (void*)glibc_getpwuid_r);
+        (void)write(2, b, n);
+    }
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         return glibc_getpwuid_r ? glibc_getpwuid_r(uid, pwd, buf, buflen, result) : -1;
     }
     if (!glibc_getpwuid_r) return -1;
     int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = glibc_getpwuid_r;
     if (!real) { errno = ENOSYS; return -1; }
-    if (getenv("MACIFY_TRACE_OPEN")) {
+    if (getenv("MACIFY_TRACE_PASSWD") || getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
-            "macify: getpwuid_r(%u) [enter]\n", uid);
+            "macify: getpwuid_r(%u) [entering glibc]\n", uid);
         (void)write(2, b, n);
     }
     /* Call real getpwuid_r with a Linux-format struct passwd.
@@ -852,6 +881,14 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
 }
 
 struct passwd *macify_getpwnam(const char *name) {
+    if (getenv("MACIFY_TRACE_PASSWD")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwnam(\"%s\") called, caller=%p is_macos=%d glibc=%p\n",
+            name ? name : "(null)", __builtin_return_address(0),
+            macify_caller_is_macos_text(__builtin_return_address(0)),
+            (void*)glibc_getpwnam);
+        (void)write(2, b, n);
+    }
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
         return glibc_getpwnam ? glibc_getpwnam(name) : NULL;
     }
@@ -859,6 +896,12 @@ struct passwd *macify_getpwnam(const char *name) {
     struct passwd *(*real)(const char *) = glibc_getpwnam;
     if (!real) return NULL;
     struct passwd *lp = real(name);
+    if (getenv("MACIFY_TRACE_PASSWD")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: getpwnam(\"%s\") — glibc returned %p\n",
+            name ? name : "(null)", (void*)lp);
+        (void)write(2, b, n);
+    }
     if (!lp) return NULL;
     strncpy(macos_pw_name, lp->pw_name, 255); macos_pw_name[255] = '\0';
     strncpy(macos_pw_dir, lp->pw_dir, 255); macos_pw_dir[255] = '\0';

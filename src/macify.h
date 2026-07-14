@@ -301,6 +301,11 @@ uint64_t setup_stack(int argc, char **argv, char **envp, void **stack_base, size
 void jump_to_entry(uint64_t entry, uint64_t stack_top) __attribute__((noreturn));
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) __attribute__((noreturn));
 
+/* watchdog.c — hang detector. Arms a SIGALRM timer that dumps diagnostics
+ * if the macOS binary doesn't complete within the timeout.
+ * Enable with MACIFY_WATCHDOG=<seconds> env var. */
+void macify_arm_watchdog(void);
+
 /* prefix.c — macOS filesystem prefix (like Wine's drive_c) */
 void macify_init_prefix(void);
 int macify_translate_path(const char *path, char *out, size_t out_size);

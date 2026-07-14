@@ -93,13 +93,21 @@ uint64_t setup_stack(int argc, char **argv, char **envp, void **out_stack_base, 
 /* Entry jump — set rsp and jmp to entry. Never returns. */
 __attribute__((noreturn))
 void jump_to_entry(uint64_t entry, uint64_t stack_top) {
+    /* Arm the hang watchdog before jumping (for LC_UNIXTHREAD binaries).
+     * No-op if MACIFY_WATCHDOG is not set. */
+    macify_arm_watchdog();
+
+    /* CRITICAL: Clear rbp BEFORE the asm block, not inside it.
+     * If we clear rbp inside the asm block after the compiler assigns
+     * `entry` to rbp, the jmp target becomes 0. Doing it here lets the
+     * compiler save entry across the zeroing. */
     __asm__ volatile (
-        "mov %[stk], %%rsp\n\t"
         "xor %%rbp, %%rbp\n\t"
+        "mov %[stk], %%rsp\n\t"
         "jmp *%[rip]\n\t"
         :
         : [stk] "r"(stack_top), [rip] "r"(entry)
-        : "memory"
+        : "rbp", "memory"
     );
     __builtin_unreachable();
 }
@@ -384,6 +392,13 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
             __environ = environ;
         }
     }
+
+    /* Arm the hang watchdog BEFORE calling main. If the macOS binary
+     * hangs (e.g., on a futex deadlock), the watchdog will fire after
+     * MACIFY_WATCHDOG seconds and dump the stack trace + module map.
+     * No-op if MACIFY_WATCHDOG is not set. */
+    macify_arm_watchdog();
+
     int ret;
     __asm__ volatile (
         "mov %[entry], %%r11\n\t"          /* save entry in r11 */

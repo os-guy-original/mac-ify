@@ -11,6 +11,7 @@ static const char *macify_shim_path(void) {
         init = 1;
         ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 32);
         if (n > 0) {
+            path[n] = '\0';
             char *slash = strrchr(path, '/');
             if (slash) {
                 strcpy(slash + 1, "libmacify_shim.so");
@@ -21,6 +22,7 @@ static const char *macify_shim_path(void) {
         }
         strcpy(path, "libmacify_shim.so");
     }
+    return path;
 }
 
 /* Usage & main */

@@ -7,7 +7,7 @@ LDFLAGS ?= -ldl -rdynamic
 BIN_DIR  = ../build
 BIN      = $(BIN_DIR)/macify
 
-SRCS = main.c segments.c fixups.c runtime.c prefix.c macho_dylib.c \
+SRCS = main.c segments.c fixups.c runtime.c prefix.c macho_dylib.c watchdog.c \
        syscall/syscall_table.c syscall/syscall_names.c syscall/flag_translation.c \
        syscall/raw_syscall.c syscall/crash_handler.c syscall/sigill_handler.c syscall/patcher.c
 OBJS = $(SRCS:.c=.o)
