@@ -89,8 +89,20 @@ void *dlopen(const char *filename, int flag) {
     return NULL;
 }
 
+/* dlsym — DON'T override globally.
+ * Overriding dlsym causes futex deadlocks because glibc's NSS
+ * subsystem calls dlsym internally. Our override calls real_dlsym
+ * which acquires glibc's _dl_load_lock, but NSS already holds it.
+ *
+ * Instead, bash's GOT entries are resolved by the macify loader's
+ * resolve_symbol function, which calls dlsym(shim_handle, ...)
+ * directly (bypassing any override) and also checks
+ * macify_get_shim_symbol for non-exported overrides.
+ *
+ * Go binaries that use dlsym to look up C functions are handled
+ * via macify_get_shim_symbol in resolve_symbol. */
 void *dlsym(void *handle, const char *symbol) {
-    /* Intercept dlsym for our fake SystemConfiguration handle. */
+    /* Only intercept for our fake SystemConfiguration handle. */
     if (handle == macify_sc_fake_handle) {
         if (strcmp(symbol, "SCDynamicStoreCreate") == 0)
             return (void *)macify_SCDynamicStoreCreate;
@@ -120,36 +132,16 @@ void *dlsym(void *handle, const char *symbol) {
             return (void *)macify_dns_configuration_free;
         return NULL;
     }
-    /* Find real glibc dlsym on first call */
+    /* For ALL other callers: pass through directly to glibc's dlsym.
+     * NO caller check, NO macify_get_shim_symbol lookup, NO overhead.
+     * This prevents futex deadlocks in glibc's NSS subsystem. */
     if (!real_dlsym) {
         dl_iterate_phdr(find_dlsym_cb, &real_dlsym);
         if (!real_dlsym) return NULL;
     }
     if (handle == MACOS_RTLD_DEFAULT || handle == MACOS_RTLD_SELF)
         handle = NULL;
-
-    /* Only intercept dlsym for macOS code.
-     * glibc's NSS subsystem calls dlsym internally during getpwuid().
-     * If we intercept those calls, we call real_dlsym which acquires
-     * glibc's dlsym lock — but the lock is already held by the NSS
-     * code → futex deadlock. */
-    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        return real_dlsym(handle, symbol);
-    }
-
-    /* For macOS callers: check our shim's overrides first. */
-    {
-        void *shim_sym = macify_get_shim_symbol(symbol);
-        if (shim_sym) return shim_sym;
-    }
-
-    void *result = real_dlsym(handle, symbol);
-    if (getenv("MACIFY_TRACE_DLSYM")) {
-        char b[256];
-        int n = snprintf(b, sizeof(b), "macify: dlsym(%s) = %p\n", symbol, result);
-        (void)write(2, b, n);
-    }
-    return result;
+    return real_dlsym(handle, symbol);
 }
 
 int dlclose(void *handle) {
