@@ -1,25 +1,27 @@
 #include "macify.h"
 #include <string.h>
 
-/* Path to the shim library — use the directory of the macify binary
- * itself, NOT LD_LIBRARY_PATH. This prevents the shim's symbols from
- * being found by glibc's internal symbol resolution (which causes
- * futex deadlocks on some systems). */
-#define MACIFY_SHIM_PATH \
-    ({ static char _path[4096]; \
-       static int _init = 0; \
-       if (!_init) { \
-           _init = 1; \
-           ssize_t _n = readlink("/proc/self/exe", _path, sizeof(_path)-32); \
-           if (_n > 0) { \
-               char *_slash = strrchr(_path, '/'); \
-               if (_slash) strcpy(_slash+1, "libmacify_shim.so"); \
-               else strcpy(_path, "libmacify_shim.so"); \
-           } else { \
-               strcpy(_path, "libmacify_shim.so"); \
-           } \
-       } \
-       _path; })
+
+/* Find the shim library path — try /proc/self/exe directory first,
+ * then fall back to LD_LIBRARY_PATH search. */
+static const char *macify_shim_path(void) {
+    static char path[4096];
+    static int init = 0;
+    if (!init) {
+        init = 1;
+        ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 32);
+        if (n > 0) {
+            char *slash = strrchr(path, '/');
+            if (slash) {
+                strcpy(slash + 1, "libmacify_shim.so");
+                /* Check if file exists */
+                if (syscall(SYS_faccessat, AT_FDCWD, path, F_OK, 0) == 0)
+                    return path;
+            }
+        }
+        strcpy(path, "libmacify_shim.so");
+    }
+}
 
 /* Usage & main */
 
@@ -399,7 +401,7 @@ int main(int argc, char **argv, char **envp) {
      * Loading the shim here ensures it's available as g_dylibs[0]
      * before ANY dylib's GOT is resolved. */
     {
-        void *shim_h = dlopen(MACIFY_SHIM_PATH, RTLD_NOW);
+        void *shim_h = dlopen(macify_shim_path(), RTLD_NOW);
         if (!shim_h) shim_h = dlopen("libmacify_shim.so", RTLD_NOW);
         void *libc_h = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
         void *libm_h = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
@@ -522,7 +524,7 @@ int main(int argc, char **argv, char **envp) {
             void *libc_handle = NULL;
             void *libm_handle = NULL;
             if (g_ndylibs == 0) {
-                shim_handle = dlopen(MACIFY_SHIM_PATH, RTLD_NOW);
+                shim_handle = dlopen(macify_shim_path(), RTLD_NOW);
                 if (!shim_handle) shim_handle = dlopen("libmacify_shim.so", RTLD_NOW);
                 libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
                 libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);

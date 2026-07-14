@@ -761,14 +761,19 @@ struct macos_passwd {
 static __thread struct macos_passwd macos_pw;
 static __thread char macos_pw_name[256], macos_pw_dir[256], macos_pw_shell[256];
 
+/* Cached pointers to glibc's getpwuid/getpwnam — resolved at
+     * constructor time to avoid calling real_dlsym during NSS lookup,
+     * which can cause futex deadlocks. */
+struct passwd *(*glibc_getpwuid)(uid_t) = NULL;
+struct passwd *(*glibc_getpwnam)(const char *) = NULL;
+int (*glibc_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
+
 struct passwd *macify_getpwuid(uid_t uid) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        static struct passwd *(*real)(uid_t) = NULL;
-        if (!real) real = real_dlsym(RTLD_NEXT, "getpwuid");
-        return real ? real(uid) : NULL;
+        return glibc_getpwuid ? glibc_getpwuid(uid) : NULL;
     }
-    static struct passwd *(*real)(uid_t) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "getpwuid");
+    if (!glibc_getpwuid) return NULL;
+    struct passwd *(*real)(uid_t) = glibc_getpwuid;
     if (!real) return NULL;
     struct passwd *lp = real(uid);
     if (!lp) return NULL;
@@ -790,12 +795,10 @@ struct passwd *macify_getpwuid(uid_t uid) {
 
 int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
-        if (!real) real = real_dlsym(RTLD_NEXT, "getpwuid_r");
-        return real ? real(uid, pwd, buf, buflen, result) : -1;
+        return glibc_getpwuid_r ? glibc_getpwuid_r(uid, pwd, buf, buflen, result) : -1;
     }
-    static int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "getpwuid_r");
+    if (!glibc_getpwuid_r) return -1;
+    int (*real)(uid_t, struct passwd *, char *, size_t, struct passwd **) = glibc_getpwuid_r;
     if (!real) { errno = ENOSYS; return -1; }
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -850,12 +853,10 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
 
 struct passwd *macify_getpwnam(const char *name) {
     if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
-        static struct passwd *(*real)(const char *) = NULL;
-        if (!real) real = real_dlsym(RTLD_NEXT, "getpwnam");
-        return real ? real(name) : NULL;
+        return glibc_getpwnam ? glibc_getpwnam(name) : NULL;
     }
-    static struct passwd *(*real)(const char *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "getpwnam");
+    if (!glibc_getpwnam) return NULL;
+    struct passwd *(*real)(const char *) = glibc_getpwnam;
     if (!real) return NULL;
     struct passwd *lp = real(name);
     if (!lp) return NULL;

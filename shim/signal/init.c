@@ -1,6 +1,8 @@
 /* init.c — constructor, signal stack setup, crash handler installation */
 #include "signal_internal.h"
 #include <sys/syscall.h>
+#include <pwd.h>
+#include <sys/types.h>
 
 /* Track the original PID to detect forked children.
  * Set in the constructor (parent process). After fork(), the child
@@ -184,6 +186,19 @@ static void macify_init_stdio(void) {
     }
 
     atfork_child_exit();
+
+    /* Pre-resolve glibc NSS functions to avoid calling real_dlsym
+     * during NSS lookups (causes futex deadlocks on some systems). */
+    {
+        extern struct passwd *(*glibc_getpwuid)(uid_t);
+        extern struct passwd *(*glibc_getpwnam)(const char *);
+        extern int (*glibc_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **);
+        if (real_dlsym) {
+            glibc_getpwuid = real_dlsym(RTLD_NEXT, "getpwuid");
+            glibc_getpwnam = real_dlsym(RTLD_NEXT, "getpwnam");
+            glibc_getpwuid_r = real_dlsym(RTLD_NEXT, "getpwuid_r");
+        }
+    }
 }
 
 /* ── SIGCHLD wrapper ────────────────────────────────────────────
