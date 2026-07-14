@@ -1,6 +1,26 @@
 #include "macify.h"
 #include <string.h>
 
+/* Path to the shim library — use the directory of the macify binary
+ * itself, NOT LD_LIBRARY_PATH. This prevents the shim's symbols from
+ * being found by glibc's internal symbol resolution (which causes
+ * futex deadlocks on some systems). */
+#define MACIFY_SHIM_PATH \
+    ({ static char _path[4096]; \
+       static int _init = 0; \
+       if (!_init) { \
+           _init = 1; \
+           ssize_t _n = readlink("/proc/self/exe", _path, sizeof(_path)-32); \
+           if (_n > 0) { \
+               char *_slash = strrchr(_path, '/'); \
+               if (_slash) strcpy(_slash+1, "libmacify_shim.so"); \
+               else strcpy(_path, "libmacify_shim.so"); \
+           } else { \
+               strcpy(_path, "libmacify_shim.so"); \
+           } \
+       } \
+       _path; })
+
 /* Usage & main */
 
 static void usage(const char *prog) {
@@ -379,7 +399,8 @@ int main(int argc, char **argv, char **envp) {
      * Loading the shim here ensures it's available as g_dylibs[0]
      * before ANY dylib's GOT is resolved. */
     {
-        void *shim_h = dlopen("libmacify_shim.so", RTLD_NOW);
+        void *shim_h = dlopen(MACIFY_SHIM_PATH, RTLD_NOW);
+        if (!shim_h) shim_h = dlopen("libmacify_shim.so", RTLD_NOW);
         void *libc_h = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
         void *libm_h = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (shim_h) {
@@ -501,7 +522,8 @@ int main(int argc, char **argv, char **envp) {
             void *libc_handle = NULL;
             void *libm_handle = NULL;
             if (g_ndylibs == 0) {
-                shim_handle = dlopen("libmacify_shim.so", RTLD_NOW);
+                shim_handle = dlopen(MACIFY_SHIM_PATH, RTLD_NOW);
+                if (!shim_handle) shim_handle = dlopen("libmacify_shim.so", RTLD_NOW);
                 libc_handle = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
                 libm_handle = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
             } else {

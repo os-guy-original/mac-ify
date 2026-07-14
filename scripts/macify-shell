@@ -53,7 +53,11 @@ EOF
 done
 
 export MACIFY_PREFIX="$PREFIX"
-export LD_LIBRARY_PATH="$SHIM_DIR"
+# DON'T set LD_LIBRARY_PATH — the macify binary finds the shim via
+# /proc/self/exe path resolution. Setting LD_LIBRARY_PATH makes the
+# shim's symbols visible to glibc's internal symbol resolution,
+# causing futex deadlocks on some systems (Artix, kernel 7.x).
+# export LD_LIBRARY_PATH="$SHIM_DIR"
 
 # ── Ensure prefix and rootfs exist ──────────────────────────────
 if [ ! -f "$PREFIX/.macify_prefix" ] || [ ! -f "$PREFIX/bin/bash" ] || [ ! -d "$PREFIX/usr/local/opt/readline" ]; then
