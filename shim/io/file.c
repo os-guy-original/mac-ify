@@ -1001,6 +1001,9 @@ int macify_close(int fd) {
  * parameter numbers directly. */
 long macify_sysconf(int name) __asm__("sysconf");
 long macify_sysconf(int name) {
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)) && real_sysconf) {
+        return real_sysconf(name);
+    }
     LAZY_INIT_IO();
 
     /* Only translate for macOS callers — glibc's internal sysconf calls

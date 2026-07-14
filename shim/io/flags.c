@@ -75,6 +75,9 @@ void init_real_io_funcs(void) {
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (!macify_caller_is_macos_text(__builtin_return_address(0)) && real_mmap) {
+        return real_mmap(addr, length, prot, flags, fd, offset);
+    }
     LAZY_INIT_IO();
     void *orig_addr = addr;
     int orig_flags = flags;
@@ -287,6 +290,9 @@ int madvise(void *addr, size_t length, int advice) {
 }
 
 int mprotect(void *addr, size_t len, int prot) {
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        return real_mprotect ? real_mprotect(addr, len, prot) : (mprotect(addr, len, prot));
+    }
     LAZY_INIT_IO();
     size_t page_size = sysconf(_SC_PAGESIZE);
     uintptr_t a = (uintptr_t)addr;
