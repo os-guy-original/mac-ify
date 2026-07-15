@@ -121,7 +121,7 @@ static void macify_init_stdio(void) {
 
     /* Cache glibc's signal restorer function for SA_RESTORER */
     static int (*real_sa)(int, const struct sigaction *, struct sigaction *) = NULL;
-    if (!real_sa && real_dlsym) real_sa = real_dlsym(RTLD_NEXT, "sigaction");
+    if (!real_sa && real_dlsym) real_sa = macify_elf_lookup("sigaction");
     if (real_sa) {
         struct sigaction probe;
         memset(&probe, 0, sizeof(probe));
@@ -187,18 +187,23 @@ static void macify_init_stdio(void) {
 
     atfork_child_exit();
 
-    /* Pre-resolve glibc NSS functions to avoid calling real_dlsym
-     * during NSS lookups (causes futex deadlocks on some systems). */
+    /* Pre-resolve glibc NSS functions using lock-free ELF lookup.
+     * This avoids calling glibc's dlsym during NSS lookups, which
+     * causes futex deadlocks on systems where __dl_load_lock is
+     * already held (e.g., Artix Linux kernel 7.1.3). */
     {
         extern struct passwd *(*glibc_getpwuid)(uid_t);
         extern struct passwd *(*glibc_getpwnam)(const char *);
         extern int (*glibc_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **);
-        if (real_dlsym) {
-            glibc_getpwuid = real_dlsym(RTLD_NEXT, "getpwuid");
-            glibc_getpwnam = real_dlsym(RTLD_NEXT, "getpwnam");
-            glibc_getpwuid_r = real_dlsym(RTLD_NEXT, "getpwuid_r");
-        }
+        glibc_getpwuid = macify_elf_lookup("getpwuid");
+        glibc_getpwnam = macify_elf_lookup("getpwnam");
+        glibc_getpwuid_r = macify_elf_lookup("getpwuid_r");
     }
+
+    /* Call macify_presolve_all to warm up the ELF cache and pre-resolve
+     * commonly-used symbols. */
+    extern void macify_presolve_all(void);
+    macify_presolve_all();
 }
 
 /* ── SIGCHLD wrapper ────────────────────────────────────────────

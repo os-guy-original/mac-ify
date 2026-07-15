@@ -17,7 +17,7 @@ int macify_wait4(int pid, int *status, int options, void *rusage) {
     }
     if (macify_caller_is_macos_text(__builtin_return_address(0))) {
         static pid_t (*real_wait4)(pid_t, int *, int, void *) = NULL;
-        if (!real_wait4) real_wait4 = real_dlsym(RTLD_NEXT, "wait4");
+        if (!real_wait4) real_wait4 = macify_elf_lookup("wait4");
         if (real_wait4) return real_wait4(pid, status, options, rusage);
     }
     errno = 10;
@@ -38,7 +38,7 @@ pid_t macify_waitpid(pid_t pid, int *status, int options) {
         (void)write(2, b, n);
     }
     static pid_t (*real_waitpid)(pid_t, int *, int) = NULL;
-    if (!real_waitpid) real_waitpid = real_dlsym(RTLD_NEXT, "waitpid");
+    if (!real_waitpid) real_waitpid = macify_elf_lookup("waitpid");
     pid_t r = real_waitpid ? real_waitpid(pid, status, options) : -1;
     if (getenv("MACIFY_TRACE_FORK")) {
         char b[128]; int n = snprintf(b, sizeof(b),
@@ -52,7 +52,7 @@ pid_t macify_waitpid(pid_t pid, int *status, int options) {
 pid_t macify_fork(void) __asm__("fork");
 pid_t macify_fork(void) {
     static pid_t (*real_fork)(void) = NULL;
-    if (!real_fork) real_fork = real_dlsym(RTLD_NEXT, "fork");
+    if (!real_fork) real_fork = macify_elf_lookup("fork");
     if (getenv("MACIFY_TRACE_FORK")) {
         char b[128]; int n = snprintf(b, sizeof(b),
             "macify: fork() called from pid=%d\n", getpid());
@@ -76,7 +76,7 @@ pid_t macify_vfork(void) {
         return -1;
     }
     static pid_t (*real_fork)(void) = NULL;
-    if (!real_fork) real_fork = real_dlsym(RTLD_NEXT, "fork");
+    if (!real_fork) real_fork = macify_elf_lookup("fork");
     pid_t r = real_fork ? real_fork() : -1;
     if (getenv("MACIFY_TRACE_FORK")) {
         char b[128]; int n = snprintf(b, sizeof(b),
@@ -107,13 +107,13 @@ long macify_clone(unsigned long flags, void *stack, int *parent_tid,
                   int *child_tid, unsigned long tls, void *newsp) {
     if (flags & 0x10000) {
         static long (*real_clone)(unsigned long, void *, int *, int *, unsigned long, void *) = NULL;
-        if (!real_clone) real_clone = real_dlsym(RTLD_NEXT, "__clone");
+        if (!real_clone) real_clone = macify_elf_lookup("__clone");
         if (real_clone) return real_clone(flags, stack, parent_tid, child_tid, tls, newsp);
     }
     if ((flags & 0xFF) == 17 && !(flags & 0x10000)) {
         if (macify_caller_is_macos_text(__builtin_return_address(0))) {
             static long (*real_clone)(unsigned long, void *, int *, int *, unsigned long, void *) = NULL;
-            if (!real_clone) real_clone = real_dlsym(RTLD_NEXT, "__clone");
+            if (!real_clone) real_clone = macify_elf_lookup("__clone");
             if (real_clone) return real_clone(flags, stack, parent_tid, child_tid, tls, newsp);
         }
     }
@@ -131,7 +131,7 @@ long macify_clone_alias(unsigned long flags, void *stack, int *parent_tid,
 int macify_pipe(int *pipefd) __asm__("pipe");
 int macify_pipe(int *pipefd) {
     static int (*real_pipe)(int *) = NULL;
-    if (!real_pipe) real_pipe = real_dlsym(RTLD_NEXT, "pipe");
+    if (!real_pipe) real_pipe = macify_elf_lookup("pipe");
     return real_pipe(pipefd);
 }
 
@@ -149,7 +149,7 @@ int macify_pipe(int *pipefd) {
 ssize_t macify_read(int fd, void *buf, size_t count) __asm__("read");
 ssize_t macify_read(int fd, void *buf, size_t count) {
     static ssize_t (*real_read)(int, void *, size_t) = NULL;
-    if (!real_read) real_read = real_dlsym(RTLD_NEXT, "read");
+    if (!real_read) real_read = macify_elf_lookup("read");
 
     /* If reading from a TTY, block SIGCHLD during the read to prevent
      * the readline crash. macOS libedit (readline) crashes when SIGCHLD
@@ -186,7 +186,7 @@ ssize_t macify_read(int fd, void *buf, size_t count) {
 ssize_t macify_write(int fd, const void *buf, size_t count) __asm__("write");
 ssize_t macify_write(int fd, const void *buf, size_t count) {
     static ssize_t (*real_write)(int, const void *, size_t) = NULL;
-    if (!real_write) real_write = real_dlsym(RTLD_NEXT, "write");
+    if (!real_write) real_write = macify_elf_lookup("write");
     ssize_t r = real_write(fd, buf, count);
     if (r == -1 && macify_caller_is_macos_text(__builtin_return_address(0)))
         errno = macify_linux_to_macos_errno(errno);
@@ -196,14 +196,14 @@ ssize_t macify_write(int fd, const void *buf, size_t count) {
 ssize_t macify_writev(int fd, const struct iovec *iov, int iovcnt) __asm__("writev");
 ssize_t macify_writev(int fd, const struct iovec *iov, int iovcnt) {
     static ssize_t (*real_writev)(int, const struct iovec *, int) = NULL;
-    if (!real_writev) real_writev = real_dlsym(RTLD_NEXT, "writev");
+    if (!real_writev) real_writev = macify_elf_lookup("writev");
     return real_writev(fd, iov, iovcnt);
 }
 
 ssize_t macify_readv(int fd, const struct iovec *iov, int iovcnt) __asm__("readv");
 ssize_t macify_readv(int fd, const struct iovec *iov, int iovcnt) {
     static ssize_t (*real_readv)(int, const struct iovec *, int) = NULL;
-    if (!real_readv) real_readv = real_dlsym(RTLD_NEXT, "readv");
+    if (!real_readv) real_readv = macify_elf_lookup("readv");
     return real_readv(fd, iov, iovcnt);
 }
 
@@ -216,7 +216,7 @@ static void macify_restore_read_ptr(FILE *fp);
 FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
-    if (!real_fopen) real_fopen = real_dlsym(RTLD_NEXT, "fopen");
+    if (!real_fopen) real_fopen = macify_elf_lookup("fopen");
     /* Unconditional trace — first line of function */
     if (path) {
         char b[512]; int n = snprintf(b, sizeof(b),
@@ -286,7 +286,7 @@ FILE *macify_fopen(const char *path, const char *mode) {
 int macify_msync(void *addr, size_t length, int flags) __asm__("msync");
 int macify_msync(void *addr, size_t length, int flags) {
     static int (*real_msync)(void *, size_t, int) = NULL;
-    if (!real_msync) real_msync = real_dlsym(RTLD_NEXT, "msync");
+    if (!real_msync) real_msync = macify_elf_lookup("msync");
     /* Round address to page boundary */
     size_t ps = sysconf(_SC_PAGESIZE);
     uintptr_t a = (uintptr_t)addr;
@@ -428,7 +428,7 @@ int macify_skip_r_patch = 0;
 
 int __srget(FILE *fp) {
     static int (*real_fgetc)(FILE *) = NULL;
-    if (!real_fgetc) real_fgetc = real_dlsym(RTLD_NEXT, "fgetc");
+    if (!real_fgetc) real_fgetc = macify_elf_lookup("fgetc");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (is_macos && !macify_getc_patched) macify_restore_read_ptr(fp);
     int c = real_fgetc ? real_fgetc(fp) : EOF;
@@ -470,7 +470,7 @@ int __srget(FILE *fp) {
  * Fix: After fputc, set _w = -1 to force next putc to call __swbuf. */
 int __swbuf(int ch, FILE *fp) {
     static int (*real_fputc)(int, FILE *) = NULL;
-    if (!real_fputc) real_fputc = real_dlsym(RTLD_NEXT, "fputc");
+    if (!real_fputc) real_fputc = macify_elf_lookup("fputc");
     return real_fputc ? real_fputc(ch, fp) : EOF;
 }
 
@@ -479,7 +479,7 @@ int __swbuf(int ch, FILE *fp) {
  * corruption from our macify_fputc shim. See __srget for details. */
 int putc_unlocked(int ch, FILE *fp) {
     static int (*real_fputc)(int, FILE *) = NULL;
-    if (!real_fputc) real_fputc = real_dlsym(RTLD_NEXT, "fputc");
+    if (!real_fputc) real_fputc = macify_elf_lookup("fputc");
     macify_restore_read_ptr(fp);
     int r = real_fputc ? real_fputc(ch, fp) : EOF;
     if (r != EOF) {
@@ -499,7 +499,7 @@ int putc_unlocked(int ch, FILE *fp) {
  * corruption from our macify_fgetc shim. See __srget for details. */
 int getc_unlocked(FILE *fp) {
     static int (*real_fgetc)(FILE *) = NULL;
-    if (!real_fgetc) real_fgetc = real_dlsym(RTLD_NEXT, "fgetc");
+    if (!real_fgetc) real_fgetc = macify_elf_lookup("fgetc");
     macify_restore_read_ptr(fp);
     int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (c != EOF) {
@@ -523,7 +523,7 @@ int putchar_unlocked(int ch) {
         return macify_fputc_macos(ch, __stdoutp);
     }
     static int (*real_fputc)(int, FILE *) = NULL;
-    if (!real_fputc) real_fputc = real_dlsym(RTLD_NEXT, "fputc");
+    if (!real_fputc) real_fputc = macify_elf_lookup("fputc");
     macify_restore_read_ptr(__stdoutp);
     int r = real_fputc ? real_fputc(ch, __stdoutp) : EOF;
     if (r != EOF) {
@@ -541,7 +541,7 @@ int getchar_unlocked(void) {
         return EOF;
     }
     static int (*real_fgetc)(FILE *) = NULL;
-    if (!real_fgetc) real_fgetc = real_dlsym(RTLD_NEXT, "fgetc");
+    if (!real_fgetc) real_fgetc = macify_elf_lookup("fgetc");
     macify_restore_read_ptr(__stdinp);
     int c = real_fgetc ? real_fgetc(__stdinp) : EOF;
     if (c != EOF) {
@@ -599,7 +599,7 @@ static inline void macify_sync_stdio_flags(FILE *fp) {
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fread");
 size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fread)(void *, size_t, size_t, FILE *) = NULL;
-    if (!real_fread) real_fread = real_dlsym(RTLD_NEXT, "fread");
+    if (!real_fread) real_fread = macify_elf_lookup("fread");
     /* Restore _IO_read_ptr and fix _IO_read_end before calling glibc. */
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     size_t r = real_fread(ptr, size, nmemb, stream);
@@ -664,14 +664,14 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 char *macify_fgets(char *s, int n, FILE *stream) __asm__("fgets");
 char *macify_fgets(char *s, int n, FILE *stream) {
     static char *(*real_fgets)(char *, int, FILE *) = NULL;
-    if (!real_fgets) real_fgets = real_dlsym(RTLD_NEXT, "fgets");
+    if (!real_fgets) real_fgets = macify_elf_lookup("fgets");
     return real_fgets(s, n, stream);
 }
 
 int macify_fgetc(FILE *stream) __asm__("fgetc");
 int macify_fgetc(FILE *stream) {
     static int (*real_fgetc)(FILE *) = NULL;
-    if (!real_fgetc) real_fgetc = real_dlsym(RTLD_NEXT, "fgetc");
+    if (!real_fgetc) real_fgetc = macify_elf_lookup("fgetc");
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fgetc(stream);
     if (!macify_getc_patched) macify_save_read_ptr(stream);
@@ -690,7 +690,7 @@ int macify_fgetc(FILE *stream) {
 int macify_ungetc(int c, FILE *stream) __asm__("ungetc");
 int macify_ungetc(int c, FILE *stream) {
     static int (*real_ungetc)(int, FILE *) = NULL;
-    if (!real_ungetc) real_ungetc = real_dlsym(RTLD_NEXT, "ungetc");
+    if (!real_ungetc) real_ungetc = macify_elf_lookup("ungetc");
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_ungetc(c, stream);
     if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
@@ -706,7 +706,7 @@ int macify_ungetc(int c, FILE *stream) {
 int macify_fseeko(FILE *stream, long off, int whence) __asm__("fseeko");
 int macify_fseeko(FILE *stream, long off, int whence) {
     static int (*real_fseeko)(FILE *, long, int) = NULL;
-    if (!real_fseeko) real_fseeko = real_dlsym(RTLD_NEXT, "fseeko");
+    if (!real_fseeko) real_fseeko = macify_elf_lookup("fseeko");
     /* Restore _IO_read_ptr and _IO_read_end before calling glibc. */
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_fseeko(stream, off, whence);
@@ -742,7 +742,7 @@ int macify_fclose(FILE *stream) {
         return macify_fflush_macos(stream);
     }
     static int (*real_fclose)(FILE *) = NULL;
-    if (!real_fclose) real_fclose = real_dlsym(RTLD_NEXT, "fclose");
+    if (!real_fclose) real_fclose = macify_elf_lookup("fclose");
     /* Restore _IO_read_ptr and fix _IO_read_end before fclose. */
     macify_restore_read_ptr(stream);
     /* Invalidate the save/restore entry so a reused FILE* (same address)
@@ -812,7 +812,7 @@ int macify_feof(FILE *stream) {
 int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) __asm__("setvbuf");
 int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
     static int (*real_setvbuf)(FILE *, char *, int, size_t) = NULL;
-    if (!real_setvbuf) real_setvbuf = real_dlsym(RTLD_NEXT, "setvbuf");
+    if (!real_setvbuf) real_setvbuf = macify_elf_lookup("setvbuf");
     return real_setvbuf(stream, buf, mode, size);
 }
 
@@ -825,7 +825,7 @@ int macify_setvbuf(FILE *stream, char *buf, int mode, size_t size) {
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) __asm__("fwrite");
 size_t macify_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     static size_t (*real_fwrite)(const void *, size_t, size_t, FILE *) = NULL;
-    if (!real_fwrite) real_fwrite = real_dlsym(RTLD_NEXT, "fwrite");
+    if (!real_fwrite) real_fwrite = macify_elf_lookup("fwrite");
     return real_fwrite(ptr, size, nmemb, stream);
 }
 
@@ -848,7 +848,7 @@ int macify_printf(const char *fmt, ...) {
         return r;
     }
     static int (*real_vfprintf)(FILE *, const char *, va_list) = NULL;
-    if (!real_vfprintf) real_vfprintf = real_dlsym(RTLD_NEXT, "vfprintf");
+    if (!real_vfprintf) real_vfprintf = macify_elf_lookup("vfprintf");
     va_list ap;
     va_start(ap, fmt);
     int r = real_vfprintf(stdout, fmt, ap);
@@ -873,7 +873,7 @@ int macify_vfprintf(FILE *stream, const char *fmt, va_list ap) {
         return r;
     }
     static int (*real_vfprintf)(FILE *, const char *, va_list) = NULL;
-    if (!real_vfprintf) real_vfprintf = real_dlsym(RTLD_NEXT, "vfprintf");
+    if (!real_vfprintf) real_vfprintf = macify_elf_lookup("vfprintf");
     int r = real_vfprintf(stream, fmt, ap);
     if (r >= 0) {
 
@@ -899,7 +899,7 @@ int macify_fprintf(FILE *stream, const char *fmt, ...) {
         return r;
     }
     static int (*real_vfprintf)(FILE *, const char *, va_list) = NULL;
-    if (!real_vfprintf) real_vfprintf = real_dlsym(RTLD_NEXT, "vfprintf");
+    if (!real_vfprintf) real_vfprintf = macify_elf_lookup("vfprintf");
     r = real_vfprintf(stream, fmt, ap);
     va_end(ap);
     if (r >= 0) {
@@ -912,7 +912,7 @@ int macify_fprintf(FILE *stream, const char *fmt, ...) {
 int macify_fputs(const char *s, FILE *stream) __asm__("fputs");
 int macify_fputs(const char *s, FILE *stream) {
     static int (*real_fputs)(const char *, FILE *) = NULL;
-    if (!real_fputs) real_fputs = real_dlsym(RTLD_NEXT, "fputs");
+    if (!real_fputs) real_fputs = macify_elf_lookup("fputs");
     return real_fputs(s, stream);
 }
 
@@ -920,7 +920,7 @@ int macify_fputs(const char *s, FILE *stream) {
 FILE *macify_fdopen(int fd, const char *mode) __asm__("fdopen");
 FILE *macify_fdopen(int fd, const char *mode) {
     static FILE *(*real_fdopen)(int, const char *) = NULL;
-    if (!real_fdopen) real_fdopen = real_dlsym(RTLD_NEXT, "fdopen");
+    if (!real_fdopen) real_fdopen = macify_elf_lookup("fdopen");
     FILE *fp = real_fdopen(fd, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -945,7 +945,7 @@ int macify_fputc(int c, FILE *stream) {
         syscall(1, 2, b, n);
     }
     static int (*real_fputc)(int, FILE *) = NULL;
-    if (!real_fputc) real_fputc = real_dlsym(RTLD_NEXT, "fputc");
+    if (!real_fputc) real_fputc = macify_elf_lookup("fputc");
     int r = real_fputc(c, stream);
     if (r != EOF) {
 
@@ -957,7 +957,7 @@ int macify_fputc(int c, FILE *stream) {
 int macify_putchar(int c) __asm__("putchar");
 int macify_putchar(int c) {
     static int (*real_fputc)(int, FILE *) = NULL;
-    if (!real_fputc) real_fputc = real_dlsym(RTLD_NEXT, "fputc");
+    if (!real_fputc) real_fputc = macify_elf_lookup("fputc");
     extern FILE *__stdoutp;
     return real_fputc ? real_fputc(c, __stdoutp) : EOF;
 }
@@ -977,7 +977,7 @@ int macify_puts(const char *s) {
         return 0;
     }
     static int (*real_puts)(const char *) = NULL;
-    if (!real_puts) real_puts = real_dlsym(RTLD_NEXT, "puts");
+    if (!real_puts) real_puts = macify_elf_lookup("puts");
     return real_puts(s);
 }
 
@@ -985,7 +985,7 @@ int macify_puts(const char *s) {
 int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
-    if (!real_fflush) real_fflush = real_dlsym(RTLD_NEXT, "fflush");
+    if (!real_fflush) real_fflush = macify_elf_lookup("fflush");
     /* When stream is NULL (flush all streams), glibc iterates ALL open
      * FILE* structures. macOS binaries corrupt some FILE* by writing to
      * offset 0x10 (thinking it's macOS _flags, but glibc has _IO_read_end

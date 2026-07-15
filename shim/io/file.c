@@ -10,7 +10,7 @@
 char *macify_realpath(const char *path, char *resolved) __asm__("realpath");
 char *macify_realpath(const char *path, char *resolved) {
     static char *(*real)(const char *, char *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "realpath");
+    if (!real) real = macify_elf_lookup("realpath");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -33,7 +33,7 @@ char *macify_realpath(const char *path, char *resolved) {
 ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) __asm__("readlink");
 ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) {
     static ssize_t (*real)(const char *, char *, size_t) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "readlink");
+    if (!real) real = macify_elf_lookup("readlink");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -56,7 +56,7 @@ ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) {
 char *macify_getcwd(char *buf, size_t size) __asm__("getcwd");
 char *macify_getcwd(char *buf, size_t size) {
     static char *(*real)(char *, size_t) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "getcwd");
+    if (!real) real = macify_elf_lookup("getcwd");
     char *r = real(buf, size);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
@@ -70,7 +70,7 @@ char *macify_getcwd(char *buf, size_t size) {
 int macify_mkdir(const char *path, mode_t mode) __asm__("mkdir");
 int macify_mkdir(const char *path, mode_t mode) {
     static int (*real)(const char *, mode_t) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "mkdir");
+    if (!real) real = macify_elf_lookup("mkdir");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -93,7 +93,7 @@ int macify_mkdir(const char *path, mode_t mode) {
 int macify_isatty(int fd) __asm__("isatty");
 int macify_isatty(int fd) {
     static int (*real)(int) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "isatty");
+    if (!real) real = macify_elf_lookup("isatty");
     int r = real(fd);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[128]; int n = snprintf(b, sizeof(b),
@@ -220,7 +220,7 @@ static void translate_stat(const struct stat *ls, struct macos_stat *ms);
 int macify___xstat(int ver, const char *path, struct macos_stat *buf) __asm__("__xstat");
 int macify___xstat(int ver, const char *path, struct macos_stat *buf) {
     static int (*real)(int, const char *, struct stat *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "__xstat");
+    if (!real) real = macify_elf_lookup("__xstat");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos) return real(ver, path, (struct stat *)buf);
     const char *eff = path;
@@ -247,7 +247,7 @@ int macify___xstat(int ver, const char *path, struct macos_stat *buf) {
 int macify___lxstat(int ver, const char *path, struct macos_stat *buf) __asm__("__lxstat");
 int macify___lxstat(int ver, const char *path, struct macos_stat *buf) {
     static int (*real)(int, const char *, struct stat *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "__lxstat");
+    if (!real) real = macify_elf_lookup("__lxstat");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos) return real(ver, path, (struct stat *)buf);
     const char *eff = path;
@@ -273,7 +273,7 @@ int macify___lxstat(int ver, const char *path, struct macos_stat *buf) {
 int macify___fxstat(int ver, int fd, struct macos_stat *buf) __asm__("__fxstat");
 int macify___fxstat(int ver, int fd, struct macos_stat *buf) {
     static int (*real)(int, int, struct stat *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "__fxstat");
+    if (!real) real = macify_elf_lookup("__fxstat");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos) return real(ver, fd, (struct stat *)buf);
     struct stat ls;
@@ -360,7 +360,7 @@ static int (*real_fstat)(int, struct stat *);
 
 int macify_stat(const char *path, struct macos_stat *buf) __asm__("stat");
 int macify_stat(const char *path, struct macos_stat *buf) {
-    if (!real_stat) real_stat = real_dlsym(RTLD_NEXT, "stat");
+    if (!real_stat) real_stat = macify_elf_lookup("stat");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos)
         return real_stat(path, (struct stat *)buf);
@@ -401,7 +401,7 @@ int macify_stat(const char *path, struct macos_stat *buf) {
 
 int macify_lstat(const char *path, struct macos_stat *buf) __asm__("lstat");
 int macify_lstat(const char *path, struct macos_stat *buf) {
-    if (!real_lstat) real_lstat = real_dlsym(RTLD_NEXT, "lstat");
+    if (!real_lstat) real_lstat = macify_elf_lookup("lstat");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos)
         return real_lstat(path, (struct stat *)buf);
@@ -428,7 +428,7 @@ int macify_lstat(const char *path, struct macos_stat *buf) {
 
 int macify_fstat(int fd, struct macos_stat *buf) __asm__("fstat");
 int macify_fstat(int fd, struct macos_stat *buf) {
-    if (!real_fstat) real_fstat = real_dlsym(RTLD_NEXT, "fstat");
+    if (!real_fstat) real_fstat = macify_elf_lookup("fstat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstat(fd, (struct stat *)buf);
     struct stat ls;
@@ -447,7 +447,7 @@ int macify_fstat(int fd, struct macos_stat *buf) {
 int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int flags) __asm__("fstatat");
 int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int flags) {
     static int (*real_fstatat)(int, const char *, struct stat *, int) = NULL;
-    if (!real_fstatat) real_fstatat = real_dlsym(RTLD_NEXT, "fstatat");
+    if (!real_fstatat) real_fstatat = macify_elf_lookup("fstatat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstatat(dirfd, pathname, (struct stat *)buf, flags);
     if (dirfd == -2) dirfd = -100;
@@ -513,7 +513,7 @@ int macify_fstatat64(int dirfd, const char *pathname, struct macos_stat *buf, in
 
 int macify_stat_inode64(const char *path, struct macos_stat *buf) __asm__("stat$INODE64");
 int macify_stat_inode64(const char *path, struct macos_stat *buf) {
-    if (!real_stat) real_stat = real_dlsym(RTLD_NEXT, "stat");
+    if (!real_stat) real_stat = macify_elf_lookup("stat");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -530,7 +530,7 @@ int macify_stat_inode64(const char *path, struct macos_stat *buf) {
 
 int macify_lstat_inode64(const char *path, struct macos_stat *buf) __asm__("lstat$INODE64");
 int macify_lstat_inode64(const char *path, struct macos_stat *buf) {
-    if (!real_lstat) real_lstat = real_dlsym(RTLD_NEXT, "lstat");
+    if (!real_lstat) real_lstat = macify_elf_lookup("lstat");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -551,7 +551,7 @@ int macify_fstat_inode64(int fd, struct macos_stat *buf) {
      * return address would be in this shim, not macOS text, so it
      * would skip translate_stat and write Linux struct stat data
      * into the macOS struct stat buffer (wrong field offsets). */
-    if (!real_fstat) real_fstat = real_dlsym(RTLD_NEXT, "fstat");
+    if (!real_fstat) real_fstat = macify_elf_lookup("fstat");
     struct stat ls;
     int ret = real_fstat(fd, &ls);
     if (getenv("MACIFY_TRACE_OPEN")) {
@@ -574,7 +574,7 @@ int macify_fstatat_inode64(int dirfd, const char *pathname, struct macos_stat *b
 int macify_access(const char *path, int mode) __asm__("access");
 int macify_access(const char *path, int mode) {
     static int (*real_access)(const char *, int) = NULL;
-    if (!real_access) real_access = real_dlsym(RTLD_NEXT, "access");
+    if (!real_access) real_access = macify_elf_lookup("access");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
     if (!is_macos)
         return real_access(path, mode);
@@ -605,7 +605,7 @@ int macify_access(const char *path, int mode) {
 int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) __asm__("faccessat");
 int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     static int (*real_faccessat)(int, const char *, int, int) = NULL;
-    if (!real_faccessat) real_faccessat = real_dlsym(RTLD_NEXT, "faccessat");
+    if (!real_faccessat) real_faccessat = macify_elf_lookup("faccessat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_faccessat(dirfd, pathname, mode, flags);
     if (dirfd == -2) dirfd = -100;  /* AT_FDCWD */
@@ -629,7 +629,7 @@ int macify_faccessat(int dirfd, const char *pathname, int mode, int flags) {
 int macify_unlinkat(int dirfd, const char *pathname, int flags) __asm__("unlinkat");
 int macify_unlinkat(int dirfd, const char *pathname, int flags) {
     static int (*real_unlinkat)(int, const char *, int) = NULL;
-    if (!real_unlinkat) real_unlinkat = real_dlsym(RTLD_NEXT, "unlinkat");
+    if (!real_unlinkat) real_unlinkat = macify_elf_lookup("unlinkat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_unlinkat(dirfd, pathname, flags);
     if (dirfd == -2) dirfd = -100;  /* AT_FDCWD */
@@ -649,7 +649,7 @@ int macify_unlinkat(int dirfd, const char *pathname, int flags) {
 int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int flags) __asm__("linkat");
 int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int flags) {
     static int (*real_linkat)(int, const char *, int, const char *, int) = NULL;
-    if (!real_linkat) real_linkat = real_dlsym(RTLD_NEXT, "linkat");
+    if (!real_linkat) real_linkat = macify_elf_lookup("linkat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_linkat(fromfd, from, tofd, to, flags);
     if (fromfd == -2) fromfd = -100;
@@ -667,7 +667,7 @@ int macify_linkat(int fromfd, const char *from, int tofd, const char *to, int fl
 int macify_symlinkat(const char *target, int dirfd, const char *linkpath) __asm__("symlinkat");
 int macify_symlinkat(const char *target, int dirfd, const char *linkpath) {
     static int (*real_symlinkat)(const char *, int, const char *) = NULL;
-    if (!real_symlinkat) real_symlinkat = real_dlsym(RTLD_NEXT, "symlinkat");
+    if (!real_symlinkat) real_symlinkat = macify_elf_lookup("symlinkat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_symlinkat(target, dirfd, linkpath);
     if (dirfd == -2) dirfd = -100;
@@ -683,7 +683,7 @@ int macify_symlinkat(const char *target, int dirfd, const char *linkpath) {
 ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) __asm__("readlinkat");
 ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
     static ssize_t (*real_readlinkat)(int, const char *, char *, size_t) = NULL;
-    if (!real_readlinkat) real_readlinkat = real_dlsym(RTLD_NEXT, "readlinkat");
+    if (!real_readlinkat) real_readlinkat = macify_elf_lookup("readlinkat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_readlinkat(dirfd, pathname, buf, bufsiz);
     if (dirfd == -2) dirfd = -100;
@@ -705,7 +705,7 @@ ssize_t macify_readlinkat(int dirfd, const char *pathname, char *buf, size_t buf
 int macify_utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags) __asm__("utimensat");
 int macify_utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags) {
     static int (*real_utimensat)(int, const char *, const struct timespec[2], int) = NULL;
-    if (!real_utimensat) real_utimensat = real_dlsym(RTLD_NEXT, "utimensat");
+    if (!real_utimensat) real_utimensat = macify_elf_lookup("utimensat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_utimensat(dirfd, pathname, times, flags);
     if (dirfd == -2) dirfd = -100;
@@ -735,7 +735,7 @@ int macify_utimensat(int dirfd, const char *pathname, const struct timespec time
 int macify_futimens(int fd, const struct timespec times[2]) __asm__("futimens");
 int macify_futimens(int fd, const struct timespec times[2]) {
     static int (*real_futimens)(int, const struct timespec[2]) = NULL;
-    if (!real_futimens) real_futimens = real_dlsym(RTLD_NEXT, "futimens");
+    if (!real_futimens) real_futimens = macify_elf_lookup("futimens");
     return real_futimens(fd, times);
 }
 
@@ -926,7 +926,7 @@ struct passwd *macify_getpwnam(const char *name) {
 int macify_unlink(const char *path) __asm__("unlink");
 int macify_unlink(const char *path) {
     static int (*real)(const char *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "unlink");
+    if (!real) real = macify_elf_lookup("unlink");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -948,7 +948,7 @@ int macify_unlink(const char *path) {
 int macify_rename(const char *old, const char *newp) __asm__("rename");
 int macify_rename(const char *old, const char *newp) {
     static int (*real)(const char *, const char *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "rename");
+    if (!real) real = macify_elf_lookup("rename");
     const char *eff_old = old, *eff_new = newp;
     char tp_old[4096], tp_new[4096];
     extern int macify_translate_path(const char *, char *, size_t);
@@ -967,7 +967,7 @@ int macify_rename(const char *old, const char *newp) {
 int macify_rmdir(const char *path) __asm__("rmdir");
 int macify_rmdir(const char *path) {
     static int (*real)(const char *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "rmdir");
+    if (!real) real = macify_elf_lookup("rmdir");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -987,7 +987,7 @@ int macify_rmdir(const char *path) {
 int macify_chdir(const char *path) __asm__("chdir");
 int macify_chdir(const char *path) {
     static int (*real)(const char *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "chdir");
+    if (!real) real = macify_elf_lookup("chdir");
     const char *eff = path;
     char tp[4096];
     if (path) {
@@ -1007,7 +1007,7 @@ int macify_chdir(const char *path) {
 int macify_close(int fd) __asm__("close");
 int macify_close(int fd) {
     static int (*real)(int) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "close");
+    if (!real) real = macify_elf_lookup("close");
     int r = real(fd);
     /* Silently succeed on EBADF for fd 0 (stdin). macOS sort closes
      * stdin after reading from a pipe, and the pipe may already be
@@ -1372,7 +1372,7 @@ static unsigned int speed_mac_to_linux(unsigned int ms) {
 int macify_tcgetattr(int fd, struct macos_termios *termios_p) __asm__("tcgetattr");
 int macify_tcgetattr(int fd, struct macos_termios *termios_p) {
     static int (*real_tcgetattr)(int, struct termios *) = NULL;
-    if (!real_tcgetattr) real_tcgetattr = real_dlsym(RTLD_NEXT, "tcgetattr");
+    if (!real_tcgetattr) real_tcgetattr = macify_elf_lookup("tcgetattr");
     if (!real_tcgetattr) return -1;
     struct termios lt;
     int ret = real_tcgetattr(fd, &lt);
@@ -1401,7 +1401,7 @@ int macify_tcgetattr(int fd, struct macos_termios *termios_p) {
 int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *termios_p) __asm__("tcsetattr");
 int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *termios_p) {
     static int (*real_tcsetattr)(int, int, const struct termios *) = NULL;
-    if (!real_tcsetattr) real_tcsetattr = real_dlsym(RTLD_NEXT, "tcsetattr");
+    if (!real_tcsetattr) real_tcsetattr = macify_elf_lookup("tcsetattr");
     if (!real_tcsetattr || !termios_p) return -1;
     struct termios lt;
     memset(&lt, 0, sizeof(lt));

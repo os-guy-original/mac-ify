@@ -23,9 +23,9 @@ void *(*real_glibc_getspecific)(pthread_key_t);
 int (*real_glibc_setspecific)(pthread_key_t, const void *);
 
 void init_real_tls_funcs(void) {
-    real_glibc_key_create = real_dlsym(RTLD_NEXT, "pthread_key_create");
-    real_glibc_getspecific = real_dlsym(RTLD_NEXT, "pthread_getspecific");
-    real_glibc_setspecific = real_dlsym(RTLD_NEXT, "pthread_setspecific");
+    real_glibc_key_create = macify_elf_lookup("pthread_key_create");
+    real_glibc_getspecific = macify_elf_lookup("pthread_getspecific");
+    real_glibc_setspecific = macify_elf_lookup("pthread_setspecific");
 }
 
 /* Our own pthread_key_create — allocates a glibc key and maps it. */
@@ -200,7 +200,7 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
  * check if the object still has a macOS signature. If so, overwrite it
  * in-place with glibc's PTHREAD_*_INITIALIZER (macOS objects are 64+ bytes;
  * glibc's are 40 bytes, so the overwrite is safe). Then delegate to glibc's
- * real function via real_dlsym(RTLD_NEXT, ...).
+ * real function via macify_elf_lookup(...).
  */
 
 #define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u

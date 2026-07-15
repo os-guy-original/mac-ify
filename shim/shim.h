@@ -88,6 +88,21 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx);
 /* shim_io.c */
 extern void *(*real_dlsym)(void *, const char *);
 
+/* Lock-free ELF symbol lookup — walks libc.so's (or ld-linux's) dynamic
+ * symbol table directly, WITHOUT calling glibc's dlsym. This avoids
+ * acquiring __dl_load_lock, which can deadlock if glibc's NSS/locale
+ * subsystem already holds the lock (e.g., during libintl initialization).
+ *
+ * Returns the function address, or NULL if not found.
+ * Should be called at constructor time for all symbols we need. */
+void *macify_elf_lookup(const char *name);
+
+/* Pre-resolve all commonly-used glibc function pointers at constructor
+ * time, before any macOS code runs. This prevents futex deadlocks caused
+ * by lazy real_dlsym(RTLD_NEXT,...) calls happening while glibc holds
+ * __dl_load_lock (e.g., during locale/NSS initialization). */
+void macify_presolve_all(void);
+
 /* __TEXT range of the loaded macOS main image, set by the loader via
  * __macify_set_text_range(). Used by the network shim functions to decide
  * whether to translate Linux errno → macOS errno before returning.

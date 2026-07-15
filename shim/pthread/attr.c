@@ -7,11 +7,11 @@ int (*real_attr_getstacksize)(const pthread_attr_t *, size_t *);
 int (*real_attr_setguardsize)(pthread_attr_t *, size_t);
 
 void init_real_attr_funcs(void) {
-    real_attr_init         = real_dlsym(RTLD_NEXT, "pthread_attr_init");
-    real_attr_destroy      = real_dlsym(RTLD_NEXT, "pthread_attr_destroy");
-    real_attr_setstacksize = real_dlsym(RTLD_NEXT, "pthread_attr_setstacksize");
-    real_attr_getstacksize = real_dlsym(RTLD_NEXT, "pthread_attr_getstacksize");
-    real_attr_setguardsize = real_dlsym(RTLD_NEXT, "pthread_attr_setguardsize");
+    real_attr_init         = macify_elf_lookup("pthread_attr_init");
+    real_attr_destroy      = macify_elf_lookup("pthread_attr_destroy");
+    real_attr_setstacksize = macify_elf_lookup("pthread_attr_setstacksize");
+    real_attr_getstacksize = macify_elf_lookup("pthread_attr_getstacksize");
+    real_attr_setguardsize = macify_elf_lookup("pthread_attr_setguardsize");
 }
 
 #define LAZY_INIT_ATTR() do { \

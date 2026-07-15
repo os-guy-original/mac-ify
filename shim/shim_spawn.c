@@ -314,7 +314,7 @@ static int do_posix_spawn(pid_t *pid, const char *path,
                         if (pfx) setenv("MACIFY_PREFIX", pfx, 1);
                     }
                     static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
-                    if (!real_execve) real_execve = real_dlsym(RTLD_NEXT, "execve");
+                    if (!real_execve) real_execve = macify_elf_lookup("execve");
                     if (real_execve) real_execve(macify_bin, new_argv, environ);
                     _exit(127);
                 }
@@ -370,11 +370,11 @@ static int do_posix_spawn(pid_t *pid, const char *path,
                                      const posix_spawnattr_t *,
                                      char *const [], char *const []) = NULL;
         if (use_path) {
-            if (!real_spawnp) real_spawnp = real_dlsym(RTLD_NEXT, "posix_spawnp");
+            if (!real_spawnp) real_spawnp = macify_elf_lookup("posix_spawnp");
             if (real_spawnp) ret = real_spawnp(pid, eff_path, &linux_fa, &linux_attr, argv, envp);
             else ret = ENOSYS;
         } else {
-            if (!real_spawn) real_spawn = real_dlsym(RTLD_NEXT, "posix_spawn");
+            if (!real_spawn) real_spawn = macify_elf_lookup("posix_spawn");
             if (real_spawn) ret = real_spawn(pid, eff_path, &linux_fa, &linux_attr, argv, envp);
             else ret = ENOSYS;
         }
@@ -402,8 +402,8 @@ static int do_posix_spawn(pid_t *pid, const char *path,
     {
         static int (*real_fa_destroy)(void *) = NULL;
         static int (*real_attr_destroy)(void *) = NULL;
-        if (!real_fa_destroy) real_fa_destroy = real_dlsym(RTLD_NEXT, "posix_spawn_file_actions_destroy");
-        if (!real_attr_destroy) real_attr_destroy = real_dlsym(RTLD_NEXT, "posix_spawnattr_destroy");
+        if (!real_fa_destroy) real_fa_destroy = macify_elf_lookup("posix_spawn_file_actions_destroy");
+        if (!real_attr_destroy) real_attr_destroy = macify_elf_lookup("posix_spawnattr_destroy");
         if (real_fa_destroy) real_fa_destroy(&linux_fa);
         if (real_attr_destroy) real_attr_destroy(&linux_attr);
     }
@@ -530,7 +530,7 @@ static int resolve_in_prefix_path(const char *file, char *out, size_t out_size) 
 int macify_execve(const char *path, char *const argv[], char *const envp[]) __asm__("execve");
 int macify_execve(const char *path, char *const argv[], char *const envp[]) {
     static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
-    if (!real_execve) real_execve = real_dlsym(RTLD_NEXT, "execve");
+    if (!real_execve) real_execve = macify_elf_lookup("execve");
 
     if (!path) { errno = EFAULT; return -1; }
 
@@ -584,7 +584,7 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
             char **new_argv = build_macify_argv(resolved, argv);
             if (new_argv) {
                 static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
-                if (!real_execve) real_execve = real_dlsym(RTLD_NEXT, "execve");
+                if (!real_execve) real_execve = macify_elf_lookup("execve");
                 /* Make sure LD_LIBRARY_PATH is set so macify can find the shim */
                 if (!getenv("LD_LIBRARY_PATH")) {
                     char libpath[4096];
@@ -603,7 +603,7 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
 
     /* ELF or unknown — use real execvpe */
     static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
-    if (!real_execvpe) real_execvpe = real_dlsym(RTLD_NEXT, "execvpe");
+    if (!real_execvpe) real_execvpe = macify_elf_lookup("execvpe");
     return real_execvpe ? real_execvpe(resolved, argv, envp) : -1;
 }
 

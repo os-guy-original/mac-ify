@@ -76,14 +76,14 @@ int linux_sig_to_macos(int linux_sig) {
 void macos_to_linux_sigset(const void *macos_set, sigset_t *linux_set) {
     uint32_t macos_mask = *(const uint32_t *)macos_set;
     static int (*real_sigemptyset)(sigset_t *) = NULL;
-    if (!real_sigemptyset) real_sigemptyset = real_dlsym(RTLD_NEXT, "sigemptyset");
+    if (!real_sigemptyset) real_sigemptyset = macify_elf_lookup("sigemptyset");
     real_sigemptyset(linux_set);
     for (int macos_sig = 1; macos_sig <= 31; macos_sig++) {
         if (macos_mask & (1u << (macos_sig - 1))) {
             int linux_sig = macos_sig_to_linux(macos_sig);
             if (linux_sig > 0) {
                 static int (*real_sigaddset)(sigset_t *, int) = NULL;
-                if (!real_sigaddset) real_sigaddset = real_dlsym(RTLD_NEXT, "sigaddset");
+                if (!real_sigaddset) real_sigaddset = macify_elf_lookup("sigaddset");
                 real_sigaddset(linux_set, linux_sig);
             }
         }
@@ -95,7 +95,7 @@ void macos_to_linux_sigset(const void *macos_set, sigset_t *linux_set) {
 void linux_to_macos_sigset(const sigset_t *linux_set, void *macos_set) {
     uint32_t macos_mask = 0;
     static int (*real_sigismember)(const sigset_t *, int) = NULL;
-    if (!real_sigismember) real_sigismember = real_dlsym(RTLD_NEXT, "sigismember");
+    if (!real_sigismember) real_sigismember = macify_elf_lookup("sigismember");
     for (int linux_sig = 1; linux_sig <= 31; linux_sig++) {
         if (real_sigismember(linux_set, linux_sig)) {
             int macos_sig = linux_sig_to_macos(linux_sig);
@@ -117,7 +117,7 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
          * futex deadlocks. Use real_dlsym to avoid infinite recursion. */
         static int (*real_pthread_sigmask)(int, const sigset_t *, sigset_t *) = NULL;
         if (!real_pthread_sigmask) {
-            real_pthread_sigmask = real_dlsym(RTLD_NEXT, "pthread_sigmask");
+            real_pthread_sigmask = macify_elf_lookup("pthread_sigmask");
         }
         if (real_pthread_sigmask) {
             return real_pthread_sigmask(how, (const sigset_t *)set, (sigset_t *)oldset);
@@ -167,7 +167,7 @@ int macify_pthread_sigmask(int how, const void *set, void *oldset) {
 
     /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
     static int (*real_psm)(int, const sigset_t *, sigset_t *) = NULL;
-    if (!real_psm) real_psm = real_dlsym(RTLD_NEXT, "pthread_sigmask");
+    if (!real_psm) real_psm = macify_elf_lookup("pthread_sigmask");
     int result = real_psm ? real_psm(linux_how, p_linux_set, p_linux_oldset) : syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
     if (oldset && result == 0) {
@@ -183,7 +183,7 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
         /* Use glibc's real sigprocmask to avoid futex deadlocks */
         static int (*real_sigprocmask)(int, const sigset_t *, sigset_t *) = NULL;
         if (!real_sigprocmask) {
-            real_sigprocmask = real_dlsym(RTLD_NEXT, "sigprocmask");
+            real_sigprocmask = macify_elf_lookup("sigprocmask");
         }
         if (real_sigprocmask) {
             return real_sigprocmask(how, (const sigset_t *)set, (sigset_t *)oldset);
@@ -223,7 +223,7 @@ int macify_sigprocmask(int how, const void *set, void *oldset) {
 
     /* Use raw rt_sigprocmask syscall (can't use dlsym — causes infinite recursion) */
     static int (*real_psm)(int, const sigset_t *, sigset_t *) = NULL;
-    if (!real_psm) real_psm = real_dlsym(RTLD_NEXT, "pthread_sigmask");
+    if (!real_psm) real_psm = macify_elf_lookup("pthread_sigmask");
     int result = real_psm ? real_psm(linux_how, p_linux_set, p_linux_oldset) : syscall(14, linux_how, p_linux_set, p_linux_oldset, 8);
 
     if (getenv("MACIFY_TRACE_SIGNAL")) {

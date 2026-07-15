@@ -66,12 +66,12 @@ int    (*real_mprotect)(void *, size_t, int);
 long   (*real_sysconf)(int);
 
 void init_real_io_funcs(void) {
-    real_mmap     = real_dlsym(RTLD_NEXT, "mmap");
-    real_open     = real_dlsym(RTLD_NEXT, "open");
-    real_madvise  = real_dlsym(RTLD_NEXT, "madvise");
-    real_fcntl    = real_dlsym(RTLD_NEXT, "fcntl");
-    real_mprotect = real_dlsym(RTLD_NEXT, "mprotect");
-    real_sysconf  = real_dlsym(RTLD_NEXT, "sysconf");
+    real_mmap     = macify_elf_lookup("mmap");
+    real_open     = macify_elf_lookup("open");
+    real_madvise  = macify_elf_lookup("madvise");
+    real_fcntl    = macify_elf_lookup("fcntl");
+    real_mprotect = macify_elf_lookup("mprotect");
+    real_sysconf  = macify_elf_lookup("sysconf");
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -207,7 +207,7 @@ int macify_open64(const char *pathname, int flags, ...) {
     }
 
     static int (*real_open64)(const char *, int, ...) = NULL;
-    if (!real_open64) real_open64 = real_dlsym(RTLD_NEXT, "open64");
+    if (!real_open64) real_open64 = macify_elf_lookup("open64");
     int fd = real_open64(effective_path, linux_flags, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512];
@@ -269,7 +269,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     }
 
     static int (*real_openat)(int, const char *, int, ...) = NULL;
-    if (!real_openat) real_openat = real_dlsym(RTLD_NEXT, "openat");
+    if (!real_openat) real_openat = macify_elf_lookup("openat");
     int fd = real_openat(linux_dirfd, effective_path, linux_flags, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
@@ -320,7 +320,7 @@ int munmap(void *addr, size_t length) {
         if (unmap_lo < stack_hi && unmap_hi > stack_lo) return 0;
     }
     static int (*real_munmap)(void *, size_t) = NULL;
-    if (!real_munmap) real_munmap = real_dlsym(RTLD_NEXT, "munmap");
+    if (!real_munmap) real_munmap = macify_elf_lookup("munmap");
     int ret = real_munmap(addr, length);
     if (getenv("MACIFY_MACH_DEBUG") && ret != 0) {
         char b[160];

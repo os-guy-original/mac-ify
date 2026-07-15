@@ -25,7 +25,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
          * deadlocks on some systems. We use real_dlsym to get glibc's
          * sigaction without hitting our own override. */
         if (!real_sigaction) {
-            real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
+            real_sigaction = macify_elf_lookup("sigaction");
         }
         if (real_sigaction) {
             return real_sigaction(signum, act, oldact);
@@ -93,7 +93,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     }
 
     if (!real_sigaction) {
-        real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
+        real_sigaction = macify_elf_lookup("sigaction");
     }
     struct sigaction linux_act;
     struct sigaction linux_oldact;
@@ -219,7 +219,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
      * CRITICAL: Do NOT use raw syscall(13) — it bypasses glibc's
      * internal locks, causing futex deadlocks. */
     if (!real_sigaction) {
-        real_sigaction = real_dlsym(RTLD_NEXT, "sigaction");
+        real_sigaction = macify_elf_lookup("sigaction");
     }
     int result;
     if (real_sigaction) {

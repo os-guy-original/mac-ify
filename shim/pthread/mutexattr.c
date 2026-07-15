@@ -2,17 +2,17 @@
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
     static int (*real)(pthread_mutexattr_t *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "pthread_mutexattr_init");
+    if (!real) real = macify_elf_lookup("pthread_mutexattr_init");
     return real(attr);
 }
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
     static int (*real)(pthread_mutexattr_t *) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "pthread_mutexattr_destroy");
+    if (!real) real = macify_elf_lookup("pthread_mutexattr_destroy");
     return real(attr);
 }
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
     static int (*real)(pthread_mutexattr_t *, int) = NULL;
-    if (!real) real = real_dlsym(RTLD_NEXT, "pthread_mutexattr_settype");
+    if (!real) real = macify_elf_lookup("pthread_mutexattr_settype");
     /* Translate macOS type to Linux type */
     int linux_type;
     switch (type) {
