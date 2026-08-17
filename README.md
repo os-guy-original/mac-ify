@@ -27,6 +27,12 @@ LD_LIBRARY_PATH=build ./build/macify -q tests/real/jq_darwin --version
 
 # Run the unit test suite
 make test
+
+# Run real-binary smoke tests (needs `./scripts/fetch_binaries.sh` first)
+make test-smoke
+
+# Run real-binary functional tests (slow, comprehensive)
+make test-functional
 ```
 
 ## Debugging
@@ -52,8 +58,14 @@ The crash handler prints registers, stack dump, and instruction bytes on SIGSEGV
 
 ## Documentation
 
-- `ARCHITECTURE.md` — design rationale, component walkthrough
-- `ROADMAP.md` — phased plan
+- [`docs/Architecture.md`](docs/Architecture.md) — design rationale, component walkthrough
+- [`docs/Development.md`](docs/Development.md) — build, test, and trace-flag guide
+- [`docs/Translation.md`](docs/Translation.md) — syscall/flag/struct translation tables
+- [`docs/macho/`](docs/macho/) — externally-fetched reference material on the Mach-O format
+  (Wikipedia, Apple's "Overview of the Mach-O Executable Format", the OS X ABI
+  Mach-O File Format Reference, the dyld repo README, and an in-depth
+  walk-through of writing a Mach-O loader). Cited per-source.
+- [`ROADMAP.md`](ROADMAP.md) — phased plan
 
 ## Legal
 

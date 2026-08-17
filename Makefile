@@ -6,7 +6,7 @@ BINDIR     := $(DESTDIR)$(PREFIX)/bin
 LIBDIR     := $(DESTDIR)$(PREFIX)/lib/macify
 SCRIPTSDIR := $(DESTDIR)$(PREFIX)/lib/macify/scripts
 
-.PHONY: all build test test-real binaries clean shim shell install uninstall
+.PHONY: all build test test-smoke test-functional clean shim shell install uninstall
 
 all: shim build binaries
 
@@ -22,8 +22,11 @@ binaries:
 test: build binaries shim
 	LD_LIBRARY_PATH=build python3 tests/run_tests.py
 
-test-real: build shim
-	@bash scripts/test_real.sh
+test-smoke: build shim
+	@bash tests/real_smoke.sh
+
+test-functional: build shim
+	@bash tests/real_functional.sh
 
 shell: build shim
 	@bash scripts/macify-shell

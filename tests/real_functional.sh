@@ -1,10 +1,16 @@
 #!/bin/bash
-# Comprehensive functional tests for macify
-# Tests actual functionality (not just --version) of macOS binaries
-# Skips binaries that don't exist
+# real_functional.sh — comprehensive functional tests of real macOS binaries.
+# Runs each fetched macOS binary through macify with real arguments and
+# checks actual program output (not just --version). Covers core utils,
+# text processing, sorting, file mgmt, compression, JSON/data, modern
+# Rust tools, network tools (version only), editors/pagers, build tools.
+#
+# Usage: bash tests/real_functional.sh
+# Skips binaries that don't exist locally (run scripts/fetch_binaries.sh first).
+# For fast --version smoke tests, see ./real_smoke.sh.
 
-LD_LIBRARY_PATH=build
-export LD_LIBRARY_PATH
+cd "$(dirname "$0")/.."
+export LD_LIBRARY_PATH=build
 MACIFY="build/macify"
 TIMEOUT=10
 PASS=0

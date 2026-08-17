@@ -1,6 +1,11 @@
 #!/bin/bash
-# test_real.sh — Test real macOS binaries through mac-ify
-# Usage: ./scripts/test_real.sh
+# real_smoke.sh — quick --version smoke tests of real macOS binaries.
+# Verifies that macify loads and runs each fetched macOS binary far
+# enough to print a --version string (or produce expected output).
+# For comprehensive functional tests, see ./real_functional.sh.
+#
+# Usage: bash tests/real_smoke.sh
+# Skips binaries that don't exist locally (run scripts/fetch_binaries.sh first).
 
 cd "$(dirname "$0")/.."
 export LD_LIBRARY_PATH=build

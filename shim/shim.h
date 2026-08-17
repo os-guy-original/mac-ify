@@ -164,8 +164,6 @@ struct sc_obj {
     void *data;         /* payload (string, or array of pointers) */
 };
 
-#endif /* MACIFY_SHIM_H */
-
 /* Errno translation: use at end of functions returning -1 on error */
 #define TRANSLATE_ERRNO(r) do { \
     if ((r) == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) \
@@ -177,3 +175,5 @@ struct sc_obj {
     if ((r) == -1 && macify_caller_is_macos_text(__builtin_return_address(0))) \
         errno = macify_linux_to_macos_errno(saved); \
 } while (0)
+
+#endif /* MACIFY_SHIM_H */

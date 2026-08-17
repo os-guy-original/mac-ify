@@ -275,12 +275,15 @@ bool section_is_code(const loaded_section *s);
 int map_segment(segment_command_64 *seg, uint8_t *file_data, size_t file_size);
 uint8_t *load_file(const char *path, size_t *out_size);
 
-/* syscall.c */
+/* syscall/ — BSD syscall number + argument translation
+ * (split across flag_translation.c, raw_syscall.c, syscall_table.c,
+ *  syscall_names.c, patcher.c, crash_handler.c, sigill_handler.c) */
 void sigill_handler(int sig, siginfo_t *info, void *uctx);
 void sigill_handler_pre_resolve(void);
 void crash_handler(int sig, siginfo_t *info, void *uctx);
 void print_stats(void);
 int patch_syscalls_in_segment(loaded_segment *seg);
+const char *bsd_syscall_name(uint32_t bsd_nr);
 
 /* fixups.c */
 uint64_t read_uleb128(const uint8_t **p, const uint8_t *end);
@@ -313,4 +316,3 @@ int macify_should_hide_path(const char *path);
 const char *macify_get_prefix(void);
 
 #endif /* MACIFY_H */
-const char *bsd_syscall_name(uint32_t bsd_nr);

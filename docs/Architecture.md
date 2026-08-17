@@ -19,7 +19,9 @@ Key files:
 - `macho_dylib.c` — Mach-O dylib loader (for readline, ncurses, etc.)
 - `runtime.c` — Stack setup, signal handler installation, main() call
 - `prefix.c` — Path translation (`macify_translate_path`)
-- `syscall/` — BSD to Linux syscall number and argument translation
+- `syscall/` — BSD to Linux syscall number and argument translation,
+  split across `flag_translation.c`, `raw_syscall.c`, `syscall_table.c`,
+  `syscall_names.c`, `patcher.c`, `crash_handler.c`, `sigill_handler.c`
 
 ### Shim (`shim/`)
 
@@ -30,6 +32,7 @@ directly. The shim translates arguments and delegates to glibc.
 Key files:
 - `shim_core.c` — Globals (environ, BC/PC/UP, errno), termcap wrappers
 - `shim_spawn.c` — execve/posix_spawn path translation
+- `presolve.c` — Lock-free ELF lookup; pre-resolves glibc symbols at constructor time (avoids futex deadlock with NSS/locale init)
 - `io/flags.c` — open/openat flag translation (O_CREAT, O_NONBLOCK, etc.)
 - `io/file.c` — stat/lstat/fstat struct translation, termios, $INODE64 shims
 - `io/process.c` — fork/wait/pipe, FILE* management (fread/fgetc/fgets)
@@ -37,7 +40,8 @@ Key files:
 - `io/glob.c` — glob_t struct translation
 - `io/libintl.c` — gettext function shims (libintl_dcgettext, etc.)
 - `signal/` — sigaction/sigprocmask signal number translation
-- `sys/stubs.c` — macOS-specific stubs (getattrlist, mach_*, etc.)
+- `sys/stubs.c` — macOS-specific stubs (getattrlist, mach_*, dyld_stub_binder, __chkstk_darwin, libgcc_s loading for _Unwind_*)
+- `sys/misc_stubs.c` — CoreFoundation helper structs, Security framework TLS stubs (for curl), locale/time/math function aliases
 
 ### Shim Library (`build/libmacify_shim.so`)
 

@@ -14,8 +14,6 @@
  * classification support, we'd need to populate the table fields.
  */
 
-#include <ctype.h>
-
 /* macOS _RuneLocale structure.
  *
  * On macOS, the runetype/maplower/mapupper arrays are INLINE in the struct,

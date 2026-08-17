@@ -1,5 +1,10 @@
-/* Split from misc.c */
+/* dispatch.c — macOS Grand Central Dispatch (GCD) API shims (split
+ * from the original monolithic misc.c). Provides dispatch_async/sync
+ * no-ops and dispatch_semaphore_* backed by POSIX semaphores. */
 #include "../shim.h"
+#include <semaphore.h>
+#include <time.h>
+#include <errno.h>
 
 void dispatch_async(void *queue, void *block) {
     (void)queue; (void)block;
@@ -27,7 +32,6 @@ void *dispatch_retain(void *object) {
 
 /* dispatch_semaphore stubs — Rust uses these for synchronization.
  * We provide minimal working implementations using POSIX semaphores. */
-#include <semaphore.h>
 
 void *dispatch_semaphore_create(long value) {
     sem_t *sem = malloc(sizeof(sem_t));
@@ -60,10 +64,6 @@ unsigned long dispatch_time(unsigned long when, long delta) {
  *
  * macOS semaphore_t is a mach port (integer), but we use a pointer
  * to a heap-allocated sem_t instead. */
-
-#include <semaphore.h>
-#include <time.h>
-#include <errno.h>
 
 typedef struct {
     sem_t sem;

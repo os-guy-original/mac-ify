@@ -1,7 +1,7 @@
-/* Split from misc.c */
-#include "../shim.h"
-
-/* misc.c — remaining macOS compatibility stubs */
+/* stubs.c — remaining macOS compatibility stubs (split from the
+ * original monolithic misc.c). Provides small macOS-specific
+ * function shims: dyld_stub_binder, __chkstk_darwin, libgcc_s
+ * loading for _Unwind_*, etc. */
 #include "../shim.h"
 #include <sys/mount.h>
 #include <ucontext.h>

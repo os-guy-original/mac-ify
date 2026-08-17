@@ -1,6 +1,9 @@
-#include <malloc.h>
-/* misc_stubs.c - remaining small stubs from misc.c */
+/* misc_stubs.c — remaining small macOS compatibility stubs (split
+ * from the original monolithic misc.c). Provides CoreFoundation
+ * helper structs, Security framework TLS stubs (for curl), and
+ * miscellaneous function shims that don't fit elsewhere. */
 #include "../shim.h"
+#include <malloc.h>
 
 /* kCFTypeArrayCallBacks - a static struct that CoreFoundation uses for
  * CFArray creation. We provide a zeroed struct (all NULL callbacks). */
@@ -405,7 +408,6 @@ int __darwin_check_fd_set_overflow(int fd, const void *fdset, int silent) {
  * __longjmp is safe to wrap because longjmp never returns to its
  * caller — it restores the saved frame and continues from there.
  * The wrapper's frame is simply abandoned. */
-#include <setjmp.h>
 void __longjmp(jmp_buf env, int val) {
     if (getenv("MACIFY_TRACE_JMP")) {
         char b[256];
@@ -575,7 +577,6 @@ void CFLog(int level, void *format, ...) {
 
 /* macOS math function aliases.
  */
-#include <math.h>
 double __expm1(double x) { return expm1(x); }
 double __log1p(double x) { return log1p(x); }
 double __hypot(double x, double y) { return hypot(x, y); }
@@ -676,7 +677,6 @@ void _exit(int status) {
     __builtin_unreachable();
 }
 /* macOS asprintf (glibc may not export it on all versions). */
-#include <stdarg.h>
 int __asprintf(char **str, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -686,7 +686,6 @@ int __asprintf(char **str, const char *fmt, ...) {
 }
 
 /* macOS time functions. */
-#include <time.h>
 int __gmtime_r(const time_t *timep, struct tm *result) {
     return gmtime_r(timep, result) != NULL ? 0 : -1;
 }
@@ -775,8 +774,6 @@ int task_policy_set(uint32_t task, int policy, int task_info_out, uint32_t count
 
 /* sscanf_l - locale-aware sscanf. We don't have locale-aware scanning,
  * so just delegate to regular sscanf with the C locale. */
-#include <stdio.h>
-#include <stdarg.h>
 int sscanf_l(const char *str, void *loc, const char *fmt, ...) {
     (void)loc;
     va_list ap;

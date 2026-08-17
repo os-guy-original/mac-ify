@@ -93,11 +93,14 @@ scripts/          User-facing scripts
   macify-setup-rootfs    Install macOS binaries into prefix
   macify-setup-homebrew  Download Homebrew bottles
   fetch_binaries.sh      Download macOS test binaries
+  gen_macho.py           Generate synthesized Mach-O test binaries
 
 tests/            Test suite
-  run_tests.py    Unit test runner
-  binaries/       Generated Mach-O test binaries
-  real/           Downloaded macOS binaries for integration tests
+  run_tests.py    Synthesized Mach-O unit tests (runner)
+  real_smoke.sh  Real-binary --version smoke tests
+  real_functional.sh  Real-binary comprehensive functional tests
+  binaries/       Generated Mach-O test binaries (built by gen_macho.py)
+  real/           Downloaded macOS binaries for integration tests (fetched on demand)
 ```
 
 ## Adding a New Translation

@@ -1,6 +1,8 @@
-#include <malloc.h>
-/* Split from misc.c */
+/* malloc.c — macOS malloc_zone_* zone-based allocator API shims
+ * (split from the original monolithic misc.c). On macOS, malloc_zone
+ * is the underlying allocator; we just delegate to glibc malloc. */
 #include "../shim.h"
+#include <malloc.h>
 
 void malloc_set_zone_name(void *zone, const char *name) { (void)zone; (void)name; }
 size_t malloc_size(const void *ptr) {
@@ -54,4 +56,3 @@ void *malloc_zone_memalign(void *zone, size_t align, size_t size) {
     posix_memalign(&r, align, size);
     return r;
 }
-#include <malloc.h>

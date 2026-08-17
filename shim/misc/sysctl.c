@@ -8,7 +8,6 @@
 /* sysctl — macOS system information query. Rust uses this for CPU count,
  * memory size, hostname, etc. We implement common queries using Linux
  * equivalents and return -1 for unknown queries. */
-#include <sys/utsname.h>
 
 /* macOS KERN_PROC constants */
 #define CTL_KERN           1
