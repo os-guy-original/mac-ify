@@ -538,15 +538,31 @@ int main(int argc, char **argv, char **envp) {
             }
 
             /* Map macOS library names to Linux equivalents.
-             * IMPORTANT: @@HOMEBREW_PREFIX@@ and resolved (@rpath/@loader_path)
-             * paths are checked FIRST — they're Mach-O dylibs that need our
-             * Mach-O loader, not Linux's dlopen (which expects ELF). */
+             *
+             * Loading strategy (in order, first success wins):
+             *   1. @@HOMEBREW_*@@ placeholder → load real Mach-O .dylib
+             *      from the macify prefix via macho_load_dylib(). If the
+             *      bottle isn't installed, fall through to step 3.
+             *   2. @rpath/@loader_path/@executable_path resolved path →
+             *      defer loading until after the main walk.
+             *   3. libname substring match → dlopen the Linux ELF
+             *      equivalent (libcurl.so.4, libssl.so.3, etc.). This
+             *      covers both bare macOS dylib names (e.g. libz.1.dylib)
+             *      AND Homebrew placeholder paths whose bottle is missing.
+             *
+             * Step 3 is critical for Homebrew binaries whose bottles
+             * haven't been installed via macify-setup-homebrew: without
+             * it, symbols from libcurl/libssl/etc. go unresolved and
+             * the binary silently exits 0 with no output.
+             */
             void *extra1 = NULL;
+            int loaded_as_macho = 0;  /* 1 if dylib symbols are already
+                                      * accessible via macho_dylib_lookup() */
             if (strstr(name, "@@HOMEBREW_CELLAR@@") ||
                        strstr(name, "@@HOMEBREW_PREFIX@@")) {
-                /* Homebrew bottle placeholder paths — these are Mach-O dylibs
-                 * that need to be loaded through our own Mach-O dylib loader,
-                 * not Linux's dlopen (which expects ELF format). */
+                /* Homebrew bottle placeholder paths — these are Mach-O
+                 * dylibs that need our own Mach-O loader, not Linux's
+                 * dlopen (which expects ELF). */
                 const char *mprefix = macify_get_prefix();
                 char real_path[4096];
                 const char *rest;
@@ -557,17 +573,19 @@ int main(int argc, char **argv, char **envp) {
                     rest = name + strlen("@@HOMEBREW_PREFIX@@");
                     snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
                 }
-                /* Load as Mach-O dylib (not dlopen which expects ELF) */
                 int rc = macho_load_dylib(real_path);
                 if (g_verbose) {
                     if (rc == 0)
                         fprintf(stderr, "macify:   loaded Mach-O dylib: %s\n", real_path);
                     else
-                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s\n", real_path);
+                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s — will try Linux lib equivalent\n", real_path);
                 }
-                /* extra1 stays NULL — the dylib's symbols are available
-                 * via macho_dylib_lookup() in resolve_symbol() */
-                extra1 = NULL;
+                if (rc == 0) {
+                    /* Symbols available via macho_dylib_lookup() in
+                     * resolve_symbol(); no extra1 handle needed. */
+                    loaded_as_macho = 1;
+                }
+                /* else: fall through to libname-based dlopen below. */
             } else if (resolved_name) {
                 /* The path was resolved via @rpath/@loader_path/@executable_path
                  * and points to a real Mach-O .dylib file. Defer loading until
@@ -580,68 +598,78 @@ int main(int argc, char **argv, char **envp) {
                     g_deferred_dylibs[g_ndeferred_dylibs][sizeof(g_deferred_dylibs[0]) - 1] = '\0';
                     g_ndeferred_dylibs++;
                 }
-                extra1 = NULL;
+                loaded_as_macho = 1;  /* Will be loaded later as Mach-O */
             } else if (strstr(name, "libc++") || strstr(name, "libc++abi") ||
                        strstr(name, "libunwind")) {
                 /* macOS C++ standard library — already preloaded before the
                  * main walk. Nothing to do here. */
-                extra1 = NULL;
-            } else if (strstr(name, "libncurses")) {
-                /* macOS libncurses is loaded as a Mach-O dylib when the
-                 * @@HOMEBREW_PREFIX@@ path is used. This branch is only
-                 * reached for non-Homebrew libncurses paths (e.g., bare
-                 * "libncurses.dylib" without @rpath resolution).
-                 *
-                 * CRITICAL: Do NOT load Linux libtinfo as an extra handle.
-                 * If we do, tgetent/tgetstr/tputs resolve to Linux libtinfo
-                 * instead of macOS libncurses, causing a buffer overflow
-                 * in macOS libedit (readline) due to internal struct layout
-                 * differences. libtinfo is already preloaded via RTLD_GLOBAL
-                 * as a last-resort fallback. */
-                extra1 = dlopen("libncursesw.so.6", RTLD_NOW | RTLD_GLOBAL);
-                if (!extra1) extra1 = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
-                /* Do NOT register libtinfo — see comment above. */
-            } else if (strstr(name, "libz")) {
-                extra1 = dlopen("libz.so.1", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libresolv")) {
-                extra1 = dlopen("libresolv.so.2", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libiconv")) {
-                extra1 = dlopen("libiconv.so.2", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libssl")) {
-                extra1 = dlopen("libssl.so.3", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libcrypto")) {
-                extra1 = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libgnutls")) {
-                extra1 = dlopen("libgnutls.so.30", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libnettle")) {
-                extra1 = dlopen("libnettle.so.8", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libpcre2")) {
-                extra1 = dlopen("libpcre2-8.so.0", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libpsl")) {
-                extra1 = dlopen("libpsl.so.5", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libidn2")) {
-                extra1 = dlopen("libidn2.so.0", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libunistring")) {
-                extra1 = dlopen("libunistring.so.5", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libedit")) {
-                extra1 = dlopen("libedit.so.2", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libreadline")) {
-                extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libmagic")) {
-                extra1 = dlopen("libmagic.so.1", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libcurl")) {
-                extra1 = dlopen("libcurl.so.4", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libssh2")) {
-                extra1 = dlopen("libssh2.so.1", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libnghttp3")) {
-                extra1 = dlopen("libnghttp3.so.9", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libnghttp2")) {
-                extra1 = dlopen("libnghttp2.so.14", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libzstd")) {
-                extra1 = dlopen("libzstd.so.1", RTLD_NOW | RTLD_GLOBAL);
-            } else if (strstr(name, "libintl")) {
-                /* libintl is part of glibc on Linux — no separate library */
-                extra1 = NULL;
+                loaded_as_macho = 1;
+            }
+
+            /* libname-based Linux ELF fallback. Runs whenever the dylib
+             * wasn't already loaded as a Mach-O file above (either because
+             * the name didn't match @@HOMEBREW_*@@/@rpath/libc++, or
+             * because a @@HOMEBREW_*@@ path failed to load and we need a
+             * Linux substitute so symbols still resolve). */
+            if (!loaded_as_macho) {
+                if (strstr(name, "libncurses")) {
+                    /* macOS libncurses is loaded as a Mach-O dylib when the
+                     * @@HOMEBREW_PREFIX@@ path is used. This branch is only
+                     * reached for non-Homebrew libncurses paths (e.g., bare
+                     * "libncurses.dylib" without @rpath resolution), or when
+                     * the Homebrew bottle is missing.
+                     *
+                     * CRITICAL: Do NOT load Linux libtinfo as an extra handle.
+                     * If we do, tgetent/tgetstr/tputs resolve to Linux libtinfo
+                     * instead of macOS libncurses, causing a buffer overflow
+                     * in macOS libedit (readline) due to internal struct layout
+                     * differences. libtinfo is already preloaded via RTLD_GLOBAL
+                     * as a last-resort fallback. */
+                    extra1 = dlopen("libncursesw.so.6", RTLD_NOW | RTLD_GLOBAL);
+                    if (!extra1) extra1 = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
+                    /* Do NOT register libtinfo — see comment above. */
+                } else if (strstr(name, "libz")) {
+                    extra1 = dlopen("libz.so.1", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libresolv")) {
+                    extra1 = dlopen("libresolv.so.2", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libiconv")) {
+                    extra1 = dlopen("libiconv.so.2", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libssl")) {
+                    extra1 = dlopen("libssl.so.3", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libcrypto")) {
+                    extra1 = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libgnutls")) {
+                    extra1 = dlopen("libgnutls.so.30", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libnettle")) {
+                    extra1 = dlopen("libnettle.so.8", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libpcre2")) {
+                    extra1 = dlopen("libpcre2-8.so.0", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libpsl")) {
+                    extra1 = dlopen("libpsl.so.5", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libidn2")) {
+                    extra1 = dlopen("libidn2.so.0", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libunistring")) {
+                    extra1 = dlopen("libunistring.so.5", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libedit")) {
+                    extra1 = dlopen("libedit.so.2", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libreadline")) {
+                    extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libmagic")) {
+                    extra1 = dlopen("libmagic.so.1", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libcurl")) {
+                    extra1 = dlopen("libcurl.so.4", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libssh2")) {
+                    extra1 = dlopen("libssh2.so.1", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libnghttp3")) {
+                    extra1 = dlopen("libnghttp3.so.9", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libnghttp2")) {
+                    extra1 = dlopen("libnghttp2.so.14", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libzstd")) {
+                    extra1 = dlopen("libzstd.so.1", RTLD_NOW | RTLD_GLOBAL);
+                } else if (strstr(name, "libintl")) {
+                    /* libintl is part of glibc on Linux — no separate library */
+                    extra1 = NULL;
+                }
             }
             if (extra1) {
                 register_extra_handle(extra1);
@@ -1136,7 +1164,8 @@ int main(int argc, char **argv, char **envp) {
                     if (addr) {
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)addr;
                         /* Debug: verify critical symbols */
-                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "ferror") == 0 || strcmp(name, "feof") == 0 || strcmp(name, "clearerr") == 0 || strcmp(name, "putc_unlocked") == 0 || strcmp(name, "environ") == 0 || strcmp(name, "_NSGetEnviron") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0))
+                        if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "ferror") == 0 || strcmp(name, "feof") == 0 || strcmp(name, "clearerr") == 0 || strcmp(name, "putc_unlocked") == 0 || strcmp(name, "environ") == 0 || strcmp(name, "_NSGetEnviron") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0 || strcmp(name, "close") == 0 || strcmp(name, "fclose") == 0
+                            || strstr(name, "stat$INODE64") || strstr(name, "lstat$INODE64") || strstr(name, "fstat$INODE64") || strstr(name, "fstatat$INODE64") || strstr(name, "readdir$INODE64") || strstr(name, "opendir") || strcmp(name, "exit") == 0 || strcmp(name, "_exit") == 0 || strcmp(name, "atexit") == 0))
                             fprintf(stderr, "macify: GOT %s at %p = 0x%lx\n", name,
                                     (void*)(uintptr_t)(s->addr + k * 8),
                                     (unsigned long)*(uint64_t*)(uintptr_t)(s->addr + k * 8));

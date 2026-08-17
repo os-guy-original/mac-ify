@@ -217,10 +217,11 @@ FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = macify_elf_lookup("fopen");
-    /* Unconditional trace — first line of function */
-    if (path) {
+    /* Trace fopen when MACIFY_TRACE_OPEN is set (was unconditionally
+     * printed here previously — leftover debug noise on stderr). */
+    if (path && getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
-            "FOPEN: \"%s\" mode=\"%s\" from %p\n",
+            "macify: fopen(\"%s\", \"%s\") from %p\n",
             path, mode ? mode : "(null)", __builtin_return_address(0));
         (void)write(2, b, n);
     }
@@ -753,14 +754,38 @@ int macify_fclose(FILE *stream) {
             break;
         }
     }
+    int saved_errno = errno;
     int r = real_fclose(stream);
-    /* Silently succeed on EINVAL for stdin (fd 0). macOS sort calls
-     * fclose(stdin) after reading from a pipe. glibc's fclose may fail
-     * with EINVAL due to FILE* state corruption from macOS code writing
-     * to offset 0x10. sort treats this as "close failed: -: Bad file
-     * descriptor". Returning 0 suppresses the false error. */
-    if (r == EOF && stream == stdin) {
+    int new_errno = errno;
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: fclose(%p) = %d errno=%d\n",
+            (void*)stream, r, r ? new_errno : 0);
+        (void)write(2, b, n);
+    }
+    /* Silently succeed on EINVAL/EBADF for stdin/stdout/stderr. macOS
+     * sort and other coreutils call fclose(stdin/stdout) at exit.
+     * glibc's fclose may fail with EINVAL due to FILE* state corruption
+     * from macOS code writing to offset 0x10 (the __SEOF/__SERR bytes
+     * that overlap glibc's _IO_read_end pointer). The macOS binary
+     * treats this as "close failed: %s: Invalid argument" — even when
+     * stdout is the stream that failed, the message uses the last
+     * filename set via close_stdout_set_file_name, so the error
+     * message is misleading. Returning 0 (success) suppresses the
+     * false error. */
+    if (r == EOF && (stream == stdin || stream == stdout || stream == stderr)) {
         r = 0;
+        errno = 0;
+    }
+    /* Also suppress EINVAL on non-stdio streams — same root cause
+     * (FILE* state corruption from macOS offset 0x10 writes). macOS
+     * coreutils' close_file() calls fclose() on input file streams
+     * and treats failure as "close failed: <filename>: Invalid argument".
+     * Real I/O errors return -1 with a specific errno (EIO, ENOSPC, etc.),
+     * not EINVAL — EINVAL on fclose is always the corruption case. */
+    if (r == EOF && new_errno == EINVAL) {
+        r = 0;
+        errno = 0;
     }
     return r;
 }

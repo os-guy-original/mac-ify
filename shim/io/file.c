@@ -450,12 +450,30 @@ int macify_fstatat(int dirfd, const char *pathname, struct macos_stat *buf, int 
     if (!real_fstatat) real_fstatat = macify_elf_lookup("fstatat");
     if (!macify_caller_is_macos_text(__builtin_return_address(0)))
         return real_fstatat(dirfd, pathname, (struct stat *)buf, flags);
-    if (dirfd == -2) dirfd = -100;
+    if (dirfd == -2) dirfd = -100;  /* macOS AT_FDCWD (-2) → Linux AT_FDCWD (-100) */
+    /* Translate macOS AT_* flag bits to Linux equivalents.
+     *
+     * macOS values (from <sys/fcntl.h>):
+     *   AT_EACCESS          0x01
+     *   AT_SYMLINK_NOFOLLOW 0x20
+     *   AT_SYMLINK_FOLLOW   0x40   (Linux default is follow — no bit needed)
+     *   AT_REMOVEDIR        0x80
+     *
+     * Linux values (from <linux/fcntl.h>):
+     *   AT_EACCESS          0x200
+     *   AT_SYMLINK_NOFOLLOW 0x100
+     *   AT_SYMLINK_FOLLOW   0x400
+     *   AT_REMOVEDIR        0x200
+     *   AT_NO_AUTOMOUNT     0x800
+     *   AT_EMPTY_PATH       0x1000
+     *
+     * Any other macOS-specific bits (FSOPT_*, AT_REALDEV, etc.) are
+     * not translatable; pass 0 to the kernel so the call succeeds
+     * instead of EINVAL on unrecognized bits. */
     int linux_flags = 0;
-    if (flags & 0x0200) linux_flags |= 0x0100;
-    if (flags & 0x0400) linux_flags |= 0x0400;
-    if (flags & 0x0800) linux_flags |= 0x0200;
-    if (flags & 0x1000) linux_flags |= 0x0200;
+    if (flags & 0x01) linux_flags |= 0x200;   /* AT_EACCESS */
+    if (flags & 0x20) linux_flags |= 0x100;   /* AT_SYMLINK_NOFOLLOW */
+    if (flags & 0x80) linux_flags |= 0x200;   /* AT_REMOVEDIR */
     const char *eff = pathname;
     char tp[4096];
     if (pathname) {
@@ -524,6 +542,14 @@ int macify_stat_inode64(const char *path, struct macos_stat *buf) {
     }
     struct stat ls;
     int ret = real_stat(eff, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: stat$INODE64(\"%s\"%s) = %d errno=%d st_mode=0%o\n",
+            path ? path : "(null)",
+            eff != path ? " [translated]" : "",
+            ret, ret ? errno : 0, ret == 0 ? ls.st_mode : 0);
+        (void)write(2, b, n);
+    }
     if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
@@ -541,6 +567,14 @@ int macify_lstat_inode64(const char *path, struct macos_stat *buf) {
     }
     struct stat ls;
     int ret = real_lstat(eff, &ls);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: lstat$INODE64(\"%s\"%s) = %d errno=%d st_mode=0%o\n",
+            path ? path : "(null)",
+            eff != path ? " [translated]" : "",
+            ret, ret ? errno : 0, ret == 0 ? ls.st_mode : 0);
+        (void)write(2, b, n);
+    }
     if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
     return ret;
 }
@@ -566,7 +600,37 @@ int macify_fstat_inode64(int fd, struct macos_stat *buf) {
 
 int macify_fstatat_inode64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) __asm__("fstatat$INODE64");
 int macify_fstatat_inode64(int dirfd, const char *pathname, struct macos_stat *buf, int flags) {
-    return macify_fstatat(dirfd, pathname, buf, flags);
+    /* CRITICAL: Do NOT delegate to macify_fstatat — it checks
+     * macify_caller_is_macos_text(__builtin_return_address), and the
+     * return address would be in this shim, not in macOS text. The
+     * caller check would return FALSE, skipping dirfd/flags translation
+     * and passing macOS values directly to the Linux kernel (EINVAL).
+     * Translate dirfd and flags directly here. */
+    static int (*real_fstatat)(int, const char *, struct stat *, int) = NULL;
+    if (!real_fstatat) real_fstatat = macify_elf_lookup("fstatat");
+    if (dirfd == -2) dirfd = -100;  /* macOS AT_FDCWD (-2) → Linux AT_FDCWD (-100) */
+    int linux_flags = 0;
+    if (flags & 0x01) linux_flags |= 0x200;   /* AT_EACCESS */
+    if (flags & 0x20) linux_flags |= 0x100;   /* AT_SYMLINK_NOFOLLOW */
+    if (flags & 0x80) linux_flags |= 0x200;   /* AT_REMOVEDIR */
+    const char *eff = pathname;
+    char tp[4096];
+    if (pathname) {
+        extern int macify_should_hide_path(const char *);
+        if (macify_should_hide_path(pathname)) { errno = ENOENT; return -1; }
+        extern int macify_translate_path(const char *, char *, size_t);
+        if (macify_translate_path(pathname, tp, sizeof(tp)) == 0) eff = tp;
+    }
+    struct stat ls;
+    int ret = real_fstatat(dirfd, eff, &ls, linux_flags);
+    if (getenv("MACIFY_TRACE_OPEN")) {
+        char b[512]; int n = snprintf(b, sizeof(b),
+            "macify: fstatat$INODE64(%d, \"%s\", 0x%x->0x%x) = %d errno=%d\n",
+            dirfd, pathname ? pathname : "(null)", flags, linux_flags, ret, ret ? errno : 0);
+        (void)write(2, b, n);
+    }
+    if (ret == 0) { translate_stat(&ls, buf); errno = 0; }
+    return ret;
 }
 
 /* ── access ──────────────────────────────────────────────────── */

@@ -200,18 +200,24 @@ char *libintl_setlocale(int category, const char *locale) {
  * call. macOS binaries call setlocale(LC_ALL, "") which sets all locale
  * categories based on environment. If LC_NUMERIC is set to a locale with
  * "," as decimal point, glibc's strtold loops infinitely (sort -n).
- * By forcing LC_NUMERIC=C, we ensure "." is always the decimal point. */
+ * By forcing LC_NUMERIC=C, we ensure "." is always the decimal point.
+ *
+ * NOTE: LC_CTYPE is NOT forced — sed, paste, and other tools that read
+ * multibyte input need LC_CTYPE to match the actual encoding (e.g.,
+ * UTF-8). Forcing LC_CTYPE=C breaks sed's mbrtowc-based input reader
+ * and paste's column reading. The crash that originally motivated
+ * forcing LC_CTYPE=C (inlined getc in sort -n) is now handled by the
+ * 0xfbad2000 page mapping and __SEOF/__SERR patcher, so we no longer
+ * need to override LC_CTYPE. */
 char *macify_setlocale(int category, const char *locale) __asm__("setlocale");
 char *macify_setlocale(int category, const char *locale) {
     static char *(*real_setlocale)(int, const char *) = NULL;
     if (!real_setlocale) real_setlocale = macify_elf_lookup("setlocale");
     char *r = real_setlocale ? real_setlocale(category, locale) : NULL;
     if (r && real_setlocale) {
-        /* Force LC_NUMERIC=C (prevents strtold loops with "," decimal point)
-         * and LC_CTYPE=C (prevents character classification issues with
-         * UTF-8 locale that cause sort -n to crash via inlined getc). */
+        /* Force LC_NUMERIC=C only — prevents strtold loops with "," decimal
+         * point in locales that use ",". */
         real_setlocale(LC_NUMERIC, "C");
-        real_setlocale(LC_CTYPE, "C");
     }
     if (getenv("MACIFY_TRACE_LOCALE")) {
         char b[256];
