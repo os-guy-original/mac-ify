@@ -689,6 +689,24 @@ int macho_load_dylib(const char *path) {
                 } else if (strncmp(dep_name, "@rpath/", 7) == 0) {
                     /* Try @loader_path as fallback for @rpath */
                     snprintf(dep_path, sizeof(dep_path), "%s/%s", dylib_dir, dep_name + 7);
+                } else if (strstr(dep_name, "@@HOMEBREW_CELLAR@@") ||
+                           strstr(dep_name, "@@HOMEBREW_PREFIX@@")) {
+                    /* Homebrew bottle placeholder path — translate to the
+                     * macify prefix path. Without this, a Homebrew dylib
+                     * (e.g. libcurl.4.dylib) couldn't recursively load its
+                     * Homebrew dependencies (libssl.3.dylib, libcrypto.3.dylib,
+                     * etc.), and the binds inside the parent dylib would
+                     * resolve to STUBBED because the dependencies weren't
+                     * loaded yet. */
+                    const char *mprefix = macify_get_prefix();
+                    const char *rest;
+                    if (strstr(dep_name, "@@HOMEBREW_CELLAR@@")) {
+                        rest = dep_name + strlen("@@HOMEBREW_CELLAR@@");
+                        snprintf(dep_path, sizeof(dep_path), "%s/usr/local/Cellar%s", mprefix, rest);
+                    } else {
+                        rest = dep_name + strlen("@@HOMEBREW_PREFIX@@");
+                        snprintf(dep_path, sizeof(dep_path), "%s/usr/local%s", mprefix, rest);
+                    }
                 } else if (dep_name[0] == '/') {
                     /* Absolute path — check if it's a Homebrew path we can redirect */
                     if (strncmp(dep_name, "/usr/local/", 11) == 0) {
@@ -709,6 +727,53 @@ int macho_load_dylib(const char *path) {
                     int rc = macho_load_dylib(dep_path);
                     if (g_verbose && rc == 0)
                         fprintf(stderr, "macify:   loaded dependency: %s -> %s\n", dep_name, dep_path);
+                } else if (dep_name[0] == '/' &&
+                           !strstr(dep_name, "@@HOMEBREW") &&
+                           !strstr(dep_name, "@rpath") &&
+                           !strstr(dep_name, "@loader_path") &&
+                           access(dep_path, R_OK) != 0) {
+                    /* macOS system library (e.g. /usr/lib/libz.1.dylib) that
+                     * doesn't exist as a real Mach-O file in the prefix.
+                     * The main binary's LC_LOAD_DYLIB handler will dlopen the
+                     * Linux equivalent eventually, but that happens AFTER
+                     * this dylib's binds — so binds for symbols from these
+                     * system libs (deflate, inflate, etc. from libz) would
+                     * resolve to STUBBED.
+                     *
+                     * Pre-load the Linux equivalent NOW so this dylib's
+                     * binds can find the symbols. The mapping is limited
+                     * to system libraries (libz, libiconv, libresolv,
+                     * libintl, libedit, libreadline, libncurses) — these
+                     * function as part of the runtime translation layer
+                     * alongside glibc, so using the Linux version is
+                     * consistent with using glibc in place of libSystem. */
+                    const char *linux_lib = NULL;
+                    if (strstr(dep_name, "libz"))             linux_lib = "libz.so.1";
+                    else if (strstr(dep_name, "libresolv"))   linux_lib = "libresolv.so.2";
+                    else if (strstr(dep_name, "libiconv"))    linux_lib = "libiconv.so.2";
+                    else if (strstr(dep_name, "libncurses")) {
+                        linux_lib = "libncursesw.so.6";
+                        void *h = dlopen(linux_lib, RTLD_NOW | RTLD_GLOBAL);
+                        if (!h) { linux_lib = "libncurses.so.6"; h = dlopen(linux_lib, RTLD_NOW | RTLD_GLOBAL); }
+                        if (h) {
+                            extern void register_extra_handle(void *);
+                            register_extra_handle(h);
+                            if (g_verbose)
+                                fprintf(stderr, "macify:   pre-loaded Linux lib for system dep: %s -> %s\n", dep_name, linux_lib);
+                        }
+                        continue;
+                    }
+                    else if (strstr(dep_name, "libedit"))     linux_lib = "libedit.so.2";
+                    else if (strstr(dep_name, "libreadline")) linux_lib = "libreadline.so.8";
+                    if (linux_lib) {
+                        void *h = dlopen(linux_lib, RTLD_NOW | RTLD_GLOBAL);
+                        if (h) {
+                            extern void register_extra_handle(void *);
+                            register_extra_handle(h);
+                            if (g_verbose)
+                                fprintf(stderr, "macify:   pre-loaded Linux lib for system dep: %s -> %s\n", dep_name, linux_lib);
+                        }
+                    }
                 }
             }
             lc_dep = (load_command *)((uint8_t *)lc_dep + lc_dep->cmdsize);
@@ -911,6 +976,31 @@ void *macho_dylib_lookup(const char *sym) {
             /* If sym starts with '_' (e.g. C++ _Z...), also try without it */
             if (sym[0] == '_' && strcmp(md->exports[j].name, sym + 1) == 0) {
                 return md->exports[j].addr;
+            }
+        }
+    }
+    /* macOS C symbols are stored in the export table WITH a leading
+     * underscore (e.g. "_printf" not "printf"). If the bare lookup
+     * above failed and `sym` doesn't already start with '_', retry
+     * with a leading '_' prepended. This is what dyld does on macOS:
+     * a bind opcode referencing "printf" resolves to "_printf" in
+     * the export table.
+     *
+     * Without this, ngtcp2_conn_del (referenced without '_') wouldn't
+     * resolve to _ngtcp2_conn_del (stored with '_'). */
+    if (sym[0] != '_') {
+        char underscored[256];
+        size_t len = strlen(sym);
+        if (len < sizeof(underscored) - 1) {
+            underscored[0] = '_';
+            memcpy(underscored + 1, sym, len + 1);
+            for (int i = 0; i < g_n_macho_dylibs; i++) {
+                macho_dylib *md = &g_macho_dylibs[i];
+                for (int j = 0; j < md->n_exports; j++) {
+                    if (strcmp(md->exports[j].name, underscored) == 0) {
+                        return md->exports[j].addr;
+                    }
+                }
             }
         }
     }

@@ -41,6 +41,123 @@ static void usage(const char *prog) {
         "\n", prog);
 }
 
+/* Find the directory containing the running macify binary (e.g.
+ * /home/user/mac-ify/build/). Used to locate sibling scripts in
+ * scripts/macify-setup-homebrew. Returns a path with a trailing '/',
+ * or "./" on failure. */
+static const char *macify_bin_dir(void) {
+    static char dir[4096];
+    static int init = 0;
+    if (!init) {
+        init = 1;
+        ssize_t n = readlink("/proc/self/exe", dir, sizeof(dir) - 1);
+        if (n > 0) {
+            dir[n] = '\0';
+            char *slash = strrchr(dir, '/');
+            if (slash) {
+                slash[1] = '\0';  /* keep trailing / */
+                return dir;
+            }
+        }
+        strcpy(dir, "./");
+    }
+    return dir;
+}
+
+/* Find the macify source-tree scripts directory. We walk up from the
+ * binary's location: <bindir>/../scripts/macify-setup-homebrew.
+ * Returns the absolute path to the script, or NULL if not found. */
+static const char *macify_setup_homebrew_script(void) {
+    static char path[4096];
+    static int init = 0;
+    if (!init) {
+        init = 1;
+        /* Try relative to binary: <bindir>/../scripts/macify-setup-homebrew */
+        const char *bindir = macify_bin_dir();
+        snprintf(path, sizeof(path), "%s../scripts/macify-setup-homebrew", bindir);
+        if (syscall(SYS_faccessat, AT_FDCWD, path, X_OK, 0) == 0)
+            return path;
+        /* Try installed location: <libdir>/macify/scripts/macify-setup-homebrew */
+        snprintf(path, sizeof(path), "%s../lib/macify/scripts/macify-setup-homebrew", bindir);
+        if (syscall(SYS_faccessat, AT_FDCWD, path, X_OK, 0) == 0)
+            return path;
+        /* Try PATH lookup fallback: just "macify-setup-homebrew" */
+        snprintf(path, sizeof(path), "macify-setup-homebrew");
+        return path;
+    }
+    return path;
+}
+
+/* Parse a @@HOMEBREW_*@@ placeholder path and extract the Homebrew
+ * formula/package name. Returns the package name, or NULL if the path
+ * doesn't match the expected pattern.
+ *
+ * Examples:
+ *   @@HOMEBREW_CELLAR@@/curl/8.21.0/lib/libcurl.4.dylib  →  "curl"
+ *   @@HOMEBREW_PREFIX@@/opt/openssl@3/lib/libssl.3.dylib →  "openssl@3"
+ *   @@HOMEBREW_PREFIX@@/opt/libnghttp3/lib/...           →  "libnghttp3"
+ */
+static const char *macify_extract_homebrew_pkg(const char *name) {
+    static char pkg[256];
+    const char *p = NULL;
+    if (strstr(name, "@@HOMEBREW_CELLAR@@")) {
+        /* @@HOMEBREW_CELLAR@@/<pkg>/<version>/... */
+        p = name + strlen("@@HOMEBREW_CELLAR@@");
+        if (*p == '/') p++;
+    } else if (strstr(name, "@@HOMEBREW_PREFIX@@")) {
+        /* @@HOMEBREW_PREFIX@@/opt/<pkg>/... */
+        p = name + strlen("@@HOMEBREW_PREFIX@@");
+        if (strncmp(p, "/opt/", 5) == 0) p += 5;
+        else p = NULL;
+    }
+    if (!p || !*p) return NULL;
+    /* Copy up to next '/' or end */
+    size_t i = 0;
+    while (p[i] && p[i] != '/' && i < sizeof(pkg) - 1) {
+        pkg[i] = p[i];
+        i++;
+    }
+    pkg[i] = '\0';
+    if (i == 0) return NULL;
+    return pkg;
+}
+
+/* Auto-install a Homebrew formula by running macify-setup-homebrew.
+ * Forks/execs the script, waits for completion, returns 0 on success.
+ * Set MACIFY_NO_AUTOINSTALL=1 to disable (e.g., for offline use). */
+static int macify_auto_install_homebrew(const char *pkg) {
+    if (getenv("MACIFY_NO_AUTOINSTALL")) {
+        if (g_verbose)
+            fprintf(stderr, "macify:   auto-install disabled (MACIFY_NO_AUTOINSTALL set), skipping %s\n", pkg);
+        return -1;
+    }
+    const char *script = macify_setup_homebrew_script();
+    if (g_verbose)
+        fprintf(stderr, "macify:   auto-installing Homebrew package '%s' via %s\n", pkg, script);
+
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        /* Child: exec the setup script.
+         * Inherit stdin/stdout/stderr so the user sees download progress.
+         * Use /bin/bash to run the script (it has no shebang portability). */
+        char *const argv[] = {(char *)"bash", (char *)script, (char *)pkg, NULL};
+        execvp("bash", argv);
+        _exit(127);
+    }
+    /* Parent: wait for child */
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        if (g_verbose)
+            fprintf(stderr, "macify:   auto-install of '%s' succeeded\n", pkg);
+        return 0;
+    }
+    if (g_verbose)
+        fprintf(stderr, "macify:   auto-install of '%s' failed (status=%d)\n", pkg, status);
+    return -1;
+}
+
 int main(int argc, char **argv, char **envp) {
     int argi = 1;
     while (argi < argc && argv[argi][0] == '-') {
@@ -537,24 +654,37 @@ int main(int argc, char **argv, char **envp) {
                 libm_handle = g_dylibs[0].libm_handle;
             }
 
-            /* Map macOS library names to Linux equivalents.
+            /* Map macOS library names to equivalents.
              *
              * Loading strategy (in order, first success wins):
              *   1. @@HOMEBREW_*@@ placeholder → load real Mach-O .dylib
              *      from the macify prefix via macho_load_dylib(). If the
-             *      bottle isn't installed, fall through to step 3.
+             *      bottle isn't installed, AUTO-INSTALL it via
+             *      macify-setup-homebrew <pkg>, then retry. We do NOT
+             *      fall back to a Linux ELF equivalent — mac-ify's whole
+             *      point is to run macOS binaries using macOS deps; using
+             *      Linux's libcurl.so.4 etc. would require the user to
+             *      have the Linux binary installed too, defeating mac-ify.
+             *
+             *      Set MACIFY_NO_AUTOINSTALL=1 to disable auto-install
+             *      (e.g., for offline use); the dylib will then be left
+             *      unresolved.
+             *
              *   2. @rpath/@loader_path/@executable_path resolved path →
              *      defer loading until after the main walk.
-             *   3. libname substring match → dlopen the Linux ELF
-             *      equivalent (libcurl.so.4, libssl.so.3, etc.). This
-             *      covers both bare macOS dylib names (e.g. libz.1.dylib)
-             *      AND Homebrew placeholder paths whose bottle is missing.
              *
-             * Step 3 is critical for Homebrew binaries whose bottles
-             * haven't been installed via macify-setup-homebrew: without
-             * it, symbols from libcurl/libssl/etc. go unresolved and
-             * the binary silently exits 0 with no output.
-             */
+             *   3. Bare macOS system-dylib name (e.g., "libz.1.dylib",
+             *      "libncurses.dylib", "libiconv.2.dylib") → map to the
+             *      Linux system equivalent (libz.so.1, libncursesw.so.6,
+             *      libiconv.so.2). These are *system* libraries that
+             *      function as part of the runtime translation layer
+             *      (like glibc itself), NOT application-specific deps.
+             *
+             * Application-specific libraries (libcurl, libssl, libcrypto,
+             * libssh2, libnghttp*, libpsl, libzstd, libgnutls, etc.) are
+             * NEVER mapped to Linux equivalents — they must be installed
+             * as macOS dylibs in the prefix (via auto-install or
+             * macify-setup-homebrew). */
             void *extra1 = NULL;
             int loaded_as_macho = 0;  /* 1 if dylib symbols are already
                                       * accessible via macho_dylib_lookup() */
@@ -574,18 +704,35 @@ int main(int argc, char **argv, char **envp) {
                     snprintf(real_path, sizeof(real_path), "%s/usr/local%s", mprefix, rest);
                 }
                 int rc = macho_load_dylib(real_path);
+                if (rc != 0) {
+                    /* Bottle not installed — try auto-install, then retry. */
+                    const char *pkg = macify_extract_homebrew_pkg(name);
+                    if (pkg) {
+                        if (g_verbose)
+                            fprintf(stderr, "macify:   bottle not installed, auto-installing '%s'...\n", pkg);
+                        if (macify_auto_install_homebrew(pkg) == 0) {
+                            /* Retry load after install */
+                            rc = macho_load_dylib(real_path);
+                        }
+                    }
+                }
                 if (g_verbose) {
                     if (rc == 0)
                         fprintf(stderr, "macify:   loaded Mach-O dylib: %s\n", real_path);
                     else
-                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s — will try Linux lib equivalent\n", real_path);
+                        fprintf(stderr, "macify:   WARNING: failed to load Mach-O dylib: %s (run 'macify-setup-homebrew %s' to install)\n",
+                                real_path, macify_extract_homebrew_pkg(name) ? macify_extract_homebrew_pkg(name) : "<pkg>");
                 }
                 if (rc == 0) {
                     /* Symbols available via macho_dylib_lookup() in
                      * resolve_symbol(); no extra1 handle needed. */
                     loaded_as_macho = 1;
                 }
-                /* else: fall through to libname-based dlopen below. */
+                /* If still failed: leave loaded_as_macho=0 and let the
+                 * libname fallback below try (it'll skip app-specific
+                 * libs but try system libs). Symbols will be unresolved
+                 * — the binary may not work, but the user has been told
+                 * to install the missing bottle. */
             } else if (resolved_name) {
                 /* The path was resolved via @rpath/@loader_path/@executable_path
                  * and points to a real Mach-O .dylib file. Defer loading until
@@ -606,11 +753,21 @@ int main(int argc, char **argv, char **envp) {
                 loaded_as_macho = 1;
             }
 
-            /* libname-based Linux ELF fallback. Runs whenever the dylib
-             * wasn't already loaded as a Mach-O file above (either because
-             * the name didn't match @@HOMEBREW_*@@/@rpath/libc++, or
-             * because a @@HOMEBREW_*@@ path failed to load and we need a
-             * Linux substitute so symbols still resolve). */
+            /* Bare-libname fallback for macOS SYSTEM libraries only.
+             *
+             * These are libraries that are part of the OS runtime on
+             * macOS (libSystem, libz, libiconv, libresolv, libintl,
+             * libncurses, libedit, libreadline). They function as part
+             * of the runtime translation layer alongside glibc — using
+             * their Linux equivalents is consistent with using glibc
+             * in place of libSystem.
+             *
+             * Application-specific deps (libcurl, libssl, libcrypto,
+             * libssh2, libnghttp*, libpsl, libzstd, libgnutls,
+             * libnettle, libpcre2, libidn2, libunistring, libmagic)
+             * are NOT mapped here — they must be installed as macOS
+             * dylibs via macify-setup-homebrew (see @@HOMEBREW_*@@
+             * handler above for auto-install). */
             if (!loaded_as_macho) {
                 if (strstr(name, "libncurses")) {
                     /* macOS libncurses is loaded as a Mach-O dylib when the
@@ -629,60 +786,46 @@ int main(int argc, char **argv, char **envp) {
                     if (!extra1) extra1 = dlopen("libncurses.so.6", RTLD_NOW | RTLD_GLOBAL);
                     /* Do NOT register libtinfo — see comment above. */
                 } else if (strstr(name, "libz")) {
+                    /* libz is a system compression library, part of the OS
+                     * on both macOS and Linux. Use Linux's libz.so.1. */
                     extra1 = dlopen("libz.so.1", RTLD_NOW | RTLD_GLOBAL);
                 } else if (strstr(name, "libresolv")) {
+                    /* libresolv is a system DNS resolver. */
                     extra1 = dlopen("libresolv.so.2", RTLD_NOW | RTLD_GLOBAL);
                 } else if (strstr(name, "libiconv")) {
+                    /* libiconv is a system character-set conversion library.
+                     * (Often part of glibc on Linux; the separate libiconv.so.2
+                     * is the GNU libiconv package.) */
                     extra1 = dlopen("libiconv.so.2", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libssl")) {
-                    extra1 = dlopen("libssl.so.3", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libcrypto")) {
-                    extra1 = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libgnutls")) {
-                    extra1 = dlopen("libgnutls.so.30", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libnettle")) {
-                    extra1 = dlopen("libnettle.so.8", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libpcre2")) {
-                    extra1 = dlopen("libpcre2-8.so.0", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libpsl")) {
-                    extra1 = dlopen("libpsl.so.5", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libidn2")) {
-                    extra1 = dlopen("libidn2.so.0", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libunistring")) {
-                    extra1 = dlopen("libunistring.so.5", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libedit")) {
+                } else if (strstr(name, "libedit") || strstr(name, "libreadline")) {
+                    /* libedit/libreadline are terminal-line-editing libraries.
+                     * They're loaded as Mach-O dylibs when the @@HOMEBREW_*@@
+                     * path is used. For bare "libedit.dylib"/"libreadline.dylib"
+                     * references (rare), fall back to the Linux version. */
                     extra1 = dlopen("libedit.so.2", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libreadline")) {
-                    extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libmagic")) {
-                    extra1 = dlopen("libmagic.so.1", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libcurl")) {
-                    extra1 = dlopen("libcurl.so.4", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libssh2")) {
-                    extra1 = dlopen("libssh2.so.1", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libnghttp3")) {
-                    extra1 = dlopen("libnghttp3.so.9", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libnghttp2")) {
-                    extra1 = dlopen("libnghttp2.so.14", RTLD_NOW | RTLD_GLOBAL);
-                } else if (strstr(name, "libzstd")) {
-                    extra1 = dlopen("libzstd.so.1", RTLD_NOW | RTLD_GLOBAL);
+                    if (!extra1) extra1 = dlopen("libreadline.so.8", RTLD_NOW | RTLD_GLOBAL);
                 } else if (strstr(name, "libintl")) {
-                    /* libintl is part of glibc on Linux — no separate library */
+                    /* libintl (gettext) is part of glibc on Linux — no separate
+                     * library needed. */
                     extra1 = NULL;
                 }
+                /* Application-specific libraries (libcurl, libssl, libcrypto,
+                 * libssh2, libnghttp*, libpsl, libzstd, libgnutls, libnettle,
+                 * libpcre2, libidn2, libunistring, libmagic) intentionally
+                 * NOT mapped to Linux equivalents — see comment block above. */
             }
             if (extra1) {
                 register_extra_handle(extra1);
                 if (g_verbose)
                     fprintf(stderr, "macify:   extra1 loaded for \"%s\"\n", name);
             } else if (g_verbose) {
-                /* Check if this dylib should have had an extra but didn't */
-                if (strstr(name, "libssl") || strstr(name, "libcrypto") ||
-                    strstr(name, "libcurl") || strstr(name, "libssh2") ||
-                    strstr(name, "libnghttp") || strstr(name, "libzstd") ||
-                    strstr(name, "libpsl") || strstr(name, "libz") ||
+                /* Warn if a known-needed system library couldn't be loaded. */
+                if (strstr(name, "libz") ||
                     strstr(name, "libiconv") || strstr(name, "libresolv"))
                     fprintf(stderr, "macify:   WARNING: no extra1 loaded for \"%s\"\n", name);
+                /* For application libraries (libcurl, libssl, libcrypto, etc.),
+                 * the @@HOMEBREW_*@@ handler above already printed an
+                 * install-hint message — don't double-warn. */
             }
 
             if (!shim_handle || !libc_handle) {

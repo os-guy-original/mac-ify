@@ -380,4 +380,3 @@ const void *macify_kSecMatchLimitAll_ptr __asm__("kSecMatchLimitAll") = macify_s
 const void *macify_kSecPolicyAppleSSL_ptr __asm__("kSecPolicyAppleSSL") = macify_sec_dummy;
 const void *macify_kSecPolicyOid_ptr __asm__("kSecPolicyOid") = macify_sec_dummy;
 const void *macify_kSecReturnRef_ptr __asm__("kSecReturnRef") = macify_sec_dummy;
-

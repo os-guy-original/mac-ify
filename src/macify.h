@@ -26,6 +26,7 @@
 #include <time.h>
 #include <dlfcn.h>
 #include <link.h>
+#include <sys/wait.h>
 
 /* ============================================================
  * Mach-O constants
