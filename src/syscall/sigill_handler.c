@@ -48,23 +48,6 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             rip_ptr[0], rip_ptr[1], rip_ptr[2], rip_ptr[3],
             rip_ptr[4], rip_ptr[5], rip_ptr[6], rip_ptr[7]);
         write(2, ibuf, in);
-        /* Dump stack to find return addresses */
-        void **sp = (void **)regs[REG_RSP];
-        for (int i = 0; i < 16; i++) {
-            in = snprintf(ibuf, sizeof(ibuf), "  sp+%d = %p\n", i*8, sp[i]);
-            write(2, ibuf, in);
-        }
-        /* Dump registers */
-        in = snprintf(ibuf, sizeof(ibuf),
-            "  rdi=%p rsi=%p rdx=%p rcx=%p\n"
-            "  r8=%p r9=%p r10=%p r11=%p\n"
-            "  r12=%p r13=%p r14=%p r15=%p\n"
-            "  rbp=%p rsp=%p\n",
-            (void*)regs[REG_RDI], (void*)regs[REG_RSI], (void*)regs[REG_RDX], (void*)regs[REG_RCX],
-            (void*)regs[REG_R8], (void*)regs[REG_R9], (void*)regs[REG_R10], (void*)regs[REG_R11],
-            (void*)regs[REG_R12], (void*)regs[REG_R13], (void*)regs[REG_R14], (void*)regs[REG_R15],
-            (void*)regs[REG_RBP], (void*)regs[REG_RSP]);
-        write(2, ibuf, in);
     }
 
     /* Fast bounds check. Most syscalls are < 600. */

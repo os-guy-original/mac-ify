@@ -832,6 +832,7 @@ struct passwd *(*glibc_getpwuid)(uid_t) = NULL;
 struct passwd *(*glibc_getpwnam)(const char *) = NULL;
 int (*glibc_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
 
+struct passwd *macify_getpwuid(uid_t uid) __asm__("getpwuid");
 struct passwd *macify_getpwuid(uid_t uid) {
     if (getenv("MACIFY_TRACE_PASSWD")) {
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -878,6 +879,7 @@ struct passwd *macify_getpwuid(uid_t uid) {
     return (struct passwd *)&macos_pw;
 }
 
+int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) __asm__("getpwuid_r");
 int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
     if (getenv("MACIFY_TRACE_PASSWD")) {
         char b[256]; int n = snprintf(b, sizeof(b),
@@ -944,6 +946,7 @@ int macify_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, s
     return r;
 }
 
+struct passwd *macify_getpwnam(const char *name) __asm__("getpwnam");
 struct passwd *macify_getpwnam(const char *name) {
     if (getenv("MACIFY_TRACE_PASSWD")) {
         char b[256]; int n = snprintf(b, sizeof(b),

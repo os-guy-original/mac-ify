@@ -144,15 +144,15 @@ void *macify_get_shim_symbol(const char *symbol) {
     /* NSS functions — NOT exported globally (to prevent glibc deadlock),
      * but available via dlsym for bash's GOT resolution */
     if (strcmp(symbol, "getpwuid") == 0) {
-        extern struct passwd *macify_getpwuid(uid_t);
+        extern struct passwd *macify_getpwuid(uid_t) __asm__("getpwuid");
         return (void *)macify_getpwuid;
     }
     if (strcmp(symbol, "getpwuid_r") == 0) {
-        extern int macify_getpwuid_r(uid_t, struct passwd *, char *, size_t, struct passwd **);
+        extern int macify_getpwuid_r(uid_t, struct passwd *, char *, size_t, struct passwd **) __asm__("getpwuid_r");
         return (void *)macify_getpwuid_r;
     }
     if (strcmp(symbol, "getpwnam") == 0) {
-        extern struct passwd *macify_getpwnam(const char *);
+        extern struct passwd *macify_getpwnam(const char *) __asm__("getpwnam");
         return (void *)macify_getpwnam;
     }
     if (strcmp(symbol, "getaddrinfo") == 0) {
