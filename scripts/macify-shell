@@ -1,85 +1,15 @@
 #!/bin/bash
-# macify-shell — run a macOS bash shell inside the macify prefix
-#
-# Usage:
-#   macify-shell                  # interactive shell
-#   macify-shell 'echo hello'     # run command
-#   macify-shell -v 'echo hello'  # verbose
+# macify-shell — compatibility wrapper; forwards to: macify [options] shell ...
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Find macify binary: installed path, env var, or source tree
-MACIFY_BIN="${MACIFY_BINARY:-}"
-if [ -z "$MACIFY_BIN" ] || [ ! -f "$MACIFY_BIN" ]; then
-    if [ -f "$SCRIPT_DIR/../macify" ]; then
-        MACIFY_BIN="$SCRIPT_DIR/../macify"
-    elif [ -f "$SCRIPT_DIR/../build/macify" ]; then
-        MACIFY_BIN="$SCRIPT_DIR/../build/macify"
-    else
-        echo "macify-shell: ERROR — cannot find macify binary" >&2
-        echo "  Set MACIFY_BINARY env var or run from source tree" >&2
-        exit 1
-    fi
-fi
-
-# Find shim directory (same dir as macify binary)
-SHIM_DIR="$(dirname "$MACIFY_BIN")"
-PREFIX="${MACIFY_PREFIX:-$HOME/.macify}"
-
-# ── Parse options ───────────────────────────────────────────────
-VERBOSE=""
-while [[ "$1" == --* || "$1" == -[a-z] ]]; do
+V=""
+PREFIX_ARGS=()
+while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix) PREFIX="$2"; shift 2;;
-        -v|--verbose) VERBOSE="-v"; shift;;
-        -h|--help)
-            cat <<'EOF'
-Usage: macify-shell [options] [command [args...]]
-
-Runs a real macOS bash binary inside the macify prefix.
-Without a command: starts interactive macOS bash.
-With a command:    runs `bash -c "<command>"` (macOS bash).
-
-Options:
-  --prefix <dir>   Set prefix directory (default: ~/.macify)
-  -v, --verbose    Enable verbose macify loader output
-  -h, --help       Show this help
-EOF
-            exit 0;;
-        *) break;;
+        -v|--verbose) V="-v"; shift ;;
+        --prefix)     PREFIX_ARGS=(--prefix "$2"); shift 2 ;;
+        *) break ;;
     esac
 done
 
-export MACIFY_PREFIX="$PREFIX"
-# DON'T set LD_LIBRARY_PATH — the macify binary finds the shim via
-# /proc/self/exe path resolution. Setting LD_LIBRARY_PATH makes the
-# shim's symbols visible to glibc's internal symbol resolution,
-# causing futex deadlocks on some systems (Artix, kernel 7.x).
-# export LD_LIBRARY_PATH="$SHIM_DIR"
-
-# ── Ensure prefix and rootfs exist ──────────────────────────────
-if [ ! -f "$PREFIX/.macify_prefix" ] || [ ! -f "$PREFIX/bin/bash" ] || [ ! -d "$PREFIX/usr/local/opt/readline" ]; then
-    echo "macify-shell: initializing prefix at $PREFIX..." >&2
-    bash "$SCRIPT_DIR/macify-setup-rootfs" >&2
-fi
-
-if [ ! -f "$PREFIX/bin/bash" ]; then
-    echo "macify-shell: ERROR — macOS bash not found at $PREFIX/bin/bash" >&2
-    exit 1
-fi
-
-# ── Run macOS bash ──────────────────────────────────────────────
-# Use --noediting by default for stability. macOS libedit (readline)
-# crashes on the second interactive command due to termcap/ABI issues.
-# Users can override with MACIFY_USE_READLINE=1.
-if [ $# -gt 0 ]; then
-    exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --norc --noprofile -c "$*"
-else
-    if [ -n "$MACIFY_USE_READLINE" ]; then
-        exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --norc --noprofile -i
-    else
-        exec "$MACIFY_BIN" $VERBOSE "$PREFIX/bin/bash" --noediting --norc --noprofile -i
-    fi
-fi
+exec "$DIR/macify" $V "${PREFIX_ARGS[@]+"${PREFIX_ARGS[@]}"}" shell "$@"

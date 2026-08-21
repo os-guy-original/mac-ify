@@ -1,77 +1,187 @@
 #!/bin/bash
-# macify — wrapper script for running macOS binaries on Linux
+# macify — run macOS x86_64 binaries on Linux.
 #
-# Usage: macify [options] <macos_binary> [args...]
+# Subcommands:
+#   <binary> [args...]    run a macOS binary
+#   run <binary> [...]    same, for binaries named like a subcommand
+#   shell [command]       interactive macOS bash inside the prefix
+#   init                  initialize/repair the prefix
+#   doctor                environment & prefix health check
+#   debug <binary> [...]  verbose diagnostics for issue reports
 #
-# Options:
-#   --prefix <dir>   Set prefix directory (default: ~/.macify)
-#   --verbose        Enable verbose output
-#   --version        Print version
+# Global options (before any subcommand):
+#   --prefix <dir>   prefix directory (default: ~/.macify)
+#   -v, --verbose    verbose loader output
 #
-# Like Wine's `wine` command, this runs macOS binaries through the
-# macify translator. The prefix at ~/.macify/ provides a virtual macOS
-# filesystem.
+# LD_LIBRARY_PATH is not set here. The loader locates libmacify_shim.so
+# next to itself via /proc/self/exe; exporting LD_LIBRARY_PATH exposes
+# shim symbols to glibc's internal symbol resolution, which has caused
+# futex deadlocks on some systems.
 
-set -e
+set -u
 
-# Find the macify binary and shim
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MACIFY_BIN="$PROJECT_DIR/build/macify"
-SHIM_DIR="$PROJECT_DIR/build"
+VERSION="1.1"
 
-# Parse options
-VERBOSE=""
-PREFIX=""
-while [[ "$1" == --* ]]; do
+# ── Locate installation ─────────────────────────────────────────
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+APP=""
+SCRIPTS_DIR=""
+for cand in \
+    "$SELF_DIR/../build/macify" \
+    "$SELF_DIR/../macify" \
+    "$SELF_DIR/../lib/macify/macify"
+do
+    if [ -x "$cand" ]; then
+        APP="$(readlink -f "$cand")"
+        break
+    fi
+done
+
+if [ -n "$APP" ]; then
+    APP_DIR="$(dirname "$APP")"
+    # Helpers sit beside the sources in-tree, under scripts/ beside the
+    # binary when installed, or directly beside it in flat layouts.
+    if [ -f "$SELF_DIR/macify-setup-rootfs" ]; then
+        SCRIPTS_DIR="$SELF_DIR"
+    elif [ -f "$APP_DIR/scripts/macify-setup-rootfs" ]; then
+        SCRIPTS_DIR="$APP_DIR/scripts"
+    elif [ -f "$APP_DIR/macify-setup-rootfs" ]; then
+        SCRIPTS_DIR="$APP_DIR"
+    fi
+fi
+
+usage() {
+    cat <<EOF
+macify $VERSION — run macOS x86_64 binaries on Linux
+
+Usage:
+  macify [options] <binary> [args...]     run a macOS binary
+  macify shell [command]                  interactive macOS bash in the prefix
+  macify init                             initialize/repair the prefix
+  macify doctor                           environment & prefix health check
+  macify debug <binary> [args...]         verbose diagnostics for issue reports
+
+Options:
+  --prefix <dir>   prefix directory (default: ~/.macify)
+  -v, --verbose    verbose loader output
+  --version        print version
+  --help           this help
+EOF
+}
+
+die() { echo "macify: $*" >&2; exit 1; }
+
+[ -n "$APP" ] || die "cannot locate the macify binary (looked next to $SELF_DIR)"
+[ -n "$SCRIPTS_DIR" ] || die "cannot locate helper scripts"
+
+# ── Global options ───────────────────────────────────────────────
+VERBOSE_FLAG=""
+PREFIX_GIVEN=""
+while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix)
-            PREFIX="$2"
-            shift 2
-            ;;
-        --verbose)
-            VERBOSE="1"
-            shift
-            ;;
-        --version)
-            echo "macify 1.0 (macOS binary translator)"
-            exit 0
-            ;;
-        --help)
-            echo "Usage: macify [options] <macos_binary> [args...]"
-            echo ""
-            echo "Options:"
-            echo "  --prefix <dir>   Set prefix directory (default: ~/.macify)"
-            echo "  --verbose        Enable verbose output"
-            echo "  --version        Print version"
-            echo ""
-            echo "Like Wine's 'wine' command, this runs macOS binaries through"
-            echo "the macify translator. The prefix at ~/.macify/ provides a"
-            echo "virtual macOS filesystem."
-            exit 0
-            ;;
-        *)
-            break
-            ;;
+        --prefix)  PREFIX_GIVEN="$2"; shift 2 ;;
+        -v|--verbose) VERBOSE_FLAG="-v"; shift ;;
+        --version) echo "macify $VERSION"; exit 0 ;;
+        --help|-h) usage; exit 0 ;;
+        -*)        die "unknown option: $1 (see macify --help)" ;;
+        *)         break ;;
     esac
 done
 
-if [ $# -eq 0 ]; then
-    echo "macify: no binary specified"
-    echo "Usage: macify [options] <macos_binary> [args...]"
-    exit 1
-fi
+export MACIFY_PREFIX="${PREFIX_GIVEN:-${MACIFY_PREFIX:-$HOME/.macify}}"
+PREFIX="$MACIFY_PREFIX"
 
-# Set up environment
-export LD_LIBRARY_PATH="$SHIM_DIR:${LD_LIBRARY_PATH:-}"
+# ── Subcommands ──────────────────────────────────────────────────
+CMD="${1:-}"
+if [ $# -gt 0 ]; then shift; fi
 
-if [ -n "$PREFIX" ]; then
-    export MACIFY_PREFIX="$PREFIX"
-fi
+do_init() {
+    echo "macify: initializing prefix at $PREFIX..." >&2
+    bash "$SCRIPTS_DIR/macify-setup-rootfs" >&2
+}
 
-if [ -n "$VERBOSE" ]; then
-    export MACIFY_VERBOSE=1
-fi
+ensure_prefix() {
+    if [ ! -f "$PREFIX/.macify_prefix" ] || [ ! -f "$PREFIX/bin/bash" ] \
+       || [ ! -d "$PREFIX/usr/local/opt/readline" ]; then
+        do_init
+    fi
+    [ -f "$PREFIX/bin/bash" ] \
+        || die "macOS bash not found at $PREFIX/bin/bash (ran: macify init)"
+}
 
-# Run the macOS binary
-exec "$MACIFY_BIN" "$@"
+case "$CMD" in
+    shell)
+        ensure_prefix
+        if [ $# -gt 0 ]; then
+            exec "$APP" $VERBOSE_FLAG "$PREFIX/bin/bash" --norc --noprofile -c "$*"
+        fi
+        # Line editing off by default: macOS libedit crashes mid-session due
+        # to termcap/ABI issues. Opt back in with MACIFY_USE_READLINE=1.
+        if [ -n "${MACIFY_USE_READLINE:-}" ]; then
+            exec "$APP" $VERBOSE_FLAG "$PREFIX/bin/bash" --norc --noprofile -i
+        fi
+        exec "$APP" $VERBOSE_FLAG "$PREFIX/bin/bash" --noediting --norc --noprofile -i
+        ;;
+    init)
+        do_init
+        ;;
+    debug)
+        [ $# -gt 0 ] || die "usage: macify debug <binary> [args...]"
+        exec bash "$SCRIPTS_DIR/macify-debug" "$@"
+        ;;
+    run)
+        [ $# -gt 0 ] || die "usage: macify run <binary> [args...]"
+        exec "$APP" $VERBOSE_FLAG "$@"
+        ;;
+    doctor)
+        status=0
+        ok()   { echo "  [ok]   $*"; }
+        fail() { echo "  [FAIL] $*"; status=1; }
+
+        echo "macify doctor"
+        echo "  version : $VERSION"
+        echo "  binary  : $APP"
+        echo "  prefix  : $PREFIX"
+
+        if [ -f "$APP_DIR/libmacify_shim.so" ]; then
+            ok "shim found next to binary"
+        else
+            fail "libmacify_shim.so not found in $APP_DIR"
+        fi
+
+        if [ -f "$PREFIX/.macify_prefix" ]; then
+            ok "prefix initialized ($(du -sh "$PREFIX" 2>/dev/null | cut -f1))"
+        else
+            fail "prefix not initialized — run: macify init"
+        fi
+
+        if [ -x "$PREFIX/bin/bash" ]; then
+            ok "macOS bash present"
+        else
+            fail "macOS bash missing at $PREFIX/bin/bash"
+        fi
+
+        probe=$(echo 'echo __macify_ok__' | "$APP" -q "$PREFIX/bin/bash" --norc --noprofile 2>/dev/null)
+        if [ "$probe" = "__macify_ok__" ]; then
+            ok "functional probe (bash -c equivalent) passed"
+        else
+            fail "functional probe failed (binary ran but produced no expected output)"
+        fi
+
+        echo ""
+        if [ $status -eq 0 ]; then
+            echo "all checks passed"
+        else
+            echo "problems found — see lines marked [FAIL]"
+        fi
+        exit $status
+        ;;
+    "")
+        usage
+        exit 1
+        ;;
+    *)
+        exec "$APP" $VERBOSE_FLAG "$CMD" "$@"
+        ;;
+esac
