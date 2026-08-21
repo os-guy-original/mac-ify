@@ -209,23 +209,6 @@ static void setup_gs_base(uint64_t entry_rip) {
     }
 }
 
-__attribute__((noreturn))
-/* SIGALRM handler for MACIFY_NO_FORK binaries — flushes stdout and exits. */
-__attribute__((naked))
-static void alarm_restore_rt(void) {
-    __asm__ volatile("mov $15, %%rax; syscall" :::);
-}
-
-static void alarm_handler(int sig) {
-    (void)sig;
-    /* Try fflush first — it handles glibc's internal buffering correctly. */
-    extern FILE *stdout;
-    if (stdout) {
-        fflush(stdout);
-    }
-    _exit(0);
-}
-
 void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
     /* Set up %gs base for Go binaries that use gs:0x30 for goroutine TLS.
      * For Go binaries, GS base is set to (tls_g_addr - 0x30) so the GS

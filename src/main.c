@@ -14,13 +14,15 @@ static const char *macify_shim_path(void) {
             path[n] = '\0';
             char *slash = strrchr(path, '/');
             if (slash) {
-                strcpy(slash + 1, "libmacify_shim.so");
+                size_t dirlen = (size_t)(slash - path) + 1;
+                snprintf(path + dirlen, sizeof(path) - dirlen,
+                         "libmacify_shim.so");
                 /* Check if file exists */
                 if (syscall(SYS_faccessat, AT_FDCWD, path, F_OK, 0) == 0)
                     return path;
             }
         }
-        strcpy(path, "libmacify_shim.so");
+        snprintf(path, sizeof(path), "libmacify_shim.so");
     }
     return path;
 }
@@ -59,7 +61,7 @@ static const char *macify_bin_dir(void) {
                 return dir;
             }
         }
-        strcpy(dir, "./");
+        snprintf(dir, sizeof(dir), "./");
     }
     return dir;
 }
