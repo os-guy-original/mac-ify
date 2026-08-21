@@ -38,10 +38,16 @@ void init_real_pthread_funcs(void) {
 
 /* Convert a macOS-format mutex to glibc format in-place. The macOS mutex
  * is larger than glibc's (64+ vs 40 bytes), so overwriting the first
- * sizeof(pthread_mutex_t) bytes is safe. */
+ * sizeof(pthread_mutex_t) bytes is safe.
+ *
+ * Two macOS signatures exist: 0x32AAABA7 for runtime-initialized mutexes
+ * and 0x32AAABA2 (_PTHREAD_MUTEX_SIG_init) for statically initialized ones
+ * (PTHREAD_MUTEX_INITIALIZER). Missing the init variant left statically
+ * initialized locks (e.g. gettext's _nl_state_lock) unconverted, and
+ * glibc's lock on the raw macOS layout wedged forever in futex(val=2). */
 void convert_macos_mutex(pthread_mutex_t *m) {
     unsigned int sig = *(unsigned int *)m;
-    if (sig == MACOS_PTHREAD_MUTEX_SIG) {
+    if (sig == MACOS_PTHREAD_MUTEX_SIG || sig == MACOS_PTHREAD_MUTEX_SIG_INIT) {
         static const pthread_mutex_t glibc_init = PTHREAD_MUTEX_INITIALIZER;
         memcpy(m, &glibc_init, sizeof(pthread_mutex_t));
     }
