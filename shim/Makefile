@@ -4,6 +4,14 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-truncation -std=gnu11 -fPIC
 LDFLAGS ?= -shared -lpthread -ldl -lm -Wl,-z,now
 
+# Optional strictness/sanitizer knobs (must match src/ when running):
+#   make WERROR=-Werror
+#   make SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+WERROR ?=
+SAN    ?=
+CFLAGS += $(WERROR) $(SAN)
+LDFLAGS += $(SAN)
+
 BIN_DIR  = ../build
 LIB      = $(BIN_DIR)/libmacify_shim.so
 
@@ -18,7 +26,8 @@ SRC = shim_core.c shim_mach.c shim_objc.c shim_tlv.c \
       sys/stubs.c sys/dispatch.c sys/random.c sys/kqueue.c sys/ucontext.c \
       sys/malloc.c sys/fs.c sys/mlock.c sys/misc_stubs.c
 
-OBJ = $(SRC:.c=.o)
+OBJDIR = ../build/obj/shim
+OBJ = $(addprefix $(OBJDIR)/,$(SRC:.c=.o))
 
 .PHONY: all clean
 
@@ -27,11 +36,15 @@ all: $(LIB)
 $(LIB): $(OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -shared -o $@ $(OBJ) $(LDFLAGS)
 
-%.o: %.c
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 clean:
-	rm -f $(LIB) $(OBJ)
+	rm -rf $(OBJDIR) $(LIB)
