@@ -87,9 +87,12 @@ int translate_fcntl_cmd(int macos_cmd) {
         case 8: return F_SETLK;            /* macOS F_SETLK=8,  Linux=6 */
         case 9: return F_SETLKW;           /* macOS F_SETLKW=9, Linux=7 */
         case 67: return F_DUPFD_CLOEXEC;   /* macOS 67, Linux 1030 */
-        /* macOS-specific cmds (F_GETPATH=50, F_FULLFSYNC=51, F_NOCACHE=48,
-         * F_RDADVISE=57, F_RDAHEAD=58, F_PREALLOCATE=42, etc.) have no
-         * Linux equivalent. Return -1 to signal "unsupported". */
+        /* Remaining macOS-specific cmds are handled in sigill_handler():
+         * F_RDADVISE(44), F_RDAHEAD(45), F_NOCACHE(48), F_GETPATH(50),
+         * F_FULLFSYNC(51), F_GLOBAL_NOCACHE(55), F_SETNOSIGPIPE(73),
+         * F_GETNOSIGPIPE(74). Anything else reaching here has no Linux
+         * equivalent — return -1 to signal "unsupported" (caller returns
+         * EINVAL per macOS convention). */
         default: return -1;
     }
 }

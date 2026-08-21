@@ -1,118 +1,494 @@
-/* syscall_names.c — BSD syscall name lookup for debug output */
+/* syscall_names.c — BSD syscall name lookup for debug output.
+ * Names verified against xnu bsd/kern/syscalls.master
+ * (apple-oss-distributions/xnu). Unlisted numbers report "?". */
 #include "syscall_internal.h"
 
-#define BSD_SYSCALL_MAX 600
-
-/* BSD syscall names for nicer verbose output. */
 const char *bsd_syscall_name(uint32_t bsd_nr) {
-    switch (bsd_nr) {
-        case 1:   return "exit";
-        case 2:   return "fork";
-        case 3:   return "read";
-        case 4:   return "write";
-        case 5:   return "open";
-        case 6:   return "close";
-        case 7:   return "wait4";
-        case 9:   return "link";
-        case 10:  return "unlink";
-        case 12:  return "chdir";
-        case 13:  return "fchdir";
-        case 14:  return "mknod";
-        case 15:  return "chmod";
-        case 16:  return "chown";
-        case 20:  return "getpid";
-        case 23:  return "setuid";
-        case 24:  return "getuid";
-        case 25:  return "geteuid";
-        case 27:  return "recvmsg";
-        case 28:  return "sendmsg";
-        case 29:  return "recvfrom";
-        case 30:  return "accept";
-        case 31:  return "getpeername";
-        case 32:  return "getsockname";
-        case 33:  return "access";
-        case 36:  return "sync";
-        case 37:  return "kill";
-        case 39:  return "getppid";
-        case 41:  return "pipe";
-        case 42:  return "pipe";
-        case 43:  return "getegid";
-        case 46:  return "sigaction";
-        case 47:  return "getgid";
-        case 48:  return "sigprocmask";
-        case 53:  return "sigaltstack";
-        case 54:  return "ioctl";
-        case 57:  return "symlink";
-        case 58:  return "readlink";
-        case 59:  return "execve";
-        case 60:  return "umask";
-        case 61:  return "chroot";
-        case 65:  return "msync";
-        case 73:  return "munmap";
-        case 74:  return "mprotect";
-        case 75:  return "madvise";
-        case 78:  return "mincore";
-        case 79:  return "getgroups";
-        case 80:  return "setgroups";
-        case 81:  return "getpgrp";
-        case 82:  return "setpriority";
-        case 83:  return "getpriority";
-        case 89:  return "getitimer";
-        case 90:  return "setitimer";
-        case 92:  return "fcntl";
-        case 93:  return "select";
-        case 95:  return "fsync";
-        case 97:  return "socket";
-        case 98:  return "connect";
-        case 116: return "gettimeofday";
-        case 117: return "getrusage";
-        case 118: return "getsockopt";
-        case 120: return "readv";
-        case 121: return "writev";
-        case 126: return "settimeofday";
-        case 128: return "rename";
-        case 131: return "flock";
-        case 133: return "sendto";
-        case 134: return "shutdown";
-        case 135: return "socketpair";
-        case 136: return "mkdir";
-        case 137: return "rmdir";
-        case 138: return "utimes";
-        case 197: return "mmap";
-        case 199: return "lseek";
-        case 200: return "truncate";
-        case 201: return "ftruncate";
-        case 202: return "nanosleep";
-        case 220: return "getxattr";
-        case 221: return "fgetxattr";
-        case 222: return "setxattr";
-        case 223: return "fsetxattr";
-        case 224: return "removexattr";
-        case 225: return "fremovexattr";
-        case 226: return "listxattr";
-        case 227: return "llistxattr";
-        case 228: return "flistxattr";
-        case 286: return "pwrite";
-        case 287: return "pread";
-        case 331: return "fchown";
-        case 333: return "fchmod";
-        case 396: return "read_nocancel";
-        case 397: return "write_nocancel";
-        case 398: return "open_nocancel";
-        case 399: return "close_nocancel";
-        case 400: return "wait4_nocancel";
-        case 401: return "recvmsg_nocancel";
-        case 402: return "sendmsg_nocancel";
-        case 403: return "recvfrom_nocancel";
-        case 404: return "accept_nocancel";
-        case 405: return "fcntl_nocancel";
-        case 406: return "select_nocancel";
-        case 460: return "pread";
-        case 461: return "pwrite";
-        case 465: return "pread_nocancel";
-        case 466: return "pwrite_nocancel";
-        default:  return "?";
-    }
+    static const char * const names[BSD_SYSCALL_MAX] = {
+        [0]   = "syscall",
+        [1]   = "exit",
+        [2]   = "fork",
+        [3]   = "read",
+        [4]   = "write",
+        [5]   = "open",
+        [6]   = "close",
+        [7]   = "wait4",
+        [8]   = "creat",
+        [9]   = "link",
+        [10]  = "unlink",
+        [11]  = "execv",
+        [12]  = "chdir",
+        [13]  = "fchdir",
+        [14]  = "mknod",
+        [15]  = "chmod",
+        [16]  = "chown",
+        [17]  = "break",
+        [18]  = "getfsstat",
+        [19]  = "lseek",
+        [20]  = "getpid",
+        [21]  = "mount",
+        [22]  = "umount",
+        [23]  = "setuid",
+        [24]  = "getuid",
+        [25]  = "geteuid",
+        [26]  = "ptrace",
+        [27]  = "recvmsg",
+        [28]  = "sendmsg",
+        [29]  = "recvfrom",
+        [30]  = "accept",
+        [31]  = "getpeername",
+        [32]  = "getsockname",
+        [33]  = "access",
+        [34]  = "chflags",
+        [35]  = "fchflags",
+        [36]  = "sync",
+        [37]  = "kill",
+        [38]  = "crossarch_trap",
+        [39]  = "getppid",
+        [40]  = "lstat",
+        [41]  = "dup",
+        [42]  = "pipe",
+        [43]  = "getegid",
+        [44]  = "profil",
+        [45]  = "ktrace",
+        [46]  = "sigaction",
+        [47]  = "getgid",
+        [48]  = "sigprocmask",
+        [49]  = "getlogin",
+        [50]  = "setlogin",
+        [51]  = "acct",
+        [52]  = "sigpending",
+        [53]  = "sigaltstack",
+        [54]  = "ioctl",
+        [55]  = "reboot",
+        [56]  = "revoke",
+        [57]  = "symlink",
+        [58]  = "readlink",
+        [59]  = "execve",
+        [60]  = "umask",
+        [61]  = "chroot",
+        [62]  = "fstat",
+        [64]  = "getpagesize",
+        [65]  = "msync",
+        [66]  = "vfork",
+        [67]  = "oslog_coproc_reg",
+        [68]  = "oslog_coproc",
+        [69]  = "sbrk",
+        [70]  = "sstk",
+        [71]  = "mmap",
+        [72]  = "vadvise",
+        [73]  = "munmap",
+        [74]  = "mprotect",
+        [75]  = "madvise",
+        [76]  = "vhangup",
+        [77]  = "vlimit",
+        [78]  = "mincore",
+        [79]  = "getgroups",
+        [80]  = "setgroups",
+        [81]  = "getpgrp",
+        [82]  = "setpgid",
+        [83]  = "setitimer",
+        [84]  = "wait",
+        [85]  = "swapon",
+        [86]  = "getitimer",
+        [87]  = "gethostname",
+        [88]  = "sethostname",
+        [89]  = "getdtablesize",
+        [90]  = "dup2",
+        [91]  = "getdopt",
+        [92]  = "fcntl",
+        [93]  = "select",
+        [94]  = "setdopt",
+        [95]  = "fsync",
+        [96]  = "setpriority",
+        [97]  = "socket",
+        [98]  = "connect",
+        [99]  = "accept",
+        [100] = "getpriority",
+        [101] = "send",
+        [102] = "recv",
+        [103] = "sigreturn",
+        [104] = "bind",
+        [105] = "setsockopt",
+        [106] = "listen",
+        [107] = "vtimes",
+        [108] = "sigvec",
+        [109] = "sigblock",
+        [110] = "sigsetmask",
+        [111] = "sigsuspend",
+        [112] = "sigstack",
+        [113] = "recvmsg",
+        [114] = "sendmsg",
+        [115] = "vtrace",
+        [116] = "gettimeofday",
+        [117] = "getrusage",
+        [118] = "getsockopt",
+        [119] = "resuba",
+        [120] = "readv",
+        [121] = "writev",
+        [122] = "settimeofday",
+        [123] = "fchown",
+        [124] = "fchmod",
+        [125] = "recvfrom",
+        [126] = "setreuid",
+        [127] = "setregid",
+        [128] = "rename",
+        [129] = "truncate",
+        [130] = "ftruncate",
+        [131] = "flock",
+        [132] = "mkfifo",
+        [133] = "sendto",
+        [134] = "shutdown",
+        [135] = "socketpair",
+        [136] = "mkdir",
+        [137] = "rmdir",
+        [138] = "utimes",
+        [139] = "futimes",
+        [140] = "adjtime",
+        [141] = "getpeername",
+        [142] = "gethostuuid",
+        [147] = "setsid",
+        [148] = "setquota",
+        [149] = "qquota",
+        [150] = "getsockname",
+        [151] = "getpgid",
+        [152] = "setprivexec",
+        [153] = "pread",
+        [154] = "pwrite",
+        [155] = "nfssvc",
+        [156] = "getdirentries",
+        [157] = "statfs",
+        [158] = "fstatfs",
+        [159] = "unmount",
+        [160] = "async_daemon",
+        [161] = "getfh",
+        [162] = "getdomainname",
+        [163] = "setdomainname",
+        [164] = "funmount",
+        [165] = "quotactl",
+        [166] = "exportfs",
+        [167] = "mount",
+        [168] = "ustat",
+        [169] = "csops",
+        [170] = "csops_audittoken",
+        [171] = "wait3",
+        [172] = "rpause",
+        [173] = "waitid",
+        [174] = "getdents",
+        [175] = "gc_control",
+        [176] = "add_profil",
+        [177] = "kdebug_typefilter",
+        [178] = "kdebug_trace_string",
+        [179] = "kdebug_trace64",
+        [180] = "kdebug_trace",
+        [181] = "setgid",
+        [182] = "setegid",
+        [183] = "seteuid",
+        [184] = "sigreturn",
+        [185] = "panic_with_data",
+        [186] = "thread_selfcounts",
+        [187] = "fdatasync",
+        [188] = "stat",
+        [189] = "fstat",
+        [190] = "lstat",
+        [191] = "pathconf",
+        [192] = "fpathconf",
+        [193] = "getfsstat",
+        [194] = "getrlimit",
+        [195] = "setrlimit",
+        [196] = "getdirentries",
+        [197] = "mmap",
+        [198] = "__syscall",
+        [199] = "lseek",
+        [200] = "truncate",
+        [201] = "ftruncate",
+        [202] = "sysctl",
+        [203] = "mlock",
+        [204] = "munlock",
+        [205] = "undelete",
+        [206] = "ATsocket",
+        [207] = "ATgetmsg",
+        [208] = "ATputmsg",
+        [209] = "ATsndreq",
+        [210] = "ATsndrsp",
+        [211] = "ATgetreq",
+        [212] = "ATgetrsp",
+        [216] = "open_dprotected_np",
+        [217] = "fsgetpath_ext",
+        [218] = "openat_dprotected_np",
+        [220] = "getattrlist",
+        [221] = "setattrlist",
+        [222] = "getdirentriesattr",
+        [223] = "exchangedata",
+        [224] = "checkuseraccess",
+        [225] = "searchfs",
+        [226] = "delete",
+        [227] = "copyfile",
+        [228] = "fgetattrlist",
+        [229] = "fsetattrlist",
+        [230] = "poll",
+        [231] = "watchevent",
+        [232] = "waitevent",
+        [233] = "modwatch",
+        [234] = "getxattr",
+        [235] = "fgetxattr",
+        [236] = "setxattr",
+        [237] = "fsetxattr",
+        [238] = "removexattr",
+        [239] = "fremovexattr",
+        [240] = "listxattr",
+        [241] = "flistxattr",
+        [242] = "fsctl",
+        [243] = "initgroups",
+        [244] = "posix_spawn",
+        [245] = "ffsctl",
+        [246] = "nosys",
+        [247] = "nfsclnt",
+        [248] = "fhopen",
+        [250] = "minherit",
+        [251] = "semsys",
+        [252] = "msgsys",
+        [253] = "shmsys",
+        [254] = "semctl",
+        [255] = "semget",
+        [256] = "semop",
+        [257] = "semconfig",
+        [258] = "msgctl",
+        [259] = "msgget",
+        [260] = "msgsnd",
+        [261] = "msgrcv",
+        [262] = "shmat",
+        [263] = "shmctl",
+        [264] = "shmdt",
+        [265] = "shmget",
+        [266] = "shm_open",
+        [267] = "shm_unlink",
+        [268] = "sem_open",
+        [269] = "sem_close",
+        [270] = "sem_unlink",
+        [271] = "sem_wait",
+        [272] = "sem_trywait",
+        [273] = "sem_post",
+        [274] = "sysctlbyname",
+        [275] = "sem_init",
+        [276] = "sem_destroy",
+        [277] = "open_extended",
+        [278] = "umask_extended",
+        [279] = "stat_extended",
+        [280] = "lstat_extended",
+        [281] = "fstat_extended",
+        [282] = "chmod_extended",
+        [283] = "fchmod_extended",
+        [284] = "access_extended",
+        [285] = "settid",
+        [286] = "gettid",
+        [287] = "setsgroups",
+        [288] = "getsgroups",
+        [289] = "setwgroups",
+        [290] = "getwgroups",
+        [291] = "mkfifo_extended",
+        [292] = "mkdir_extended",
+        [293] = "identitysvc",
+        [294] = "shared_region_check_np",
+        [295] = "shared_region_map_np",
+        [296] = "vm_pressure_monitor",
+        [301] = "psynch_mutexwait",
+        [302] = "psynch_mutexdrop",
+        [303] = "psynch_cvbroad",
+        [304] = "psynch_cvsignal",
+        [305] = "psynch_cvwait",
+        [306] = "psynch_rw_rdlock",
+        [307] = "psynch_rw_wrlock",
+        [308] = "psynch_rw_unlock",
+        [309] = "psynch_rw_unlock2",
+        [310] = "getsid",
+        [311] = "settid_with_pid",
+        [312] = "psynch_cvclrprepost",
+        [313] = "aio_fsync",
+        [314] = "aio_return",
+        [315] = "aio_suspend",
+        [316] = "aio_cancel",
+        [317] = "aio_error",
+        [318] = "aio_read",
+        [319] = "aio_write",
+        [320] = "lio_listio",
+        [321] = "__pthread_cond_wait",
+        [322] = "iopolicysys",
+        [323] = "process_policy",
+        [324] = "mlockall",
+        [325] = "munlockall",
+        [327] = "issetugid",
+        [328] = "__pthread_kill",
+        [329] = "__pthread_sigmask",
+        [330] = "__sigwait",
+        [331] = "__disable_threadsignal",
+        [332] = "__pthread_markcancel",
+        [333] = "__pthread_canceled",
+        [334] = "__semwait_signal",
+        [335] = "utrace",
+        [336] = "proc_info",
+        [337] = "sendfile",
+        [338] = "stat64",
+        [339] = "fstat64",
+        [340] = "lstat64",
+        [341] = "stat64_extended",
+        [342] = "lstat64_extended",
+        [343] = "fstat64_extended",
+        [344] = "getdirentries64",
+        [345] = "statfs64",
+        [346] = "fstatfs64",
+        [347] = "getfsstat64",
+        [348] = "__pthread_chdir",
+        [349] = "__pthread_fchdir",
+        [350] = "audit",
+        [351] = "auditon",
+        [353] = "getauid",
+        [354] = "setauid",
+        [357] = "getaudit_addr",
+        [358] = "setaudit_addr",
+        [359] = "auditctl",
+        [360] = "bsdthread_create",
+        [361] = "bsdthread_terminate",
+        [362] = "kqueue",
+        [363] = "kevent",
+        [364] = "lchown",
+        [365] = "stack_snapshot",
+        [366] = "bsdthread_register",
+        [367] = "workq_open",
+        [368] = "workq_kernreturn",
+        [369] = "kevent64",
+        [370] = "__semwait_signal",
+        [371] = "__semwait_signal",
+        [372] = "thread_selfid",
+        [373] = "ledger",
+        [374] = "kevent_qos",
+        [375] = "kevent_id",
+        [380] = "__mac_execve",
+        [381] = "__mac_syscall",
+        [382] = "__mac_get_file",
+        [383] = "__mac_set_file",
+        [384] = "__mac_get_link",
+        [385] = "__mac_set_link",
+        [386] = "__mac_get_proc",
+        [387] = "__mac_set_proc",
+        [388] = "__mac_get_fd",
+        [389] = "__mac_set_fd",
+        [390] = "__mac_get_pid",
+        [394] = "pselect",
+        [395] = "pselect_nocancel",
+        [396] = "read_nocancel",
+        [397] = "write_nocancel",
+        [398] = "open_nocancel",
+        [399] = "close_nocancel",
+        [400] = "wait4_nocancel",
+        [401] = "recvmsg_nocancel",
+        [402] = "sendmsg_nocancel",
+        [403] = "recvfrom_nocancel",
+        [404] = "accept_nocancel",
+        [405] = "msync_nocancel",
+        [406] = "fcntl_nocancel",
+        [407] = "select_nocancel",
+        [408] = "fsync_nocancel",
+        [409] = "connect_nocancel",
+        [410] = "sigsuspend_nocancel",
+        [411] = "readv_nocancel",
+        [412] = "writev_nocancel",
+        [413] = "sendto_nocancel",
+        [414] = "pread_nocancel",
+        [415] = "pwrite_nocancel",
+        [416] = "waitid_nocancel",
+        [417] = "poll_nocancel",
+        [418] = "msgsnd_nocancel",
+        [419] = "msgrcv_nocancel",
+        [420] = "sem_wait_nocancel",
+        [421] = "aio_suspend_nocancel",
+        [422] = "__sigwait_nocancel",
+        [424] = "__mac_mount",
+        [425] = "__mac_get_mount",
+        [426] = "__mac_getfsstat",
+        [427] = "fsgetpath",
+        [428] = "audit_session_self",
+        [429] = "audit_session_join",
+        [430] = "fileport_makeport",
+        [431] = "fileport_makefd",
+        [432] = "audit_session_port",
+        [433] = "pid_suspend",
+        [434] = "pid_resume",
+        [435] = "pid_hibernate",
+        [436] = "pid_shutdown_sockets",
+        [439] = "kas_info",
+        [440] = "memorystatus_control",
+        [441] = "guarded_open_np",
+        [442] = "guarded_close_np",
+        [443] = "guarded_kqueue_np",
+        [444] = "change_fdguard_np",
+        [445] = "usrctl",
+        [446] = "proc_rlimit_control",
+        [447] = "connectx",
+        [448] = "disconnectx",
+        [449] = "peeloff",
+        [450] = "socket_delegate",
+        [451] = "telemetry",
+        [452] = "proc_uuid_policy",
+        [453] = "memorystatus_get_level",
+        [454] = "system_override",
+        [455] = "vfs_purge",
+        [456] = "sfi_ctl",
+        [457] = "sfi_pidctl",
+        [458] = "coalition",
+        [459] = "coalition_info",
+        [461] = "getattrlistbulk",
+        [462] = "clonefileat",
+        [463] = "openat",
+        [464] = "openat_nocancel",
+        [465] = "renameat",
+        [466] = "faccessat",
+        [467] = "fchmodat",
+        [468] = "fchownat",
+        [469] = "fstatat",
+        [470] = "fstatat64",
+        [471] = "linkat",
+        [472] = "unlinkat",
+        [473] = "readlinkat",
+        [474] = "symlinkat",
+        [475] = "mkdirat",
+        [476] = "getattrlistat",
+        [477] = "proc_trace_log",
+        [478] = "bsdthread_ctl",
+        [479] = "openbyid_np",
+        [480] = "recvmsg_x",
+        [481] = "sendmsg_x",
+        [482] = "thread_selfusage",
+        [483] = "csrctl",
+        [484] = "guarded_open_dprotected_np",
+        [485] = "guarded_write_np",
+        [486] = "guarded_pwrite_np",
+        [487] = "guarded_writev_np",
+        [488] = "renameatx_np",
+        [489] = "mremap_encrypted",
+        [490] = "netagent_trigger",
+        [491] = "stack_snapshot_with_config",
+        [492] = "microstackshot",
+        [494] = "persona",
+        [496] = "mach_eventlink_signal",
+        [497] = "mach_eventlink_wait_until",
+        [498] = "mach_eventlink_signal_wait_until",
+        [499] = "work_interval_ctl",
+        [500] = "getentropy",
+        [501] = "necp_open",
+        [502] = "necp_client_action",
+        [515] = "ulock_wait",
+        [516] = "ulock_wake",
+        [517] = "fclonefileat",
+        [518] = "fs_snapshot",
+        [520] = "terminate_with_payload",
+        [521] = "abort_with_payload",
+        [530] = "kqueue_workloop_ctl",
+        [540] = "preadv",
+        [541] = "pwritev",
+        [542] = "preadv_nocancel",
+        [543] = "pwritev_nocancel",
+    };
+    if (bsd_nr >= BSD_SYSCALL_MAX) return "?";
+    return names[bsd_nr] ? names[bsd_nr] : "?";
 }
-
-

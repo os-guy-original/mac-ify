@@ -28,6 +28,32 @@ void sigill_handler_pre_resolve(void) {
     }
 }
 
+/* MACIFY_LENIENT_SYSCALLS=1 makes unimplemented/out-of-range syscalls
+ * return ENOSYS (macOS ABI: -1 + errno) instead of terminating.
+ * Default remains strict abort: continuing past an unknown syscall can
+ * silently corrupt app state. getenv isn't async-signal-safe; result is
+ * cached on first fault like the other diagnostics above/below. */
+static int lenient_unimplemented(void) {
+    static int cached = -1;
+    if (cached == -1) cached = getenv("MACIFY_LENIENT_SYSCALLS") ? 1 : 0;
+    return cached;
+}
+
+/* Convert a raw Linux-style syscall result (-errno / success) into the
+ * macOS slow-path convention (-1 + errno + CF set) and resume past UD2. */
+static void finish_slow_result(ucontext_t *uc, long result) {
+    greg_t *regs = uc->uc_mcontext.gregs;
+    bool err = (result < 0 && result > -4096);
+    if (err) {
+        errno = (int)(-result);
+        result = -1;
+    }
+    regs[REG_RAX] = (greg_t)result;
+    if (err) regs[REG_EFL] |= 0x0001;
+    else     regs[REG_EFL] &= ~0x0001UL;
+    regs[REG_RIP] += 2;
+}
+
 void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     (void)sig; (void)info;
     ucontext_t *uc = (ucontext_t *)uctx;
@@ -55,8 +81,15 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         fprintf(stderr,
                 "\nmacify: unhandled macOS syscall 0x%llx (BSD #%u, out of range)\n",
                 (unsigned long long)macos_nr, bsd_nr);
+        if (lenient_unimplemented()) {
+            fprintf(stderr,
+                    "macify: MACIFY_LENIENT_SYSCALLS set — returning ENOSYS instead of exiting\n");
+            finish_slow_result(uc, -ENOSYS);
+            return;
+        }
         _exit(127);
     }
+
 
     int16_t linux_nr = bsd_to_linux[bsd_nr];
     if (__builtin_expect(linux_nr <= 0, 0)) {
@@ -64,10 +97,16 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
         fprintf(stderr,
                 "\nmacify: unhandled macOS syscall 0x%llx (BSD #%u = %s)\n",
                 (unsigned long long)macos_nr, bsd_nr, bsd_syscall_name(bsd_nr));
+        if (lenient_unimplemented()) {
+            fprintf(stderr,
+                    "macify: MACIFY_LENIENT_SYSCALLS set — returning ENOSYS instead of exiting\n");
+            finish_slow_result(uc, -ENOSYS);
+            return;
+        }
         _exit(127);
     }
 
-    uint8_t flags = bsd_arg_flags[bsd_nr];
+    uint16_t flags = bsd_arg_flags[bsd_nr];
 
     /* For exit (BSD 1): print stats, then exit_group. */
     if (__builtin_expect(bsd_nr == 1, 0)) {
@@ -119,6 +158,37 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     }
     if (flags & ARG_FCNTL_CMD) {
         int old_a2 = (int)a2;
+        /* macOS-specific commands that need execution rather than plain cmd
+         * remapping. Note F_GETPATH returns the real Linux fd path (possibly
+         * under the ~/.macify prefix), not the app's virtual path — closer
+         * than EINVAL. */
+        switch (old_a2) {
+            case MACOS_F_GETPATH: {
+                char kpath[64];
+                snprintf(kpath, sizeof(kpath), "/proc/self/fd/%ld", a1);
+                long r = raw_syscall(SYS_readlinkat, AT_FDCWD,
+                                     (long)kpath, a3, a4, 0, 0);
+                if (r >= 0 && a3 && r < (long)a4) ((char *)a3)[r] = '\0';
+                if (g_verbose)
+                    fprintf(stderr, "macify:   fcntl(F_GETPATH, %ld) -> %s\n",
+                            a1, r >= 0 ? (const char *)a3 : "(error)");
+                finish_slow_result(uc, r >= 0 ? 0 : r);
+                return;
+            }
+            case MACOS_F_FULLFSYNC:
+                finish_slow_result(uc, raw_syscall(SYS_fsync, a1, 0, 0, 0, 0, 0));
+                return;
+            case MACOS_F_RDADVISE:
+            case MACOS_F_RDAHEAD:
+            case MACOS_F_NOCACHE:
+            case MACOS_F_GLOBAL_NOCACHE:
+            case MACOS_F_SETNOSIGPIPE:
+            case MACOS_F_GETNOSIGPIPE:
+                finish_slow_result(uc, 0);
+                return;
+            default:
+                break;
+        }
         int new_a2 = translate_fcntl_cmd(old_a2);
         if (new_a2 < 0) {
             /* macOS-specific cmd with no Linux equivalent. Return EINVAL. */
@@ -241,11 +311,6 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             if (a1 == 1 /* SIG_BLOCK */ || a1 == 3 /* SIG_SETMASK */) {
                 linux_mask &= ~(1ULL << 10);  /* SIGSEGV = bit 10 */
                 linux_mask &= ~(1ULL << 5);   /* SIGABRT = bit 5 */
-            }
-            /* Never allow blocking SIGSEGV(11) or SIGABRT(6) */
-            if (a1 == 1 || a1 == 3) {
-                linux_mask &= ~(1ULL << 10);
-                linux_mask &= ~(1ULL << 5);
             }
             *(uint64_t *)linux_set_sigprocmask = linux_mask;
             a2 = (long)linux_set_sigprocmask;
