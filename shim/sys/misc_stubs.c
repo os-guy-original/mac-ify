@@ -535,7 +535,9 @@ int connectx(int socket, const void *endpoints, unsigned int endpointslen,
 
 void *__slbsearch(const void *key, const void *base, size_t nel, size_t width,
                   int (*compar)(const void *, const void *)) {
-    return bsearch(key, base, nel, width, compar);
+    /* Explicit cast: some toolchain bsearch prototypes qualify the return,
+     * which would otherwise trip -Wdiscarded-qualifiers here. */
+    return (void *)bsearch(key, base, nel, width, compar);
 }
 
 /* arc4random / arc4random_uniform - macOS random functions. */

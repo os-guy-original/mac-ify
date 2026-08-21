@@ -294,7 +294,12 @@ sighandler_t macify_signal(int signum, sighandler_t handler) {
     if (signum == 17 /* Linux SIGCHLD */ && handler != SIG_DFL && handler != SIG_IGN) {
         extern void (*macify_saved_sigchld_handler)(int, siginfo_t *, void *);
         extern void macify_sigchld_wrapper(int, siginfo_t *, void *);
+        /* Intentional ABI cast: a single-arg handler invoked through our
+         * SA_SIGINFO wrapper works on x86_64 SysV (extra args ignored). */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
         macify_saved_sigchld_handler = (void (*)(int, siginfo_t *, void *))handler;
+#pragma GCC diagnostic pop
         sa.sa_sigaction = macify_sigchld_wrapper;
         sa.sa_flags = SA_SIGINFO | SA_RESTART;  /* NO SA_ONSTACK */
     } else {

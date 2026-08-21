@@ -251,8 +251,8 @@ int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
             const char *val = (id == 1) ? "Darwin" : uts.release;
             size_t len = strlen(val) + 1;
             if (oldp && oldlenp) {
-                if (*oldlenp < len) return -1;  /* ENOMEM */
-                strcpy((char *)oldp, val);
+                if (*oldlenp < len) { errno = ENOMEM; return -1; }
+                memcpy((char *)oldp, val, len);
                 *oldlenp = len;
             } else if (oldlenp) {
                 *oldlenp = len;
@@ -261,11 +261,12 @@ int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
         }
         if (id == 10) {  /* KERN_HOSTNAME */
             char hostname[256];
-            gethostname(hostname, sizeof(hostname));
+            hostname[sizeof(hostname) - 1] = '\0';
+            gethostname(hostname, sizeof(hostname) - 1);
             size_t len = strlen(hostname) + 1;
             if (oldp && oldlenp) {
-                if (*oldlenp < len) return -1;
-                strcpy((char *)oldp, hostname);
+                if (*oldlenp < len) { errno = ENOMEM; return -1; }
+                memcpy((char *)oldp, hostname, len);
                 *oldlenp = len;
             } else if (oldlenp) {
                 *oldlenp = len;
