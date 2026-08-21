@@ -6,7 +6,7 @@ BINDIR     := $(DESTDIR)$(PREFIX)/bin
 LIBDIR     := $(DESTDIR)$(PREFIX)/lib/macify
 SCRIPTSDIR := $(DESTDIR)$(PREFIX)/lib/macify/scripts
 
-.PHONY: all build test test-smoke test-functional clean shim shell install uninstall
+.PHONY: all build test test-smoke test-functional test-real asan clean shim shell install uninstall
 
 all: shim build binaries
 
@@ -27,6 +27,21 @@ test-smoke: build shim
 
 test-functional: build shim
 	@bash tests/real_functional.sh
+
+# Regression harness over tests/real binaries with per-binary expected
+# output assertions (subset-based; skips missing binaries).
+test-real: build shim
+	@python3 tests/real_regression.py
+
+# Sanitizer debug build: rebuilds everything with ASan+UBSan and -Werror.
+# Run the result normally (LD_LIBRARY_PATH=build ./build/macify ...).
+# `make clean && make` restores the optimized default build.
+asan:
+	$(MAKE) -C src clean
+	$(MAKE) -C shim clean
+	$(MAKE) -C src WERROR=-Werror SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+	$(MAKE) -C shim WERROR=-Werror SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+	$(MAKE) binaries
 
 shell: build shim
 	@bash scripts/macify-shell
@@ -53,38 +68,17 @@ install: build shim
 	install -d $(SCRIPTSDIR)
 	install -m 755 build/macify $(LIBDIR)/macify
 	install -m 755 build/libmacify_shim.so $(LIBDIR)/
-	install -m 755 scripts/macify $(SCRIPTSDIR)/
-	install -m 755 scripts/macify-shell $(SCRIPTSDIR)/
-	install -m 755 scripts/macify-debug $(SCRIPTSDIR)/
-	install -m 755 scripts/macify-init $(SCRIPTSDIR)/
-	install -m 755 scripts/macify-setup-rootfs $(SCRIPTSDIR)/
-	install -m 755 scripts/macify-setup-homebrew $(SCRIPTSDIR)/
-	install -m 755 scripts/fetch_binaries.sh $(SCRIPTSDIR)/
-	# Create wrapper script that sets LD_LIBRARY_PATH
-	@echo '#!/bin/bash' > $(BINDIR)/macify
-	@echo 'export LD_LIBRARY_PATH="$(LIBDIR):$$LD_LIBRARY_PATH"' >> $(BINDIR)/macify
-	@echo 'exec "$(LIBDIR)/macify" "$$@"' >> $(BINDIR)/macify
-	@chmod 755 $(BINDIR)/macify
-	# Create macify-shell wrapper
-	@echo '#!/bin/bash' > $(BINDIR)/macify-shell
-	@echo 'export LD_LIBRARY_PATH="$(LIBDIR):$$LD_LIBRARY_PATH"' >> $(BINDIR)/macify-shell
-	@echo 'export MACIFY_BINARY="$(LIBDIR)/macify"' >> $(BINDIR)/macify-shell
-	@echo 'exec "$(SCRIPTSDIR)/macify-shell" "$$@"' >> $(BINDIR)/macify-shell
-	@chmod 755 $(BINDIR)/macify-shell
-	# Create macify-debug wrapper
-	@echo '#!/bin/bash' > $(BINDIR)/macify-debug
-	@echo 'export LD_LIBRARY_PATH="$(LIBDIR):$$LD_LIBRARY_PATH"' >> $(BINDIR)/macify-debug
-	@echo 'export MACIFY_BINARY="$(LIBDIR)/macify"' >> $(BINDIR)/macify-debug
-	@echo 'exec "$(SCRIPTSDIR)/macify-debug" "$$@"' >> $(BINDIR)/macify-debug
-	@chmod 755 $(BINDIR)/macify-debug
+	install -m 755 scripts/macify $(BINDIR)/macify
+	@for f in macify macify-shell macify-debug macify-init \
+	          macify-setup-rootfs macify-setup-homebrew fetch_binaries.sh; do \
+	    install -m 755 "scripts/$$f" "$(SCRIPTSDIR)/$$f"; \
+	done
 	@echo ""
 	@echo "Installation complete:"
-	@echo "  $(BINDIR)/macify         — run macOS binaries"
-	@echo "  $(BINDIR)/macify-shell   — interactive macOS bash shell"
-	@echo "  $(BINDIR)/macify-debug   — debug tool for issue reports"
+	@echo "  $(BINDIR)/macify — run macOS binaries (see: macify --help)"
 	@echo ""
 	@echo "First-time setup:"
-	@echo "  macify-shell 'echo hello'"
+	@echo "  macify init && macify doctor"
 
 uninstall:
 	@echo "Uninstalling macify from $(PREFIX)..."
