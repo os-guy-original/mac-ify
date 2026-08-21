@@ -1,4 +1,5 @@
 #include "macify.h"
+#include <errno.h>
 
 /* Section type constants (used for verbose output) */
 #define S_4BYTE_LITERALS                0x03
@@ -497,11 +498,24 @@ uint8_t *load_file(const char *path, size_t *out_size) {
     struct stat st;
     if (fstat(fd, &st) < 0) { perror("fstat"); close(fd); return NULL; }
     size_t size = (size_t)st.st_size;
+    if (size == 0) { close(fd); return NULL; }
     uint8_t *data = malloc(size);
     if (!data) { close(fd); return NULL; }
-    ssize_t n = read(fd, data, size);
+    size_t total = 0;
+    while (total < size) {
+        ssize_t n = read(fd, data + total, size - total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "macify: read error on %s: %s\n", path, strerror(errno));
+            free(data);
+            close(fd);
+            return NULL;
+        }
+        if (n == 0) break;
+        total += (size_t)n;
+    }
     close(fd);
-    if (n != (ssize_t)size) {
+    if (total != size) {
         fprintf(stderr, "macify: short read on %s\n", path);
         free(data);
         return NULL;

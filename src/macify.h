@@ -296,6 +296,13 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size);
 void *resolve_symbol(int ordinal_idx, const char *sym);
 void register_extra_handle(void *handle);
 
+/* Unresolved-symbol stub accounting (fixups.c). macify_note_stub() records
+ * each distinct stubbed symbol; macify_print_stubbed_symbols() prints the
+ * summary from print_stats(). */
+extern uint64_t g_stubbed_symbols;
+void macify_note_stub(const char *sym);
+void macify_print_stubbed_symbols(void);
+
 /* macho_dylib.c — Mach-O shared library loader */
 int macho_load_dylib(const char *path);
 void *macho_dylib_lookup(const char *sym);

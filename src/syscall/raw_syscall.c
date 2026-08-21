@@ -31,6 +31,7 @@ void print_stats(void) {
             g_fast_path_sites);
     fprintf(stderr, "         slow-path syscall sites:      %lu  (patched at load)\n",
             g_slow_path_sites);
+    if (g_verbose) macify_print_stubbed_symbols();
 }
 
 

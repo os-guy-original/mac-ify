@@ -4,10 +4,41 @@
 /* Stub function for unresolved macOS symbols.
  * Returns -1 with errno=ENOSYS. Safe for most functions that
  * return int/ssize_t/void*. Not safe for functions returning
- * pointers (returns -1 cast to pointer). */
+ * pointers (returns -1 cast to pointer): a caller checking != NULL
+ * will proceed and crash on dereference. There is no way to know a
+ * symbol's return type at bind time, so we keep -1 for int-returning
+ * compatibility and record the name via macify_note_stub() so the
+ * summary printed by print_stats() points at the culprit. */
 long macify_unresolved_stub(void) {
     errno = ENOSYS;
     return -1;
+}
+
+/* Unresolved-symbol accounting. g_stubbed_symbols counts slots bound to
+ * the stub; noted_stubs[] keeps up to 32 distinct names (strdup'd because
+ * callers pass pointers into transient bind/fixup buffers). */
+#define MACIFY_MAX_NOTED_STUBS 32
+static const char *noted_stubs[MACIFY_MAX_NOTED_STUBS];
+static int n_noted_stubs = 0;
+uint64_t g_stubbed_symbols = 0;
+
+void macify_note_stub(const char *sym) {
+    g_stubbed_symbols++;
+    for (int i = 0; i < n_noted_stubs; i++) {
+        if (strcmp(noted_stubs[i], sym) == 0) return;
+    }
+    if (n_noted_stubs < MACIFY_MAX_NOTED_STUBS) {
+        char *copy = strdup(sym);
+        if (copy) noted_stubs[n_noted_stubs++] = copy;
+    }
+}
+
+void macify_print_stubbed_symbols(void) {
+    if (g_stubbed_symbols == 0) return;
+    fprintf(stderr, "         unresolved symbols stubbed:   %lu slot(s), %d distinct\n",
+            (unsigned long)g_stubbed_symbols, n_noted_stubs);
+    for (int i = 0; i < n_noted_stubs; i++)
+        fprintf(stderr, "           %s\n", noted_stubs[i]);
 }
 
 /* ULEB128 / SLEB128 readers — used by LC_DYLD_INFO bind/rebase bytecode. */
@@ -180,6 +211,7 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                     /* For unresolved symbols, provide a stub that returns -1/NULL. */
                     extern long macify_unresolved_stub(void);
                     addr = (void *)macify_unresolved_stub;
+                    macify_note_stub(sym);
                     if (getenv("MACIFY_VERBOSE")) {
                         fprintf(stderr, "macify: stubbing unresolved symbol '%s' from %s\n",
                                 sym, g_dylibs[ordinal - 1].name);
@@ -197,8 +229,17 @@ int execute_binds(uint8_t *file_data, size_t file_size) {
                     *(uint64_t *)(uintptr_t)target =
                         (uint64_t)(uintptr_t)addr + (uint64_t)addend;
                 } else {
-                    fprintf(stderr, "macify: unsupported bind type %d\n", type);
-                    return -1;
+                    /* BIND_TYPE_TEXT_ABSOLUTE32/TEXT_PCREL32 write into
+                     * __TEXT and are rare in modern binaries. Warn once per
+                     * type and skip the slot; seg_offset advance below keeps
+                     * subsequent slots aligned. */
+                    static bool warned_bind_type[8];
+                    if (type < 8 && !warned_bind_type[type]) {
+                        warned_bind_type[type] = true;
+                        fprintf(stderr,
+                                "macify: unsupported bind type %d — skipping slot for '%s' from %s\n",
+                                type, symbol_name, g_dylibs[ordinal - 1].name);
+                    }
                 }
 
                 if (g_verbose) {
@@ -441,7 +482,12 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
     dyld_chained_fixups_header *hdr = (dyld_chained_fixups_header *)fixups;
 
     if (hdr->fixups_version != 0) {
-        fprintf(stderr, "macify: unsupported chained fixups version %u\n", hdr->fixups_version);
+        /* Abort is correct here: applying zero fixups to a binary that
+         * needs them guarantees wild-pointer crashes downstream. */
+        fprintf(stderr,
+                "macify: unsupported chained fixups version %u "
+                "(only version 0 exists in dyld). Refusing to run.\n",
+                hdr->fixups_version);
         return -1;
     }
 
@@ -477,6 +523,21 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
         uint32_t max_valid = *(uint32_t *)(seg_starts + 16);
         uint16_t page_count = *(uint16_t *)(seg_starts + 20);
         uint16_t *page_starts = (uint16_t *)(seg_starts + 22);  /* offset 22, not 24! */
+
+        /* The entry decoding below implements DYLD_CHAINED_PTR_64_OFFSET
+         * semantics. Formats sharing the same 64-bit entry layout (e.g. 2, 6)
+         * have proven to work; others are untested. Diagnostic is opt-in —
+         * it fired on every interactive-shell launch otherwise. */
+        static uint16_t seen_fixup_format = 0xFFFF;
+        if (ptr_format != 3 && ptr_format != seen_fixup_format) {
+            seen_fixup_format = ptr_format;
+            if (g_verbose || getenv("MACIFY_TRACE_FIXUPS")) {
+                fprintf(stderr,
+                        "macify: chained fixup pointer format %u "
+                        "(validated: 3 = DYLD_CHAINED_PTR_64_OFFSET)\n",
+                        ptr_format);
+            }
+        }
 
         loaded_segment *seg = &g_segments[seg_idx];
 
@@ -586,6 +647,7 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                             extern long macify_unresolved_stub(void);
                             addr = (void *)macify_unresolved_stub;
                             *(uint64_t *)chain_ptr = (uint64_t)(uintptr_t)addr + addend;
+                            macify_note_stub(sym);
                             if (getenv("MACIFY_TRACE_FIXUPS")) {
                                 fprintf(stderr, "macify: chained fixup STUBBED: sym=%s lib_ordinal=%d\n",
                                         sym, lib_ordinal);
