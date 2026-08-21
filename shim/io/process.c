@@ -538,8 +538,8 @@ int getchar_unlocked(void) {
     extern FILE *__stdinp;
     extern int macify_is_macos_file(void *);
     if (macify_is_macos_file(__stdinp)) {
-        /* TODO: implement macOS stdin read */
-        return EOF;
+        extern int macify_fgetc_macos(void *);
+        return macify_fgetc_macos(__stdinp);
     }
     static int (*real_fgetc)(FILE *) = NULL;
     if (!real_fgetc) real_fgetc = macify_elf_lookup("fgetc");
@@ -754,7 +754,6 @@ int macify_fclose(FILE *stream) {
             break;
         }
     }
-    int saved_errno = errno;
     int r = real_fclose(stream);
     int new_errno = errno;
     if (getenv("MACIFY_TRACE_OPEN")) {

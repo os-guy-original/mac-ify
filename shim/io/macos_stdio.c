@@ -49,6 +49,7 @@
 #include "../shim.h"
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 
 /* macOS FILE flags */
 #define MACOS___SWR    0x0008
@@ -266,6 +267,38 @@ int macify_fflush_macos(void *fp) {
         macify_flush_macos_files();
     }
     return 0;
+}
+
+/* Read one char from a macOS FILE. Only stdin is readable — stdout/stderr
+ * carry __SWR and return EOF. Uses a read-ahead buffer so piped input
+ * doesn't degrade to one syscall per char, and sets __SEOF/__SERR like
+ * macOS stdio would (the feof/ferror shims check those bits at +0x10). */
+int macify_fgetc_macos(void *fp) {
+    if (!macify_is_macos_file(fp)) return EOF;
+    struct macos_sFILE *f = (struct macos_sFILE *)fp;
+    if (!(f->_flags & MACOS___SRD)) return EOF;
+
+    static unsigned char ahead[4096];
+    static size_t ahead_pos = 0, ahead_len = 0;
+
+    if (ahead_pos >= ahead_len) {
+        for (;;) {
+            ssize_t n = read(f->_file, ahead, sizeof(ahead));
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                f->_flags |= MACOS___SERR;
+                return EOF;
+            }
+            ahead_pos = 0;
+            ahead_len = (size_t)n;
+            break;
+        }
+        if (ahead_len == 0) {
+            f->_flags |= MACOS___SEOF;
+            return EOF;
+        }
+    }
+    return ahead[ahead_pos++];
 }
 
 /* Initialize macOS FILE structs and set __stdoutp/__stderrp/__stdinp. */
