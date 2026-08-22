@@ -118,16 +118,41 @@ static int find_libc_cb(struct dl_phdr_info *info, size_t size, void *data) {
     for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
         if (d->d_tag == DT_SYMTAB) symtab = (ElfW(Sym) *)d->d_un.d_ptr;
         else if (d->d_tag == DT_STRTAB) strtab = (const char *)d->d_un.d_ptr;
-        else if (d->d_tag == DT_HASH) hash = (uint32_t *)d->d_un.d_ptr;
-        else if (d->d_tag == DT_GNU_HASH) hash = (uint32_t *)d->d_un.d_ptr; /* GNU hash as fallback */
+
     }
     if (!symtab || !strtab) return 0;
     int nsyms = 0;
-    if (hash) {
-        /* DT_HASH: hash[0]=nbucket, hash[1]=nchain */
-        nsyms = (int)hash[1];
+    uint32_t *sysv_hash = NULL, *gnu_hash = NULL;
+    for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_HASH && !sysv_hash) sysv_hash = (uint32_t *)d->d_un.d_ptr;
+        else if (d->d_tag == DT_GNU_HASH && !gnu_hash) gnu_hash = (uint32_t *)d->d_un.d_ptr;
     }
-    if (nsyms <= 0) nsyms = 65536; /* fallback for GNU_HASH-only libs */
+    if (sysv_hash) {
+        /* SYSV: hash[0]=nbucket, hash[1]=nchain == symbol count */
+        nsyms = (int)sysv_hash[1];
+    } else if (gnu_hash) {
+        /* GNU hash layout: nbucket, symoffset, bloom_size, bloom_shift,
+         * bloom[], buckets[nbucket], chains[]. Symbol count = highest
+         * bucket index + its chain length (chains run until an entry with
+         * LSB set). */
+        uint32_t nbucket = gnu_hash[0];
+        uint32_t symoffset = gnu_hash[1];
+        uint32_t bloom_size = gnu_hash[2];
+        const uint32_t *buckets = gnu_hash + 4 + bloom_size * (sizeof(ElfW(Addr)) / 4);
+        uint32_t max_idx = 0;
+        for (uint32_t b = 0; b < nbucket; b++) {
+            if (buckets[b] > max_idx) max_idx = buckets[b];
+        }
+        if (max_idx >= symoffset) {
+            const uint32_t *chain = buckets + nbucket;
+            uint32_t i = max_idx - symoffset;
+            while (!(chain[i] & 1)) i++;
+            nsyms = (int)(max_idx + i + 1);
+        } else {
+            nsyms = (int)symoffset;
+        }
+    }
+    if (nsyms <= 0) nsyms = 65536; /* last-resort bound */
     g_elf_libc_base = (void *)info->dlpi_addr;
     g_elf_libc_symtab = symtab;
     g_elf_libc_strtab = strtab;

@@ -78,3 +78,31 @@
   have post-copy). Apps reading oldact get junk.
 - [OK] SIGILL/SEGV/BUS hijack-protection; SS_DISABLE guard; CF convention for Go;
   -errno->-1 conversion; post-translation of oset/oss.
+
+## shim/presolve.c + shim/io/dl.c (macify_elf_lookup)
+- [BUG/CORRECTNESS] macify_elf_lookup treats DT_GNU_HASH as if it were
+  DT_HASH: nsyms=hash[1] is only valid for SYSV hash tables. For GNU-hash
+  libc, hash[1] = symoffset (first dynamic index), NOT symbol count — the
+  fallback cap of 65536 then scans garbage entries past the table end
+  until it happens to hit st_value==0. Works by luck today; should use
+  gnu_hash bucket walk or bound scan by strtab adjacency.
+- [BUG/RACE] find_libc_cb caches libc symtab pointers once; if libc is
+  ever dlclosed/reloaded (not our case) stale. Acceptable, document.
+- [OK] dlsym passthrough policy avoids NSS deadlock; SC fake handle
+  interposition is clean.
+
+## shim/shim_core.c
+- [OK] errno translation table matches Apple's sys/errno.h ordering
+  (verified spot values 35=EAGAIN, 36=EINPROGRESS, 62=ELOOP).
+- [NIT] __progname initialized to "macify-app"; __macify_set_args fixes it
+  later — brief window where a constructor could see the placeholder.
+- [OK] canary sync from fs:0x28 with nonzero fallback.
+
+## shim/io/dl.c (macify_elf_lookup) — see earlier entry: GNU_HASH misuse.
+
+## shim/io/dl.c — GNU-hash fix applied
+- [FIXED] find_libc_cb now computes symbol count correctly for DT_GNU_HASH
+  (bloom walk -> max bucket -> chain length) instead of reading hash[1] as
+  SYSV nchain. rclone smoke re-verified; one transient exit-139 observed
+  once during smoke, unreproducible in 3 consecutive runs + direct runs.
+  Watch it.
