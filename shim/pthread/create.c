@@ -117,6 +117,19 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
         } else {
             glibc_attr = (pthread_attr_t *)(uintptr_t)attr;
         }
+        if (getenv("MACIFY_TRACE_PTHREAD") && real_attr_getstacksize) {
+            size_t ssz = 0; int dsz = -1;
+            real_attr_getstacksize(glibc_attr, &ssz);
+            real_attr_getdetachstate(glibc_attr, &dsz);
+            unsigned char *raw = (unsigned char *)attr;
+            char b[256]; int n = snprintf(b, sizeof(b),
+                "macify: create attr=%p sig=%#lx glibc=%p stacksize=%zu detachstate=%d raw=",
+                attr, (unsigned long)ma->sig, (void *)glibc_attr, ssz, dsz);
+            for (int i = 0; i < 24 && n < (int)sizeof(b) - 3; i++)
+                n += snprintf(b + n, sizeof(b) - n, "%02x", raw[i]);
+            n += snprintf(b + n, sizeof(b) - n, "\n");
+            (void)write(2, b, n);
+        }
     }
     /* Wrap start_routine to set up sigaltstack for the new thread. */
     struct thread_start_args *wrapper_args = malloc(sizeof(*wrapper_args));

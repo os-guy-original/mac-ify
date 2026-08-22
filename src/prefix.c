@@ -364,6 +364,17 @@ int macify_translate_path(const char *path, char *out, size_t out_size) {
     const char *prefix = macify_get_prefix();
     if (!prefix || macify_prefix_len == 0) return -1;
 
+    /* Paths already inside the real on-disk prefix are literal: binaries
+     * living in the prefix (portable-ruby, brew tools) open their own
+     * files by absolute host path, and re-prefixing would double it
+     * into $PREFIX/$PREFIX/... */
+    size_t plen = strlen(prefix);
+    if (strncmp(path, prefix, plen) == 0 &&
+        (path[plen] == '/' || path[plen] == '\0')) {
+        snprintf(out, out_size, "%s", path);
+        return 0;
+    }
+
     /* Only translate absolute paths */
     if (path[0] != '/') {
         /* Handle ~/Library/ specially */

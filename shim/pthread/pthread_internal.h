@@ -59,6 +59,13 @@ extern int (*real_attr_destroy)(pthread_attr_t *);
 extern int (*real_attr_setstacksize)(pthread_attr_t *, size_t);
 extern int (*real_attr_getstacksize)(const pthread_attr_t *, size_t *);
 extern int (*real_attr_setguardsize)(pthread_attr_t *, size_t);
+extern int (*real_attr_setdetachstate)(pthread_attr_t *, int);
+extern int (*real_attr_getdetachstate)(const pthread_attr_t *, int *);
+extern int (*real_attr_setinheritsched)(pthread_attr_t *, int);
+extern int (*real_attr_getinheritsched)(const pthread_attr_t *, int *);
+extern int (*real_attr_setscope)(pthread_attr_t *, int);
+extern int (*real_attr_getscope)(const pthread_attr_t *, int *);
+extern int (*real_attr_setstack)(pthread_attr_t *, void *, size_t);
 
 /* ── Create (create.c) ── */
 extern int (*real_pthread_create)(pthread_t *, const pthread_attr_t *,
