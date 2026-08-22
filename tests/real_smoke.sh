@@ -223,5 +223,17 @@ if [ -f tests/real/starship_macos ]; then
     fi
 fi
 
+# Prefix-exec purity: an exec chain through /usr/bin/env -i must stay on
+# macOS binaries. Before the exec-family interposition fix, the redirected
+# bash silently became the HOST Linux shell (OSTYPE=linux-gnu).
+result=$(timeout 15 ./build/macify "$HOME/.macify/usr/bin/env" -i "$HOME/.macify/bin/bash" -c 'echo $OSTYPE' 2>/dev/null | tail -1)
+if [ "$result" = "darwin23.6.0" ]; then
+    echo -e "  ${GREEN}PASS${RESET}  env -i exec purity (→ $result)"
+    PASS=$((PASS + 1))
+else
+    echo -e "  ${RED}FAIL${RESET}  env -i exec purity (got: '$result' — host escape?)"
+    FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo -e "${BOLD}Results: ${GREEN}$PASS passed${RESET}, ${RED}$FAIL failed${RESET}, ${YELLOW}$SKIP skipped${RESET}"

@@ -1052,7 +1052,8 @@ extern int macify_do_execvp(const char *, char *const [], char *const []) __asm_
 static int exec_fill_argv(char **argv, int max, const char *arg0, va_list ap) {
     int n = 0;
     const char *a = arg0;
-    while (a != NULL && n < max - 1) {
+    while (a != NULL) {
+        if (n >= max - 1) { errno = E2BIG; return -1; }
         argv[n++] = (char *)a;
         a = va_arg(ap, const char *);
     }
@@ -1071,7 +1072,7 @@ int macify_execl(const char *path, const char *arg0, ...) {
     char *argv[MACIFY_EXEC_MAX_ARGS];
     va_list ap;
     va_start(ap, arg0);
-    exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap);
+    if (exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap) < 0) { va_end(ap); return -1; }
     va_end(ap);
     extern char **environ;
     return macify_execve(path, argv, environ);
@@ -1082,7 +1083,7 @@ int macify_execle(const char *path, const char *arg0, ...) {
     char *argv[MACIFY_EXEC_MAX_ARGS];
     va_list ap;
     va_start(ap, arg0);
-    exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap);
+    if (exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap) < 0) { va_end(ap); return -1; }
     va_end(ap);
     /* envp follows the NULL sentinel */
     char *const *envp = va_arg(ap, char *const *);
@@ -1094,7 +1095,7 @@ int macify_execlp(const char *file, const char *arg0, ...) {
     char *argv[MACIFY_EXEC_MAX_ARGS];
     va_list ap;
     va_start(ap, arg0);
-    exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap);
+    if (exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap) < 0) { va_end(ap); return -1; }
     va_end(ap);
     extern char **environ;
     return macify_execvp(file, argv, environ);
@@ -1124,9 +1125,12 @@ int macify_system(const char *command) {
     return st;
 }
 
-/* popen/pclose — small FILE*→pid table (POSIX allows concurrent popens) */
-#define MACIFY_POPEN_SLOTS 16
-static struct { FILE *f; pid_t pid; } popen_table[MACIFY_POPEN_SLOTS];
+/* popen/pclose — FILE*→pid registry. Homebrew runs concurrent-ruby thread
+ * pools that popen concurrently, so the table is mutex-guarded and grows. */
+#include <pthread.h>
+static pthread_mutex_t popen_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { FILE *f; pid_t pid; } *popen_table;
+static int popen_count, popen_cap;
 
 FILE *macify_popen(const char *cmd, const char *mode) __asm__("popen");
 FILE *macify_popen(const char *cmd, const char *mode) {
@@ -1164,22 +1168,33 @@ FILE *macify_popen(const char *cmd, const char *mode) {
         waitpid(pid, NULL, 0);
         return NULL;
     }
-    for (int i = 0; i < MACIFY_POPEN_SLOTS; i++) {
-        if (!popen_table[i].f) { popen_table[i].f = f; popen_table[i].pid = pid; break; }
+    pthread_mutex_lock(&popen_lock);
+    if (popen_count == popen_cap) {
+        int nc = popen_cap ? popen_cap * 2 : 16;
+        void *np = realloc(popen_table, (size_t)nc * sizeof(*popen_table));
+        if (!np) { pthread_mutex_unlock(&popen_lock); kill(pid, SIGKILL); waitpid(pid, NULL, 0); fclose(f); return NULL; }
+        popen_table = np; popen_cap = nc;
     }
+    popen_table[popen_count].f = f;
+    popen_table[popen_count].pid = pid;
+    popen_count++;
+    pthread_mutex_unlock(&popen_lock);
     return f;
 }
 
 int macify_pclose(FILE *stream) __asm__("pclose");
 int macify_pclose(FILE *stream) {
     pid_t pid = -1;
-    for (int i = 0; i < MACIFY_POPEN_SLOTS; i++) {
+    pthread_mutex_lock(&popen_lock);
+    for (int i = 0; i < popen_count; i++) {
         if (popen_table[i].f == stream) {
             pid = popen_table[i].pid;
-            popen_table[i].f = NULL;
+            popen_table[i] = popen_table[popen_count - 1];
+            popen_count--;
             break;
         }
     }
+    pthread_mutex_unlock(&popen_lock);
     if (fclose(stream) != 0 && pid < 0) return -1;
     if (pid < 0) { errno = ECHILD; return -1; }
     int st;

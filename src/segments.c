@@ -216,7 +216,7 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
      * shim (main.c pre-loads it before processing LC_LOAD_DYLIB). */
     {
         static const char *const interpose_syms[] = {
-            "execve", "execve$UNIX2003",
+            "execve",
             "execvp", "execvpe", "execv",
             "execl", "execle", "execlp",
             "posix_spawn", "posix_spawnp",

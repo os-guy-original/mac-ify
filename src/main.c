@@ -1381,46 +1381,6 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    /* Final exec-family enforcement: dladdr-sweep every pointer slot in
-     * __got/__la_symbol_ptr sections. Symbol-table-driven passes miss
-     * duplicate slots (flagged indirect entries, extra copies), which let
-     * macOS binaries reach glibc's exec family directly and escape prefix
-     * isolation via raw kernel syscalls (observed with Homebrew's
-     * /usr/bin/env chain: a second unpatched execvp stub slot). dladdr on
-     * the CURRENT value identifies the target regardless of table state. */
-    if (g_ndylibs > 0 && g_dylibs[0].handle) {
-        static const char *const exec_syms[] = {
-            "execve", "execve$UNIX2003", "execvp", "execvpe", "execv",
-            "execl", "execle", "execlp",
-            "posix_spawn", "posix_spawnp", "system", "popen", NULL
-        };
-        for (int si = 0; si < g_nsections; si++) {
-            loaded_section *s = &g_sections[si];
-            uint32_t sec_type = s->flags & 0xff;
-            /* Sweep EVERY section: escaping exec pointers have been found in
-             * plain __data (type 0), not just __got/__la_symbol_ptr. */
-            (void)sec_type;
-            if (!s->size || s->size % 8) continue;
-            uint64_t n_entries = s->size / 8;
-            for (uint64_t k = 0; k < n_entries; k++) {
-                uint64_t *slot = (uint64_t *)(uintptr_t)(s->addr + k * 8);
-                void *cur = (void *)(uintptr_t)*slot;
-                Dl_info di;
-                if (!dladdr(cur, &di) || !di.dli_sname) continue;
-                for (int ei = 0; exec_syms[ei]; ei++) {
-                    if (strcmp(di.dli_sname, exec_syms[ei]) != 0) continue;
-                    void *shim_addr = dlsym(g_dylibs[0].handle, di.dli_sname);
-                    if (!shim_addr || cur == shim_addr) break;
-                    if (getenv("MACIFY_TRACE_FIXUPS"))
-                        fprintf(stderr,
-                                "macify: exec-enforce %s slot=%p was=%s -> shim\n",
-                                di.dli_sname, (void *)slot, di.dli_sname);
-                    *slot = (uint64_t)(uintptr_t)shim_addr;
-                    break;
-                }
-            }
-        }
-    }
 
     /* macify_skip_r_patch is set above after putc patching, based on
      * whether inlined putc macros were found. The old text-size-based
