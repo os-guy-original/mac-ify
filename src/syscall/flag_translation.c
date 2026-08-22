@@ -33,6 +33,8 @@ int translate_mmap_flags(int macos_flags) {
     if (macos_flags & 0x0001) linux_flags |= MAP_SHARED;
     if (macos_flags & 0x0002) linux_flags |= MAP_PRIVATE;
     if (macos_flags & 0x0010) linux_flags |= MAP_FIXED;
+    if (macos_flags & 0x0040) linux_flags |= MAP_NORESERVE;   /* macOS 0x40 vs Linux 0x4000 */
+    if (macos_flags & 0x0800) ;                                /* MAP_JIT: W^X, no-op on Linux */
     /* MAP_ANON (macOS 0x1000) → MAP_ANONYMOUS (Linux 0x20). */
     if (macos_flags & 0x1000) linux_flags |= MAP_ANONYMOUS;
     /* Linux-only flags we can't translate from macOS — ignored. */
@@ -47,7 +49,8 @@ int translate_kill_signal(int macos_sig) {
        all the same on macOS and Linux. */
     static const int sig_xlate[32] = {
         [0]  = 0,                /* 0 = no signal (kill(pid, 0) checks existence) */
-        [7]  = 0,                /* macOS SIGEMT — no Linux equivalent; 0 = skip */
+        [7]  = 10,               /* macOS SIGEMT -> Linux SIGUSR1 (10):
+                                  * NEVER raw-passthrough: 7 == Linux SIGBUS! */
         [8]  = 8,                /* SIGFPE — same */
         [10] = 7,                /* macOS SIGBUS  → Linux SIGBUS (7) */
         [12] = 31,               /* macOS SIGSYS  → Linux SIGSYS (31) */
@@ -64,7 +67,9 @@ int translate_kill_signal(int macos_sig) {
         [26] = 26,               /* SIGVTALRM — same */
         [27] = 27,               /* SIGPROF — same */
         [28] = 28,               /* SIGWINCH — same */
-        [29] = 0,                /* macOS SIGINFO — no Linux equivalent; 0 = skip */
+        [29] = 10,               /* macOS SIGINFO -> Linux SIGUSR1 (10);
+                                  * raw 29 would collide with an unused-but-
+                                  * deliverable Linux number */
         [30] = 10,               /* macOS SIGUSR1 → Linux SIGUSR1 (10) */
         [31] = 12,               /* macOS SIGUSR2 → Linux SIGUSR2 (12) */
     };

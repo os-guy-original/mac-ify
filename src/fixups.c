@@ -528,15 +528,17 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
          * semantics. Formats sharing the same 64-bit entry layout (e.g. 2, 6)
          * have proven to work; others are untested. Diagnostic is opt-in —
          * it fired on every interactive-shell launch otherwise. */
-        static uint16_t seen_fixup_format = 0xFFFF;
-        if (ptr_format != 3 && ptr_format != seen_fixup_format) {
-            seen_fixup_format = ptr_format;
-            if (g_verbose || getenv("MACIFY_TRACE_FIXUPS")) {
-                fprintf(stderr,
-                        "macify: chained fixup pointer format %u "
-                        "(validated: 3 = DYLD_CHAINED_PTR_64_OFFSET)\n",
-                        ptr_format);
-            }
+        /* Only the two 64-bit entry layouts are supported (identical bit
+         * packing; they differ only in target semantics). Values per Apple
+         * fixup-chains.h: PTR_64=2, PTR_64_OFFSET=6. Anything else (incl.
+         * 3=PTR_32, whose entries are 32-bit) would mis-decode. */
+        if (ptr_format != DYLD_CHAINED_PTR_64 &&
+            ptr_format != DYLD_CHAINED_PTR_64_OFFSET) {
+            fprintf(stderr,
+                    "macify: unsupported chained fixup pointer format %u "
+                    "(only 2=PTR_64 and 6=PTR_64_OFFSET supported). Refusing to run.\n",
+                    ptr_format);
+            return -1;
         }
 
         loaded_segment *seg = &g_segments[seg_idx];
@@ -599,8 +601,11 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                 uint32_t next = (value >> 51) & 0xFFF;  /* bits 51-62 */
 
                 if (is_bind) {
-                    uint32_t ordinal = value & 0xFFFF;
-                    uint32_t addend = (value >> 16) & 0xFFFF;
+                    /* Apple dyld_chained_ptr_64_bind: ordinal bits0-23,
+                     * addend bits24-31 (8-bit, signed-in-effect), next
+                     * bits51-62, bind bit63. */
+                    uint32_t ordinal = value & 0xFFFFFFu;
+                    uint32_t addend = (value >> 24) & 0xFF;
 
                     if (ordinal >= hdr->imports_count) {
                         /* Out-of-range import index — leave as-is. */
@@ -655,9 +660,13 @@ int execute_chained_fixups(uint8_t *file_data, size_t file_size) {
                         }
                     }
                 } else {
-                    /* Rebase fixup: target is OFFSET from image base */
-                    uint64_t target = value & 0x7FFFFFFFFFFULL;
-                    uint8_t  high8 = (value >> 43) & 0xFF;
+                    /* Rebase fixup. Apple dyld_chained_ptr_64_rebase:
+                     * target bits0-35 (36), high8 bits36-43, reserved
+                     * bits44-50, next bits51-62, bind bit63. For both
+                     * supported formats the runtime address is
+                     * high8<<43 | target, then + load base for OFFSET. */
+                    uint64_t target = value & 0xFFFFFFFFFULL;
+                    uint8_t  high8 = (value >> 36) & 0xFF;
                     uint64_t static_offset = ((uint64_t)high8 << 43) | target;
                     *(uint64_t *)chain_ptr = static_offset + load_base;
                     if (getenv("MACIFY_TRACE_FIXUPS")) {

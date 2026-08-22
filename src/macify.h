@@ -70,11 +70,11 @@
 #define INDIRECT_SYMBOL_LOCAL   0x80000000u
 #define INDIRECT_SYMBOL_ABS     0x40000000u
 
-/* Chained fixup pointer formats */
-#define DYLD_CHAINED_PTR_64_OFFSET    2
-#define DYLD_CHAINED_PTR_64_BIND      3
-#define DYLD_CHAINED_PTR_64_OFFSET_64 6
-#define DYLD_CHAINED_PTR_64_BIND_64   7
+/* Chained fixup pointer formats — values per dyld include/mach-o/fixup-chains.h */
+#define DYLD_CHAINED_PTR_ARM64E       1
+#define DYLD_CHAINED_PTR_64           2   /* target is vmaddr */
+#define DYLD_CHAINED_PTR_32           3   /* 32-bit entries: NOT supported */
+#define DYLD_CHAINED_PTR_64_OFFSET    6   /* target is vm offset */
 
 /* ============================================================
  * Mach-O structures
@@ -168,7 +168,8 @@ typedef struct {
     uint32_t imports_offset;   /* 8  */
     uint32_t symbols_offset;   /* 12 */
     uint32_t imports_count;    /* 16 */
-    uint32_t symbols_format;   /* 20 */
+    uint32_t imports_format;   /* 20 — only DYLD_CHAINED_IMPORT (1) supported */
+    uint32_t symbols_format;   /* 24 */
 } dyld_chained_fixups_header;
 
 /* ============================================================

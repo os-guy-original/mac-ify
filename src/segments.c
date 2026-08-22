@@ -128,6 +128,7 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         for (int i = 0; i < g_ndylibs; i++) {
             void *addr = dlsym(g_dylibs[i].handle, sym);
             if (!addr && g_dylibs[i].libc_handle) addr = dlsym(g_dylibs[i].libc_handle, sym);
+            if (!addr && g_dylibs[i].libm_handle) addr = dlsym(g_dylibs[i].libm_handle, sym);
             if (addr) return addr;
         }
         /* Check extra handles */
@@ -409,7 +410,8 @@ int map_segment(segment_command_64 *seg,
         s->prot = PROT_NONE;
         s->target_prot = PROT_NONE;
         s->is_pagezero = 1;
-        strncpy(s->name, seg->segname, 16);
+        memset(s->name, 0, sizeof(s->name));
+        strncpy(s->name, seg->segname, sizeof(s->name) - 1);
         return 0;
     }
 
@@ -463,7 +465,8 @@ int map_segment(segment_command_64 *seg,
     s->prot = initial_prot;
     s->target_prot = prot_from_macos(seg->initprot);
     s->is_pagezero = 0;
-    strncpy(s->name, seg->segname, 16);
+    memset(s->name, 0, sizeof(s->name));
+    strncpy(s->name, seg->segname, sizeof(s->name) - 1);
 
     if (g_verbose) {
         if (g_slide != 0) {
@@ -491,8 +494,10 @@ int map_segment(segment_command_64 *seg,
                 return -1;
             }
             loaded_section *ls = &g_sections[g_nsections++];
-            strncpy(ls->sectname, sects[i].sectname, 16);
-            strncpy(ls->segname, sects[i].segname, 16);
+            memset(ls->sectname, 0, sizeof(ls->sectname));
+            memset(ls->segname, 0, sizeof(ls->segname));
+            strncpy(ls->sectname, sects[i].sectname, sizeof(ls->sectname) - 1);
+            strncpy(ls->segname, sects[i].segname, sizeof(ls->segname) - 1);
             ls->addr = sects[i].addr + g_slide;  /* apply ASLR/PIE slide */
             ls->size = sects[i].size;
             ls->offset = sects[i].offset;
