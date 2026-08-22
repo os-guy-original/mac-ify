@@ -221,7 +221,8 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             "execvp", "execvpe", "execv",
             "execl", "execle", "execlp",
             "posix_spawn", "posix_spawnp",
-            "system", "popen", NULL
+            "system", "popen",
+            "regcomp", "regexec", "regfree", "regerror", NULL
         };
         if (g_ndylibs > 0 && g_dylibs[0].handle) {
             for (int i = 0; interpose_syms[i]; i++) {

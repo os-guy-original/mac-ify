@@ -164,3 +164,36 @@ libintl.c, watchog.c, tests/real_functional.sh.
   watchpoints; check which regex call site in bash triggers.
 - NOT caused by audit commits 30efd22..b3cf042: crash reproduces at the
   shebang-fix commit too.
+
+## Pure-mode bash regex crash — root cause chain (debug session)
+
+Repro: `macify ~/.macify/bin/bash -c '[[ abc =~ b ]]'` → SIGSEGV/SIGABRT
+(rc=134). Isolation results:
+
+- Only SUCCESSFUL matches crash. No-match, empty patterns, `[[ == ]]`
+  globs and `case` are clean → corruption is in bash's post-match
+  processing, not in regcomp/regexec themselves.
+- Shim regex wrapper (misc/regex.c) verified correct end-to-end with
+  instrumented runs: real_regcomp/regexec are genuine libc symbols,
+  rc=0, pmatch written correctly (so/eo logged sane).
+- Locale-independent (C locale + LANG unset both crash). Identical
+  crash signature with raw glibc binding (wrapper not involved).
+- MALLOC_CHECK_=3 aborts earlier with sysmalloc top-chunk assertion;
+  heap chunk walk at fault shows the top header zeroed.
+- Faulting instruction: `rep stos %al,(%rdi)` (memset_erms tail) with
+  r8 = original dst = a freshly malloc'd ~24-byte bash buffer, rdi =
+  exactly the brk limit. Reconstructed initial length from rcx +
+  consumed span: **0xFFFFFFFD00000000** (= -3 GiB as signed 64-bit).
+- That value is the little-endian packing of two adjacent int32 fields
+  **{0, -3}** read as one 64-bit byte count. Our wrapper wrote correct
+  {rm_so, rm_eo} into the buffer bash passed us, so the bogus pair
+  lives in a DIFFERENT struct that bash's BASH_REMATCH construction
+  path treats as a size.
+
+Conclusion: macOS bash 5.3 post-match code builds a 64-bit length from
+an adjacent-int32 pair that contains a -3 sentinel where our Linux-side
+environment leaves/puts something different than on macOS. Fixing it
+requires identifying that struct inside bash (needs source-level debug
+build of Homebrew bash or matching bash 5.3 sources) — documented as
+the next step. The shim wrapper stays: it fixes the genuine 32-vs-64
+byte regex_t overflow for every macOS binary using POSIX regex.
