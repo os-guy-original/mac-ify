@@ -28,7 +28,7 @@ void macify_net_dbg_hex(const char *prefix, const void *p, int n);
 #define MACOS_O_TRUNC         0x0400
 #define MACOS_O_APPEND        0x0008
 #define MACOS_O_NONBLOCK      0x0004
-#define MACOS_O_NOCTTY        0x10000
+#define MACOS_O_NOCTTY        0x20000   /* xnu bsd/sys/fcntl.h */
 #define MACOS_O_SYNC          0x0080
 #define MACOS_O_CLOEXEC       0x1000000
 #define MACOS_O_DIRECTORY     0x100000

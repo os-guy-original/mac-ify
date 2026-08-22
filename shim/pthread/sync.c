@@ -47,7 +47,8 @@ void init_real_pthread_funcs(void) {
  * glibc's lock on the raw macOS layout wedged forever in futex(val=2). */
 void convert_macos_mutex(pthread_mutex_t *m) {
     unsigned int sig = *(unsigned int *)m;
-    if (sig == MACOS_PTHREAD_MUTEX_SIG || sig == MACOS_PTHREAD_MUTEX_SIG_INIT) {
+    if (sig == MACOS_PTHREAD_MUTEX_SIG || sig == MACOS_PTHREAD_RECURSIVE_SIG ||
+        sig == MACOS_PTHREAD_ERRORCHECK_SIG || sig == MACOS_PTHREAD_FIRSTFIT_SIG) {
         static const pthread_mutex_t glibc_init = PTHREAD_MUTEX_INITIALIZER;
         memcpy(m, &glibc_init, sizeof(pthread_mutex_t));
     }

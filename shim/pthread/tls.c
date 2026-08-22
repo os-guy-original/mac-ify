@@ -192,7 +192,7 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
 
 /* macOS pthread synchronization objects have a completely different layout
  * from glibc's. Statically-initialized objects carry a macOS signature
- * (0x32AAABA7 for mutex, 0x3CB0B5BB for cond, 0x2DA8B3B4 for rwlock) in
+ * (0x32AAABA7 for mutex, 0x3CB0B1BB for cond, 0x2DA8B3B4 for rwlock) in
  * their first 4 bytes. When glibc's pthread_mutex_lock sees this non-zero
  * value, it interprets it as "already locked" and deadlocks on a futex.
  *
@@ -203,8 +203,6 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
  * real function via macify_elf_lookup(...).
  */
 
-#define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u
-#define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
-#define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
+/* signatures come from pthread_internal.h */
 
 /* Cache glibc's real function pointers (resolved lazily on first use). */

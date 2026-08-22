@@ -10,10 +10,23 @@
 /* ── Constants ── */
 #define MACIFY_MAX_KEYS 256
 
-#define MACOS_PTHREAD_MUTEX_SIG       0x32AAABA7u
-#define MACOS_PTHREAD_MUTEX_SIG_INIT  0x32AAABA2u
-#define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
-#define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
+/* Signatures per apple libpthread include/pthread/pthread_impl.h.
+ * These appear in objects with PTHREAD_*_INITIALIZER static storage:
+ *   _PTHREAD_MUTEX_SIG_init            0x32AAABA7 (normal)
+ *   _PTHREAD_RECURSIVE_MUTEX_SIG_init  0x32AAABA2
+ *   _PTHREAD_ERRORCHECK_MUTEX_SIG_init 0x32AAABA1
+ *   _PTHREAD_FIRSTFIT_MUTEX_SIG_init   0x32AAABA3
+ *   _PTHREAD_COND_SIG_init             0x3CB0B1BB
+ *   _PTHREAD_RWLOCK_SIG_init           0x2DA8B3B4 */
+#define MACOS_PTHREAD_MUTEX_SIG        0x32AAABA7u
+#define MACOS_PTHREAD_RECURSIVE_SIG    0x32AAABA2u
+#define MACOS_PTHREAD_ERRORCHECK_SIG   0x32AAABA1u
+#define MACOS_PTHREAD_FIRSTFIT_SIG     0x32AAABA3u
+#define MACOS_PTHREAD_COND_SIG         0x3CB0B1BBu
+#define MACOS_PTHREAD_RWLOCK_SIG       0x2DA8B3B4u
+/* Historical alias: 0x32AAABA2 was misnamed SIG_INIT; it is actually the
+ * RECURSIVE mutex signature (bash statically-inits recursive mutexes). */
+#define MACOS_PTHREAD_MUTEX_SIG_INIT MACOS_PTHREAD_RECURSIVE_SIG
 
 #define MACOS_CLOCK_MONOTONIC             6
 #define MACOS_CLOCK_PROCESS_CPUTIME_ID   12

@@ -106,3 +106,22 @@
   SYSV nchain. rclone smoke re-verified; one transient exit-139 observed
   once during smoke, unreproducible in 3 consecutive runs + direct runs.
   Watch it.
+
+## shim/io/io_internal.h + flags.c
+- [BUG/SPEC][FIXED] MACOS_O_NOCTTY was 0x10000; xnu defines O_NOCTTY=0x20000.
+  The userspace open() translator missed every O_NOCTTY request and instead
+  matched bit 0x10000 (undefined on macOS). Fixed to 0x20000.
+- [OK] All other MACOS_O_* verified against xnu fcntl.h this pass.
+- [NIT] Two parallel open-flag translators exist (src/syscall/flag_translation.c
+  for slow path vs shim/io/flags.c for symbol path) — drift hazard, both now
+  agree; consider unifying later.
+
+## shim/pthread/* (signatures)
+- [BUG/SPEC][FIXED] MACOS_PTHREAD_COND_SIG was 0x3CB0B5BB; libpthread's
+  pthread_impl.h defines _PTHREAD_COND_SIG_init = 0x3CB0B1BB. Statically
+  initialized conditions were never recognized; conversion fell through
+  to glibc on a macOS-layout object. Fixed in pthread_internal.h,
+  shim.h, tls.c (which also dropped its local #define copies).
+- [FIXED] Static-mutex recognition now covers all four initializer
+  signatures: normal(ABA7), RECURSIVE(ABA2), ERRORCHECK(ABA1),
+  FIRSTFIT(ABA3). Previously only ABA7 + ABA2 (misnamed "SIG_INIT").

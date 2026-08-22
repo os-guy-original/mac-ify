@@ -141,7 +141,7 @@ extern int16_t macify_mapupper[256];
 
 /* macOS pthread synchronization object signatures */
 #define MACOS_PTHREAD_MUTEX_SIG  0x32AAABA7u
-#define MACOS_PTHREAD_COND_SIG   0x3CB0B5BBu
+#define MACOS_PTHREAD_COND_SIG   0x3CB0B1BBu   /* per libpthread pthread_impl.h */
 #define MACOS_PTHREAD_RWLOCK_SIG 0x2DA8B3B4u
 #define MACOS_PTHREAD_ATTR_SIG   0x54485244u
 #define MACOS_PTHREAD_ONCE_INIT  0x30B1BCBA
