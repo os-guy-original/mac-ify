@@ -54,6 +54,11 @@ static void finish_slow_result(ucontext_t *uc, long result) {
     regs[REG_RIP] += 2;
 }
 
+static unsigned char *linux_old_sa_buffer(void) {
+    static unsigned char buf[152];
+    return buf;
+}
+
 void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     (void)sig; (void)info;
     ucontext_t *uc = (ucontext_t *)uctx;
@@ -126,6 +131,8 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
     void *sigprocmask_save_macos_oset = NULL;
     /* For sigaltstack: save original macOS oss pointer for post-syscall copy */
     void *sigaltstack_save_macos_oss = NULL;
+    /* For sigaction: save original macOS oldact pointer for post-syscall copy */
+    void *sigaction_save_oldact = NULL;
     long a3 = regs[REG_RDX];
     long a4 = regs[REG_R10];
     long a5 = regs[REG_R8];
@@ -241,6 +248,16 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             uint8_t *macos_sa = (uint8_t *)a2;
             memset(&linux_sa, 0, sizeof(linux_sa));
             unsigned int macos_flags = *(unsigned int *)(macos_sa + 12);
+            /* macOS and Linux SA_* bits differ completely (xnu bsd/sys/signal.h
+             * vs kernel uapi). Same table as shim/signal/sigaction.c. */
+            unsigned int linux_flags = 0;
+            if (macos_flags & 0x0001) linux_flags |= 0x08000000;  /* SA_ONSTACK */
+            if (macos_flags & 0x0002) linux_flags |= 0x10000000;  /* SA_RESTART */
+            if (macos_flags & 0x0004) linux_flags |= 0x80000000;  /* SA_RESETHAND */
+            if (macos_flags & 0x0008) linux_flags |= 0x00000001;  /* SA_NOCLDSTOP */
+            if (macos_flags & 0x0010) linux_flags |= 0x40000000;  /* SA_NODEFER */
+            if (macos_flags & 0x0020) linux_flags |= 0x00000002;  /* SA_NOCLDWAIT */
+            if (macos_flags & 0x0040) linux_flags |= 0x00000004;  /* SA_SIGINFO */
             void *go_handler = *(void **)macos_sa;
 
             /* For Go binaries: install the signal deferral wrapper instead
@@ -258,11 +275,11 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
                 } else {
                     /* Fallback: install Go's handler directly */
                     linux_sa.handler = go_handler;
-                    linux_sa.flags = macos_flags | SA_ONSTACK;
+                    linux_sa.flags = linux_flags | SA_ONSTACK;
                 }
             } else {
                 linux_sa.handler = go_handler;
-                linux_sa.flags = macos_flags | SA_ONSTACK;
+                linux_sa.flags = linux_flags | SA_ONSTACK;
             }
             /* Translate the 4-byte macOS sigset mask to 128-byte Linux sigset,
              * translating signal numbers (macOS SIGURG=16 → Linux SIGURG=23, etc.) */
@@ -285,10 +302,9 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             }
             a1 = linux_signum;
         }
-        if (a3) {
-            static unsigned char linux_old_sa[152];
-            a3 = (long)linux_old_sa;
-        }
+        void *macos_old_sa = (void *)a3;
+        if (a3) a3 = (long)linux_old_sa_buffer();
+        sigaction_save_oldact = macos_old_sa;
     }
     if (flags & ARG_SIGPROCMASK) {
         sigprocmask_save_macos_oset = (void *)a3;
@@ -383,6 +399,35 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
                             "converting to -1 (macOS convention)\n", result, err);
         }
         result = -1;
+    }
+
+    /* Post-syscall: for sigaction oldact, convert Linux struct sigaction
+     * back to the macOS layout the caller expects:
+     *   macOS: handler@0, sa_mask(u32)@8, sa_flags(int)@12 */
+    if (sigaction_save_oldact && result == 0) {
+        struct { void *handler; unsigned long flags; void *restorer;
+                 unsigned char mask[128]; } *lsa =
+            (void *)linux_old_sa_buffer();
+        uint8_t *mo = (uint8_t *)sigaction_save_oldact;
+        *(void **)mo = lsa->handler;
+        uint32_t mmask = 0;
+        for (int ls = 1; ls <= 31; ls++) {
+            if (lsa->mask[ls / 8] & (1u << (ls % 8))) {
+                for (int ms = 1; ms <= 31; ms++) {
+                    if (translate_kill_signal(ms) == ls) { mmask |= 1u << (ms - 1); break; }
+                }
+            }
+        }
+        *(uint32_t *)(mo + 8) = mmask;
+        uint32_t mfl = 0;
+        if (lsa->flags & 0x08000000) mfl |= 0x0001; /* SA_ONSTACK */
+        if (lsa->flags & 0x10000000) mfl |= 0x0002; /* SA_RESTART */
+        if (lsa->flags & 0x80000000) mfl |= 0x0004; /* SA_RESETHAND */
+        if (lsa->flags & 0x00000001) mfl |= 0x0008; /* SA_NOCLDSTOP */
+        if (lsa->flags & 0x40000000) mfl |= 0x0010; /* SA_NODEFER */
+        if (lsa->flags & 0x00000002) mfl |= 0x0020; /* SA_NOCLDWAIT */
+        if (lsa->flags & 0x00000004) mfl |= 0x0040; /* SA_SIGINFO */
+        *(uint32_t *)(mo + 12) = mfl;
     }
 
     /* Post-syscall: for sigprocmask, translate 8-byte Linux sigset → 4-byte macOS sigset.

@@ -583,10 +583,68 @@ static char **macify_build_child_envp(char *const envp[], const char *macify_bin
     return out;
 }
 
+/* Detect a "#!" script and extract its interpreter (+ optional arg).
+ * Returns 1 on success. The kernel would otherwise resolve the shebang
+ * against the REAL root filesystem, handing the script to a HOST
+ * interpreter and leaking the process out of the prefix. */
+static int parse_shebang(const char *path, char *interp, size_t isz,
+                         char *iarg, size_t asz) {
+    char fdpath[4096];
+    extern int macify_translate_path(const char *, char *, size_t);
+    const char *eff = path;
+    if (macify_translate_path(path, fdpath, sizeof(fdpath)) == 0) eff = fdpath;
+    FILE *fp = fopen(eff, "rb");
+    if (!fp) return 0;
+    char line[512];
+    char *ok = fgets(line, sizeof(line), fp);
+    fclose(fp);
+    if (!ok || strncmp(line, "#!", 2) != 0) return 0;
+    char *p = line + 2;
+    while (*p == ' ' || *p == '\t') p++;
+    char *nl = strpbrk(p, "\r\n");
+    if (nl) *nl = '\0';
+    if (!*p) return 0;
+    char *sp = strchr(p, ' ');
+    if (!sp) sp = strchr(p, '\t');
+    if (sp) {
+        *sp++ = '\0';
+        while (*sp == ' ' || *sp == '\t') sp++;
+        snprintf(iarg, asz, "%s", sp);
+    } else {
+        iarg[0] = '\0';
+    }
+    snprintf(interp, isz, "%s", p);
+    return 1;
+}
+
+#define MACIFY_SHEBANG_MAX_DEPTH 5
+#ifndef MACIFY_EXEC_MAX_ARGS
+#define MACIFY_EXEC_MAX_ARGS 1024
+#endif
+
+/* Hidden impl entry declared below for recursion */
 __attribute__((visibility("hidden")))
 int macify_do_execve(const char *path, char *const argv[], char *const envp[])
         __asm__("macify_do_execve");
+
+static int do_execve_inner(const char *path, char *const argv[],
+                           char *const envp[], int depth);
+
 int macify_do_execve(const char *path, char *const argv[], char *const envp[]) {
+    return do_execve_inner(path, argv, envp, 0);
+}
+
+/* Exported under the libc-colliding name so resolve_symbol can bind
+ * application execve imports to the shim; the real work stays in the
+ * hidden implementation to avoid glibc preemption of intra-shim calls. */
+int macify_hook_execve(const char *path, char *const argv[], char *const envp[])
+        __asm__("execve");
+int macify_hook_execve(const char *path, char *const argv[], char *const envp[]) {
+    return do_execve_inner(path, argv, envp, 0);
+}
+
+static int do_execve_inner(const char *path, char *const argv[],
+                           char *const envp[], int depth) {
     static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
     if (!real_execve) real_execve = macify_elf_lookup("execve");
 
@@ -618,6 +676,36 @@ int macify_do_execve(const char *path, char *const argv[], char *const envp[]) {
                 free(new_argv);
                 return ret;
             }
+        }
+    }
+
+    /* Script? Honor its shebang with a PREFIX interpreter instead of
+     * letting the kernel resolve "#!/bin/bash" against the real root,
+     * which hands the process to a host interpreter. */
+    {
+        static const char *const script_exts[] = {".sh", ".rb", ".pl", ".py", NULL};
+        char interp[4096], iarg[4096];
+        (void)script_exts;
+        if (parse_shebang(path, interp, sizeof(interp), iarg, sizeof(iarg))) {
+            char tinterp[4096], abspath[4096];
+            if (macify_translate_path(interp, tinterp, sizeof(tinterp)) != 0)
+                snprintf(tinterp, sizeof(tinterp), "%s", interp);
+            if (access(tinterp, X_OK) != 0) { errno = ENOENT; return -1; }
+            if (depth >= MACIFY_SHEBANG_MAX_DEPTH) { errno = ELOOP; return -1; }
+            if (path[0] == '/') {
+                snprintf(abspath, sizeof(abspath), "%s", path);
+            } else {
+                if (!realpath(path, abspath)) { errno = ENOENT; return -1; }
+            }
+            char *nargv[MACIFY_EXEC_MAX_ARGS];
+            int na = 0;
+            nargv[na++] = tinterp;
+            if (iarg[0]) nargv[na++] = iarg;
+            nargv[na++] = abspath;
+            for (int i = 1; argv && argv[i] && na < MACIFY_EXEC_MAX_ARGS - 1; i++)
+                nargv[na++] = argv[i];
+            nargv[na] = NULL;
+            return do_execve_inner(tinterp, nargv, envp, depth + 1);
         }
     }
 
@@ -667,10 +755,9 @@ int macify_do_execvp(const char *file, char *const argv[], char *const envp[]) {
         }
     }
 
-    /* ELF or unknown — use real execvpe */
-    static int (*real_execvpe)(const char *, char *const [], char *const []) = NULL;
-    if (!real_execvpe) real_execvpe = macify_elf_lookup("execvpe");
-    return real_execvpe ? real_execvpe(resolved, argv, envp) : -1;
+    /* Not Mach-O: shared inner path covers scripts (prefix shebangs) and
+     * final passthrough; resolved is already a full path. */
+    return do_execve_inner(resolved, argv, envp, 0);
 }
 
 /* execvp — same as execvpe but uses environ */
