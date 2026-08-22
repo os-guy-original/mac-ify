@@ -36,7 +36,10 @@ import json, sys
 data = json.load(sys.stdin)
 version = data['versions']['stable']
 files = data.get('bottle', {}).get('stable', {}).get('files', {})
-for os_name in ['sonoma', 'ventura', 'monterey', 'all']:
+# Prefer the newest darwin tag present; fall back to 'all'.
+tags = [k for k in files if k.startswith(('sequoia','sonoma','ventura','monterey'))]
+tags.sort(reverse=True)
+for os_name in tags + ['all']:
     if os_name in files:
         print(f'{version} {files[os_name][\"url\"]} {files[os_name][\"sha256\"]}')
         break

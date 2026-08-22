@@ -125,3 +125,30 @@
 - [FIXED] Static-mutex recognition now covers all four initializer
   signatures: normal(ABA7), RECURSIVE(ABA2), ERRORCHECK(ABA1),
   FIRSTFIT(ABA3). Previously only ABA7 + ABA2 (misnamed "SIG_INIT").
+
+## shim/sys/* (skim pass)
+- [OK] malloc_zone_* map 1:1 onto glibc allocator; free(zone,ptr) ignores
+  zone (fine for the single default zone we emulate).
+- [OK] getentropy uses getrandom(2) with /dev/urandom fallback.
+- [KNOWN-LIMIT] kqueue/kevent are stubs: changes "succeed", reads return
+  0 events. Noisy logging on every call (rclone/bash spam). Future work:
+  real kqueue over epoll; at minimum gate logs behind MACIFY_TRACE_KQUEUE.
+
+## shim/misc/* (skim)
+- [OK] sysctl bounded copies; rune table matches _CTYPE bits; CF stubs
+  refcount-consistent on skim.
+
+## scripts/macify-setup-homebrew
+- [FIXED] bottle-tag ladder was hardcoded [sonoma,ventura,monterey,all];
+  now dynamically prefers the newest darwin tag the API offers
+  (sequoia first), falling back to 'all'.
+
+## Audit coverage note (this pass)
+Deep-read: macify.h, fixups.c, segments.c, main.c (loader-critical paths),
+syscall_table.c (+verified 116 entries vs xnu master), flag_translation.c,
+patcher.c, sigill_handler.c, presolve.c, io/dl.c, shim_core.c, net.c
+(connect path), dirent.c, pthread sigs, malloc/random/kqueue skims,
+setup-homebrew script.
+Skimmed/not exhaustively read: shim_mach.c internals, objc_compat.c,
+cf.c, sysctl.c, unwind.c, glob.c details, macos_stdio.c details,
+libintl.c, watchog.c, tests/real_functional.sh.
