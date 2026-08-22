@@ -206,6 +206,46 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         return NULL;
     }
 
+    /* MUST-INTERPOSE symbols: always resolve to the shim, regardless of
+     * two-level bind target. macOS binaries that bind exec-family symbols
+     * directly to their libc ordinal would otherwise bypass the shim: the
+     * raw kernel syscall then loads a HOST ELF binary (e.g. /bin/bash),
+     * which runs with full host filesystem access and silently breaks
+     * prefix isolation. Observed with Homebrew's `/usr/bin/env -i` chain:
+     * env's execlp() escaped to the host shell. g_dylibs[0] is always the
+     * shim (main.c pre-loads it before processing LC_LOAD_DYLIB). */
+    {
+        static const char *const interpose_syms[] = {
+            "execve", "execve$UNIX2003",
+            "execvp", "execvpe", "execv",
+            "execl", "execle", "execlp",
+            "posix_spawn", "posix_spawnp",
+            "system", "popen", NULL
+        };
+        if (g_ndylibs > 0 && g_dylibs[0].handle) {
+            for (int i = 0; interpose_syms[i]; i++) {
+                if (strcmp(sym, interpose_syms[i]) == 0) {
+                    void *shim_addr = dlsym(g_dylibs[0].handle, sym);
+                    if (getenv("MACIFY_TRACE_FIXUPS")) {
+                        Dl_info di;
+                        const char *real_name = "?";
+                        unsigned long off = 0;
+                        if (dladdr(shim_addr, &di) && di.dli_sname) {
+                            real_name = di.dli_sname;
+                            off = (unsigned long)shim_addr - (unsigned long)di.dli_fbase;
+                        }
+                        char b[256];
+                        int n = snprintf(b, sizeof(b),
+                            "macify: interpose %s -> %s +%#lx\n", sym, real_name, off);
+                        (void)write(2, b, n);
+                    }
+                    if (shim_addr) return shim_addr;
+                    break;
+                }
+            }
+        }
+    }
+
     if (ordinal_idx < 0 || ordinal_idx >= g_ndylibs) return NULL;
     loaded_dylib *dy = &g_dylibs[ordinal_idx];
 

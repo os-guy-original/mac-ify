@@ -1033,3 +1033,156 @@ int macify_fflush(FILE *stream) {
     }
     return real_fflush ? real_fflush(stream) : 0;
 }
+
+/* ── exec family wrappers ─────────────────────────────────────
+ * The resolver (src/segments.c) force-binds these names to the shim so
+ * every exec from a macOS binary translates paths and re-runs Mach-O
+ * targets through macify. Without this, two-level binds land in glibc
+ * and raw kernel syscalls escape to host binaries. */
+
+/* Hidden-visibility implementations in shim_spawn.c: unique asm names,
+ * so intra-shim calls cannot be preempted by glibc's exec exports. */
+extern int macify_do_execve(const char *, char *const [], char *const []) __asm__("macify_do_execve");
+extern int macify_do_execvp(const char *, char *const [], char *const []) __asm__("macify_do_execvp");
+#define macify_execve macify_do_execve
+#define macify_execvp macify_do_execvp
+
+#define MACIFY_EXEC_MAX_ARGS 1024
+
+static int exec_fill_argv(char **argv, int max, const char *arg0, va_list ap) {
+    int n = 0;
+    const char *a = arg0;
+    while (a != NULL && n < max - 1) {
+        argv[n++] = (char *)a;
+        a = va_arg(ap, const char *);
+    }
+    argv[n] = NULL;
+    return n;
+}
+
+int macify_execv(const char *path, char *const argv[]) __asm__("execv");
+int macify_execv(const char *path, char *const argv[]) {
+    extern char **environ;
+    return macify_execve(path, argv, environ);
+}
+
+int macify_execl(const char *path, const char *arg0, ...) __asm__("execl");
+int macify_execl(const char *path, const char *arg0, ...) {
+    char *argv[MACIFY_EXEC_MAX_ARGS];
+    va_list ap;
+    va_start(ap, arg0);
+    exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap);
+    va_end(ap);
+    extern char **environ;
+    return macify_execve(path, argv, environ);
+}
+
+int macify_execle(const char *path, const char *arg0, ...) __asm__("execle");
+int macify_execle(const char *path, const char *arg0, ...) {
+    char *argv[MACIFY_EXEC_MAX_ARGS];
+    va_list ap;
+    va_start(ap, arg0);
+    exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap);
+    va_end(ap);
+    /* envp follows the NULL sentinel */
+    char *const *envp = va_arg(ap, char *const *);
+    return macify_execve(path, argv, envp);
+}
+
+int macify_execlp(const char *file, const char *arg0, ...) __asm__("execlp");
+int macify_execlp(const char *file, const char *arg0, ...) {
+    char *argv[MACIFY_EXEC_MAX_ARGS];
+    va_list ap;
+    va_start(ap, arg0);
+    exec_fill_argv(argv, MACIFY_EXEC_MAX_ARGS, arg0, ap);
+    va_end(ap);
+    extern char **environ;
+    return macify_execvp(file, argv, environ);
+}
+
+/* system — route through our execve so /bin/sh resolves inside the prefix */
+int macify_system(const char *command) __asm__("system");
+int macify_system(const char *command) {
+    if (!command) {
+        /* availability check: sh executable? */
+        extern int macify_translate_path(const char *, char *, size_t);
+        char t[4096];
+        if (macify_translate_path("/bin/sh", t, sizeof(t)) == 0)
+            return access(t, X_OK) == 0 ? 1 : 0;
+        return access("/bin/sh", X_OK) == 0 ? 1 : 0;
+    }
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char *argv[] = { "sh", "-c", (char *)command, NULL };
+        extern char **environ;
+        macify_execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    return st;
+}
+
+/* popen/pclose — small FILE*→pid table (POSIX allows concurrent popens) */
+#define MACIFY_POPEN_SLOTS 16
+static struct { FILE *f; pid_t pid; } popen_table[MACIFY_POPEN_SLOTS];
+
+FILE *macify_popen(const char *cmd, const char *mode) __asm__("popen");
+FILE *macify_popen(const char *cmd, const char *mode) {
+    int fds[2];
+    if (pipe(fds) != 0) return NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return NULL; }
+
+    if (pid == 0) {
+        if (mode[0] == 'r') {
+            dup2(fds[1], STDOUT_FILENO);
+        } else {
+            dup2(fds[0], STDIN_FILENO);
+        }
+        close(fds[0]);
+        close(fds[1]);
+        char *argv[] = { "sh", "-c", (char *)cmd, NULL };
+        extern char **environ;
+        macify_execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+
+    FILE *f;
+    if (mode[0] == 'r') {
+        close(fds[1]);
+        f = fdopen(fds[0], "r");
+    } else {
+        close(fds[0]);
+        f = fdopen(fds[1], "w");
+    }
+    if (!f) {
+        close(mode[0] == 'r' ? fds[0] : fds[1]);
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return NULL;
+    }
+    for (int i = 0; i < MACIFY_POPEN_SLOTS; i++) {
+        if (!popen_table[i].f) { popen_table[i].f = f; popen_table[i].pid = pid; break; }
+    }
+    return f;
+}
+
+int macify_pclose(FILE *stream) __asm__("pclose");
+int macify_pclose(FILE *stream) {
+    pid_t pid = -1;
+    for (int i = 0; i < MACIFY_POPEN_SLOTS; i++) {
+        if (popen_table[i].f == stream) {
+            pid = popen_table[i].pid;
+            popen_table[i].f = NULL;
+            break;
+        }
+    }
+    if (fclose(stream) != 0 && pid < 0) return -1;
+    if (pid < 0) { errno = ECHILD; return -1; }
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    return st;
+}

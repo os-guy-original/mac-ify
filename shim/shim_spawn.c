@@ -527,8 +527,66 @@ static int resolve_in_prefix_path(const char *file, char *out, size_t out_size) 
 }
 
 /* execve — translate path, re-run through macify if Mach-O */
-int macify_execve(const char *path, char *const argv[], char *const envp[]) __asm__("execve");
-int macify_execve(const char *path, char *const argv[], char *const envp[]) {
+/* Build child envp for exec redirects. Callers may pass a stripped
+ * environment (Homebrew's wrapper runs `/usr/bin/env -i`), but the new
+ * macify instance still needs its prefix and shim search path to boot.
+ * Returned strings are leaked on successful exec by design. */
+static char **macify_build_child_envp(char *const envp[], const char *macify_bin) {
+    int n = 0;
+    while (envp && envp[n]) n++;
+    char **out = calloc((size_t)(n + 3), sizeof(char *));
+    if (!out) return NULL;
+    int m = 0, has_prefix = 0, has_ldlp = 0, has_home = 0;
+    const char *prefix_val = NULL;
+    for (int i = 0; i < n; i++) {
+        out[m++] = (char *)envp[i];
+        if (!strncmp(envp[i], "MACIFY_PREFIX=", 14)) { has_prefix = 1; prefix_val = envp[i] + 14; }
+        else if (!strncmp(envp[i], "LD_LIBRARY_PATH=", 16)) has_ldlp = 1;
+        else if (!strncmp(envp[i], "HOME=", 5)) has_home = 1;
+    }
+    if (!has_prefix) {
+        extern const char *macify_get_prefix(void);
+        prefix_val = macify_get_prefix();
+        if (prefix_val && prefix_val[0]) {
+            char *e = malloc(strlen(prefix_val) + 16);
+            if (e) { sprintf(e, "MACIFY_PREFIX=%s", prefix_val); out[m++] = e; }
+        }
+    }
+    /* macOS binaries (bash included) exit silently without HOME; derive
+     * it from the prefix root (~/.macify -> ~). */
+    if (!has_home && prefix_val && prefix_val[0]) {
+        char hbuf[4096];
+        size_t plen = strlen(prefix_val);
+        const char *suf = "/.macify";
+        size_t slen = strlen(suf);
+        if (plen > slen && strcmp(prefix_val + plen - slen, suf) == 0)
+            snprintf(hbuf, sizeof(hbuf), "%.*s", (int)(plen - slen), prefix_val);
+        else
+            snprintf(hbuf, sizeof(hbuf), "%s", prefix_val);
+        if (hbuf[0] && strcmp(hbuf, "/") != 0) {
+            char *e = malloc(strlen(hbuf) + 7);
+            if (e) { sprintf(e, "HOME=%s", hbuf); out[m++] = e; }
+        }
+    }
+    if (!has_ldlp && macify_bin) {
+        char dir[4096];
+        strncpy(dir, macify_bin, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = '\0';
+        char *slash = strrchr(dir, '/');
+        if (slash) {
+            *slash = '\0';
+            char *e = malloc(strlen(dir) + 17);
+            if (e) { sprintf(e, "LD_LIBRARY_PATH=%s", dir); out[m++] = e; }
+        }
+    }
+    out[m] = NULL;
+    return out;
+}
+
+__attribute__((visibility("hidden")))
+int macify_do_execve(const char *path, char *const argv[], char *const envp[])
+        __asm__("macify_do_execve");
+int macify_do_execve(const char *path, char *const argv[], char *const envp[]) {
     static int (*real_execve)(const char *, char *const [], char *const []) = NULL;
     if (!real_execve) real_execve = macify_elf_lookup("execve");
 
@@ -553,7 +611,10 @@ int macify_execve(const char *path, char *const argv[], char *const envp[]) {
         if (macify_bin) {
             char **new_argv = build_macify_argv(eff_path, argv);
             if (new_argv) {
-                int ret = real_execve ? real_execve(macify_bin, new_argv, envp) : -1;
+                char **child_envp = macify_build_child_envp(envp, macify_bin);
+                int ret = real_execve && child_envp
+                    ? real_execve(macify_bin, new_argv, child_envp) : -1;
+                (void)child_envp;
                 free(new_argv);
                 return ret;
             }
@@ -565,8 +626,10 @@ int macify_execve(const char *path, char *const argv[], char *const envp[]) {
 }
 
 /* execvpe — PATH search + translate + re-run through macify if Mach-O */
-int macify_execvp(const char *file, char *const argv[], char *const envp[]) __asm__("execvpe");
-int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
+__attribute__((visibility("hidden")))
+int macify_do_execvp(const char *file, char *const argv[], char *const envp[])
+        __asm__("macify_do_execvp");
+int macify_do_execvp(const char *file, char *const argv[], char *const envp[]) {
     if (!file) { errno = EFAULT; return -1; }
 
     /* Resolve file via PATH search in prefix */
@@ -594,7 +657,10 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
                     if (slash) *slash = '\0';
                     setenv("LD_LIBRARY_PATH", libpath, 1);
                 }
-                int ret = real_execve ? real_execve(macify_bin, new_argv, envp) : -1;
+                char **child_envp = macify_build_child_envp(envp, macify_bin);
+                int ret = real_execve && child_envp
+                    ? real_execve(macify_bin, new_argv, child_envp) : -1;
+                (void)child_envp;
                 free(new_argv);
                 return ret;
             }
@@ -608,8 +674,14 @@ int macify_execvp(const char *file, char *const argv[], char *const envp[]) {
 }
 
 /* execvp — same as execvpe but uses environ */
-int macify_execvp2(const char *file, char *const argv[]) __asm__("execvp");
-int macify_execvp2(const char *file, char *const argv[]) {
+int macify_hook_execvpe(const char *file, char *const argv[], char *const envp[])
+        __asm__("execvpe");
+int macify_hook_execvpe(const char *file, char *const argv[], char *const envp[]) {
+    return macify_do_execvp(file, argv, envp);
+}
+
+int macify_hook_execvp(const char *file, char *const argv[]) __asm__("execvp");
+int macify_hook_execvp(const char *file, char *const argv[]) {
     extern char **environ;
-    return macify_execvp(file, argv, environ);
+    return macify_do_execvp(file, argv, environ);
 }

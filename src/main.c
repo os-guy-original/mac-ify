@@ -523,7 +523,14 @@ int main(int argc, char **argv, char **envp) {
      * before ANY dylib's GOT is resolved. */
     {
         void *shim_h = dlopen(macify_shim_path(), RTLD_NOW);
-        if (!shim_h) shim_h = dlopen("libmacify_shim.so", RTLD_NOW);
+        if (!shim_h) {
+            if (g_verbose)
+                fprintf(stderr, "macify: shim dlopen(%s) failed: %s\n",
+                        macify_shim_path(), dlerror());
+            shim_h = dlopen("libmacify_shim.so", RTLD_NOW);
+            if (!shim_h && g_verbose)
+                fprintf(stderr, "macify: shim dlopen(bare) failed: %s\n", dlerror());
+        }
         void *libc_h = dlopen("libc.so.6", RTLD_NOW | RTLD_GLOBAL);
         void *libm_h = dlopen("libm.so.6", RTLD_NOW | RTLD_GLOBAL);
         if (shim_h) {
@@ -1299,7 +1306,14 @@ int main(int argc, char **argv, char **envp) {
                 nlist_64 *syms = (nlist_64 *)(file_data + g_symtab_off);
                 for (uint32_t k = 0; k < n_entries; k++) {
                     uint32_t sym_idx = indirect[start_idx + k];
-                    if (sym_idx & 0x80000000) continue;
+                    if (sym_idx & 0x80000000) {
+                        if (g_verbose)
+                            fprintf(stderr,
+                                    "macify: INDIRECT-FLAGGED %s.%s[%u] flags=%#x val=%#lx\n",
+                                    s->segname, s->sectname, k, sym_idx,
+                                    (unsigned long)*(uint64_t *)(uintptr_t)(s->addr + k * 8));
+                        continue;
+                    }
                     if (sym_idx >= g_symtab_nsyms) continue;
                     nlist_64 *nl = &syms[sym_idx];
                     if (nl->n_strx >= g_strtab_size) continue;
@@ -1310,6 +1324,7 @@ int main(int argc, char **argv, char **envp) {
                         *(uint64_t *)(uintptr_t)(s->addr + k * 8) = (uint64_t)(uintptr_t)addr;
                         /* Debug: verify critical symbols */
                         if (g_verbose && (strcmp(name, "sigprocmask") == 0 || strcmp(name, "fork") == 0 || strcmp(name, "write") == 0 || strcmp(name, "waitpid") == 0 || strcmp(name, "vfork") == 0 || strcmp(name, "fread") == 0 || strcmp(name, "fgetc") == 0 || strcmp(name, "fputc") == 0 || strcmp(name, "fwrite") == 0 || strcmp(name, "ferror") == 0 || strcmp(name, "feof") == 0 || strcmp(name, "clearerr") == 0 || strcmp(name, "putc_unlocked") == 0 || strcmp(name, "environ") == 0 || strcmp(name, "_NSGetEnviron") == 0 || strcmp(name, "__environ") == 0 || strcmp(name, "fdopen") == 0 || strcmp(name, "fopen") == 0 || strcmp(name, "open") == 0 || strcmp(name, "close") == 0 || strcmp(name, "fclose") == 0
+                            || strcmp(name, "execvp") == 0 || strcmp(name, "execve") == 0
                             || strstr(name, "stat$INODE64") || strstr(name, "lstat$INODE64") || strstr(name, "fstat$INODE64") || strstr(name, "fstatat$INODE64") || strstr(name, "readdir$INODE64") || strstr(name, "opendir") || strcmp(name, "exit") == 0 || strcmp(name, "_exit") == 0 || strcmp(name, "atexit") == 0))
                             fprintf(stderr, "macify: GOT %s at %p = 0x%lx\n", name,
                                     (void*)(uintptr_t)(s->addr + k * 8),
@@ -1361,6 +1376,47 @@ int main(int argc, char **argv, char **envp) {
                             fprintf(stderr, "macify: fixed environ GOT at %p = &environ (%p)\n",
                                     (void*)(uintptr_t)(s->addr + k * 8), (void*)&environ);
                     }
+                }
+            }
+        }
+    }
+
+    /* Final exec-family enforcement: dladdr-sweep every pointer slot in
+     * __got/__la_symbol_ptr sections. Symbol-table-driven passes miss
+     * duplicate slots (flagged indirect entries, extra copies), which let
+     * macOS binaries reach glibc's exec family directly and escape prefix
+     * isolation via raw kernel syscalls (observed with Homebrew's
+     * /usr/bin/env chain: a second unpatched execvp stub slot). dladdr on
+     * the CURRENT value identifies the target regardless of table state. */
+    if (g_ndylibs > 0 && g_dylibs[0].handle) {
+        static const char *const exec_syms[] = {
+            "execve", "execve$UNIX2003", "execvp", "execvpe", "execv",
+            "execl", "execle", "execlp",
+            "posix_spawn", "posix_spawnp", "system", "popen", NULL
+        };
+        for (int si = 0; si < g_nsections; si++) {
+            loaded_section *s = &g_sections[si];
+            uint32_t sec_type = s->flags & 0xff;
+            /* Sweep EVERY section: escaping exec pointers have been found in
+             * plain __data (type 0), not just __got/__la_symbol_ptr. */
+            (void)sec_type;
+            if (!s->size || s->size % 8) continue;
+            uint64_t n_entries = s->size / 8;
+            for (uint64_t k = 0; k < n_entries; k++) {
+                uint64_t *slot = (uint64_t *)(uintptr_t)(s->addr + k * 8);
+                void *cur = (void *)(uintptr_t)*slot;
+                Dl_info di;
+                if (!dladdr(cur, &di) || !di.dli_sname) continue;
+                for (int ei = 0; exec_syms[ei]; ei++) {
+                    if (strcmp(di.dli_sname, exec_syms[ei]) != 0) continue;
+                    void *shim_addr = dlsym(g_dylibs[0].handle, di.dli_sname);
+                    if (!shim_addr || cur == shim_addr) break;
+                    if (getenv("MACIFY_TRACE_FIXUPS"))
+                        fprintf(stderr,
+                                "macify: exec-enforce %s slot=%p was=%s -> shim\n",
+                                di.dli_sname, (void *)slot, di.dli_sname);
+                    *slot = (uint64_t)(uintptr_t)shim_addr;
+                    break;
                 }
             }
         }
