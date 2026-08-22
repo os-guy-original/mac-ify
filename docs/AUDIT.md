@@ -152,3 +152,15 @@ setup-homebrew script.
 Skimmed/not exhaustively read: shim_mach.c internals, objc_compat.c,
 cf.c, sysctl.c, unwind.c, glob.c details, macos_stdio.c details,
 libintl.c, watchog.c, tests/real_functional.sh.
+
+## Open issue: brew chain crashes under pure mode ("double free or corruption")
+- Repro: macify bash -c 'cd /usr/local && bin/brew --version'
+- Chain now fully Mach-O (shebang fix); abort happens inside glibc
+  regexec called from a Mach-O frame (bash pattern matching in brew.sh).
+- glibc regex_t=64B vs macOS ~72B; layouts differ. Suspect: bash compiled
+  regcomp/regexec against macOS ABI assumptions OR heap already corrupted
+  earlier by a struct-layout translation gap. Needs dedicated debug session:
+  run brew.sh under MALLOC_CHECK_ + catch first corrupting write with
+  watchpoints; check which regex call site in bash triggers.
+- NOT caused by audit commits 30efd22..b3cf042: crash reproduces at the
+  shebang-fix commit too.
