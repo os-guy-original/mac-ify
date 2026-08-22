@@ -8,6 +8,11 @@ macOS uses BSD syscall numbers (with 0x2000000 prefix for UNIX syscalls).
 Linux uses different numbers. The loader patches `mov eax, <bsd_nr>` +
 `syscall` instructions in the binary's __TEXT segment at load time.
 
+All BSD numbers in `src/syscall/syscall_table.c` are verified against
+xnu's `bsd/kern/syscalls.master` — see
+[`docs/xnu/README.md`](xnu/README.md) for the upstream sources and the
+misroutes they settled.
+
 ### Fast Path (patched at load)
 
 Syscalls with no argument translation are patched inline:

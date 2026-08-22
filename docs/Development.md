@@ -6,29 +6,72 @@
 make            # Build everything (shim + loader + test binaries)
 make clean      # Remove all build artifacts
 make test       # Run unit tests
-make shell      # Run interactive macOS bash
+make test-real  # Regression harness over fetched real macOS binaries
+make test-smoke # Real-binary --version smoke tests
+make shell      # Interactive macOS bash (same as: macify shell)
 make install    # Install to /usr/local (or PREFIX=...)
 make uninstall  # Remove installed files
 ```
+
+Object files compile into `build/obj/{src,shim}` rather than the source
+trees. Strict and sanitizer builds compose via two knobs:
+
+```
+make WERROR=-Werror                                       # warnings are errors
+make SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+make asan       # full clean rebuild with both of the above
+```
+
+## The macify CLI
+
+`scripts/macify` is the single front door; it works from the source
+tree and from an installed prefix:
+
+```
+macify <binary> [args...]    run a macOS binary
+macify shell [command]       interactive macOS bash inside the prefix
+macify init                  initialize/repair the prefix
+macify doctor                environment & prefix health check
+macify debug <binary> [...]  verbose diagnostics for issue reports
+```
+
+Global options: `--prefix <dir>`, `-v/--verbose`. `LD_LIBRARY_PATH` is
+intentionally not set anywhere — the loader locates the shim next to
+itself via `/proc/self/exe`; exporting it has caused futex deadlocks on
+some systems.
 
 ## Testing macOS Binaries
 
 ### Non-interactive
 
 ```
-macify-shell 'echo hello | sort | wc -l'
+macify shell 'echo hello | sort | wc -l'
 ```
+
+(`scripts/macify-shell '...'` still works as a compatibility wrapper.)
 
 ### Interactive
 
 ```
-macify-shell
+macify shell
 ```
+
+Line editing is disabled by default (`--noediting`) for stability;
+opt in with `MACIFY_USE_READLINE=1`.
+
+### Health check
+
+```
+macify doctor
+```
+
+Verifies shim presence, prefix state, macOS bash, and runs a live
+functional probe through prefix bash.
 
 ### Debug Mode
 
 ```
-macify-debug ~/.macify/usr/bin/awk 'BEGIN {print "test"}' 2>report.txt
+macify debug ~/.macify/usr/bin/awk 'BEGIN {print "test"}' 2>report.txt
 ```
 
 This collects all diagnostic output (verbose loader, trace flags,
@@ -48,6 +91,10 @@ Set these environment variables to enable tracing:
 | MACIFY_TRACE_EXIT     | exit, _exit calls                       |
 | MACIFY_TRACE_RECOVERY | Crash handler recovery decisions        |
 | MACIFY_TRACE_LOCALE   | setlocale, locale calls                 |
+| MACIFY_TRACE_SIGILL   | Slow-path syscall faults                |
+| MACIFY_TRACE_FIXUPS   | Chained fixup / bind processing         |
+| MACIFY_TRACE_PTHREAD  | pthread_create calls through the shim   |
+| MACIFY_TRACE_MUTEX    | Interposed mutex lock/unlock            |
 | MACIFY_SHIM_DEBUG     | Shim base address                       |
 | MACIFY_VERIFY_HANDLER | Signal handler installation verification|
 
@@ -58,6 +105,8 @@ Set these environment variables to enable tracing:
 | MACIFY_NO_FORK | Disable fork() (sort hangs in child process)|
 | MACIFY_PREFIX  | Custom prefix directory (default ~/.macify) |
 | MACIFY_BINARY  | Path to macify loader (set by wrapper)      |
+| MACIFY_USE_READLINE=1 | Enable readline in interactive shell (libedit crashes mid-session otherwise) |
+| MACIFY_LENIENT_SYSCALLS=1 | Return ENOSYS on unimplemented syscalls instead of exiting |
 
 ## Code Layout
 
@@ -86,8 +135,8 @@ shim/             Shim (shared library)
   pthread/        pthread overrides
 
 scripts/          User-facing scripts
-  macify          Wrapper script
-  macify-shell    Interactive shell launcher
+  macify          Front-door dispatcher (run/shell/init/doctor/debug)
+  macify-shell    Compatibility wrapper (forwards to: macify shell)
   macify-debug    Diagnostic tool
   macify-init     Prefix initializer
   macify-setup-rootfs    Install macOS binaries into prefix
@@ -97,11 +146,15 @@ scripts/          User-facing scripts
 
 tests/            Test suite
   run_tests.py    Synthesized Mach-O unit tests (runner)
+  real_regression.py  Real-binary regression harness with output assertions
   real_smoke.sh  Real-binary --version smoke tests
   real_functional.sh  Real-binary comprehensive functional tests
   binaries/       Generated Mach-O test binaries (built by gen_macho.py)
   real/           Downloaded macOS binaries for integration tests (fetched on demand)
 ```
+
+Build objects live under `build/obj/{src,shim}`; final artifacts are
+`build/macify` and `build/libmacify_shim.so`.
 
 ## Adding a New Translation
 
@@ -114,12 +167,13 @@ tests/            Test suite
 
 ## Prefix Setup
 
-First-time setup is automatic when running `macify-shell`. It:
+First-time setup is automatic when starting a shell. It:
 1. Creates `~/.macify/` directory structure
 2. Downloads macOS bash from Homebrew
 3. Downloads dylib dependencies (readline, ncurses, gettext)
 4. Copies macOS coreutils from `tests/real/` into the prefix
 5. Creates config files (/etc/shells, etc.)
 
-To manually set up: `bash scripts/macify-setup-rootfs`
+To initialize manually: `macify init` (or `bash scripts/macify-setup-rootfs`)
 To fetch test binaries: `bash scripts/fetch_binaries.sh`
+To verify everything:  `macify doctor`

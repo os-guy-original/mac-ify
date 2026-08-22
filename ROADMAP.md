@@ -30,6 +30,16 @@ Run real macOS x86_64 binaries on Linux. No emulation, no framework translation 
 - Full FS path translation (fopen, mkdir, unlink, rename, *at functions)
 - Wine-like prefix (~/.macify/) with macOS filesystem structure
 - macify-shell (like `wine cmd`) — interactive shell with auto Mach-O detection
+- Syscall table verified against xnu syscalls.master (fixed phantom
+  modern block, openat→rt_sigprocmask misroute, sigaltstack flag collision)
+- Lenient mode (MACIFY_LENIENT_SYSCALLS=1) + executable macOS fcntl
+  commands (F_GETPATH, F_FULLFSYNC, advisory/NOCACHE/NOSIGPIPE no-ops)
+- macOS stdin reads for getchar_unlocked
+- Unified `macify` CLI dispatcher (run/shell/init/doctor/debug)
+- Real-binary regression harness with output assertions (make test-real)
+- ASan/UBSan build target (make asan) + WERROR/SAN build knobs
+- Fix interactive shell deadlock (macOS static-init mutex signature
+  0x32AAABA2 unrecognized by mutex conversion)
 
 ### Working binaries (150+ tested, all pass)
 
@@ -39,6 +49,10 @@ neovim (--version), comm, nl, cut, sed, strings, sort, uniq, cat, ls, and 120+ m
 
 ## Next
 
+- Restore shell line editing (libedit termios crash under full editing)
+- Investigate errno pollution breaking BSD expr numeric parsing
+- Support DNS via localhost resolvers (warp/VPN environments)
+- Map cond/rwlock static-init signature variants if observed in the wild
 - Improve interactive neovim (needs more CoreServices stubs)
 - Improve Go binary stability (rclone interactive mode)
 - Add more macOS framework stubs (Security, Kerberos)
