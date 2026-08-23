@@ -241,3 +241,42 @@ Related jail limitation: TCPServer.new(0) crashes under jail (socket
 path); Cellar portable-ruby 3.4.5 ships no json parser anywhere
 (vendor 4.0.6 is the full one — restored from ghcr blob sha256:ef0bf45e,
 verified, boots as VEND-OK 4.0.6).
+
+## [[ =~ ]] FIXED — Darwin regmatch_t ABI mismatch (9518f7c)
+
+Root cause found and fixed. Darwin regex.h: `typedef __off_t regoff_t`
+(8B on LP64) → caller regmatch_t entries are {long,long}=16 bytes;
+glibc packs {int,int} into 8. Handing bash's pmatch buffer straight to
+glibc regexec half-filled each slot; bash re-read the packed pair as
+one long and memset -(eo<<32) bytes → sysmalloc assert / SIGSEGV, 100%
+deterministic on ANY successful match. Fix: macify_regexec runs glibc
+on an intermediate buffer and widens into the caller's 16-byte-stride
+layout. Verified: os.sh version check, group captures, no-match path.
+
+brew --version now works end-to-end under the loader (non-jailed):
+prints "Homebrew >=4.3.0 (shallow or no git repository)".
+
+Also this session: shim/io/variants.c exports the $DARWIN_EXTSN /
+$INODE64 symbol aliases Homebrew-built binaries import (realpath,
+fopen, fdopen, select, getgroups + opendir family), routed through
+hidden macify_do_* forwarders; must-interpose list extended (c3b5ad4).
+
+## NEW blocker: _IO_2_1_stdout_ trashed on brew's git-config path
+
+With HOMEBREW_REPOSITORY set, brew.sh runs read-homebrew-git-config +
+set-homebrew-version-from-git (git.sh): many < redirects over .git/
+config/HEAD/refs, two successful capture-group [[ =~ ]] matches, then
+`echo > describe-cache/<hash>` after dup2(3,1). Death sequence
+(strace): dup2(3,1) → SIGSEGV si_addr=0xffffffff00010000 inside glibc
+_IO_file_overflow → write(1, 0xffffffff00010000, 1)=EFAULT → silent
+exit_group(0). At crash time EVERY pointer field of real
+_IO_2_1_stdout_ holds {lo=0x00010000, hi∈{0,-1}}; shorts at +0x10 read
+{_flags=0,_file=1} in Darwin __sFILE terms — i.e., Darwin-layout
+field writes landed on the glibc struct. Note macos_sFILE switch
+(macify_use_macos_stdio) never fires; guest macros operate directly
+on the glibc FILE with per-call _r/_w=-1 patching as mitigation.
+Baseline (pre-9518f7c) died earlier at the [[ =~ ]] bug in this same
+path, so this corruption is a pre-existing layer, newly exposed.
+Oracle consultation in flight; watchpoint via gdb follow-exec missed
+the writer (fork/exec descendants detach).
+
