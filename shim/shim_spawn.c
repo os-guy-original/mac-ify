@@ -455,13 +455,29 @@ static int is_macho_binary(const char *path) {
 static const char *get_macify_binary(void) {
     const char *mb = getenv("MACIFY_BINARY");
     if (mb && mb[0]) return mb;
-    /* Fallback: /proc/self/exe points to the current process (macify) */
+    /* Fallback: /proc/self/exe points to the current process (macify).
+     * Unavailable under jail (no procfs), and `env -i` wipes the env var,
+     * so derive the loader from the shim's own location — they install
+     * as siblings in /usr/libexec/macify. */
     static char exe_path[4096];
     ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (n > 0) {
         exe_path[n] = '\0';
         return exe_path;
     }
+    static char sibling[4096];
+    Dl_info di;
+    if (dladdr((void *)&get_macify_binary, &di) && di.dli_fname) {
+        snprintf(sibling, sizeof(sibling), "%s", di.dli_fname);
+        char *slash = strrchr(sibling, '/');
+        if (slash) {
+            snprintf(slash + 1, sizeof(sibling) - (slash + 1 - sibling),
+                     "macify");
+            if (access(sibling, X_OK) == 0) return sibling;
+        }
+    }
+    if (access("/usr/libexec/macify/macify", X_OK) == 0)
+        return "/usr/libexec/macify/macify";
     return NULL;
 }
 

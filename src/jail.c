@@ -198,6 +198,25 @@ int main(int argc, char **argv) {
 
     prepare_jail(root);
 
+    /* The prefix historically shipped dev as a symlink to the host
+     * /dev. Under chroot that absolute target loops (ELOOP on every
+     * /dev/null open), and mounting over the symlink path would shadow
+     * the HOST's /dev instead. Non-jailed runs pass /dev through
+     * untranslated anyway, so migrate it to a real directory once. */
+    {
+        char devdir[4096];
+        snprintf(devdir, sizeof(devdir), "%s/dev", root);
+        struct stat lst;
+        if (lstat(devdir, &lst) == 0 && S_ISLNK(lst.st_mode)) {
+            if (unlink(devdir) != 0 || mkdir(devdir, 0755) != 0)
+                fprintf(stderr,
+                    "macify-jail: %s symlink -> dir failed: %s\n",
+                    devdir, strerror(errno));
+        } else if (lstat(devdir, &lst) != 0 && errno == ENOENT) {
+            mkdir(devdir, 0755);
+        }
+    }
+
     uid_t uid = getuid();
     gid_t gid = getgid();
 
@@ -222,6 +241,19 @@ int main(int argc, char **argv) {
     /* Contain mounts: no propagation back to the host */
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
         die("mount --make-rprivate /");
+
+    /* Shadow prefix/dev with a tmpfs so writes to the stand-in nodes
+     * never touch disk. mknod is blocked in userns, hence regular
+     * files beneath it. */
+    {
+        char devdir[4096];
+        snprintf(devdir, sizeof(devdir), "%s/dev", root);
+        if (mount("tmpfs", devdir, "tmpfs", MS_NOSUID | MS_NODEV,
+                  "mode=755") != 0)
+            fprintf(stderr,
+                "macify-jail: tmpfs %s failed (%s) — continuing\n",
+                devdir, strerror(errno));
+    }
 
     /* Private tmp: scratch space never touches the host */
     if (mount("tmpfs", "/tmp", "tmpfs",
@@ -253,18 +285,31 @@ int main(int argc, char **argv) {
         setenv("MACIFY_JAIL_HOME", jail_home, 1);
     }
 
-    /* Device stand-ins: mknod is blocked in userns, so regular files.
-     * Writes to null grow it (trimmed each launch); zero/random reads
-     * give EOF/deterministic bytes until full dev emulation lands. */
+    /* Device stand-ins inside the dev tmpfs: regular files, since mknod
+     * is blocked in userns. null is trimmed each launch; zero is a
+     * sparse NUL file; urandom/random get fresh pseudo-random bytes. */
     {
-        const char *devnull = "/dev/null";
-        int fd = open(devnull, O_WRONLY | O_CREAT, 0666);
-        if (fd >= 0) close(fd);
-        const char *others[] = { "/dev/zero", "/dev/random",
-                                 "/dev/urandom", NULL };
-        for (int i = 0; others[i]; i++) {
-            fd = open(others[i], O_RDONLY | O_CREAT, 0666);
-            if (fd >= 0) close(fd);
+        char p[4096];
+        static unsigned char rnd[1 << 16];
+        for (size_t i = 0; i < sizeof(rnd); i += 8) {
+            uint64_t v = ((uint64_t)getpid() << 32) ^ (uintptr_t)&rnd;
+            v *= 0x9E3779B97F4A7C15ull;
+            v ^= v >> 29;
+            memcpy(rnd + i, &v, sizeof(v));
+        }
+
+        snprintf(p, sizeof(p), "%s/dev/null", root);
+        close(open(p, O_WRONLY | O_CREAT | O_TRUNC, 0666));
+
+        snprintf(p, sizeof(p), "%s/dev/zero", root);
+        int fd = open(p, O_RDWR | O_CREAT | O_TRUNC, 0666);
+        if (fd >= 0) { ftruncate(fd, sizeof(rnd)); close(fd); }
+
+        const char *rand_nodes[] = { "/urandom", "/random" };
+        for (int i = 0; i < 2; i++) {
+            snprintf(p, sizeof(p), "%s/dev%s", root, rand_nodes[i]);
+            fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd >= 0) { write(fd, rnd, sizeof(rnd)); close(fd); }
         }
     }
 
