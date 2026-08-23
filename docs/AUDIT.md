@@ -197,3 +197,24 @@ requires identifying that struct inside bash (needs source-level debug
 build of Homebrew bash or matching bash 5.3 sources) — documented as
 the next step. The shim wrapper stays: it fixes the genuine 32-vs-64
 byte regex_t overflow for every macOS binary using POSIX regex.
+
+## bash [[ =~ ]] crash — refined mechanism (deterministic)
+
+The successful-match crash is 100% reproducible (6/6 plain runs, 3/3
+under gdb) and its bad length correlates exactly with match size:
+
+  [[ abc =~ abc ]]      matched "abc" (3)  → memset len 0xFFFFFFFD_00000000
+  [[ "14.5" =~ ^[0-9.]+$ ]] matched "14.5" (4) → memset len 0xFFFFFFFC_00000000
+
+i.e. length = (uint64)(-(int32)match_len) << 32, low word always zero —
+the signature of an adjacent int32 pair {0, -match_len} read as a single
+size_t. The shim wrapper is exonerated again post-hoc: instrumented
+regexec returns correct rc/so/eo and its own malloc probes pass; the
+fatal fill starts afterwards in caller code.
+
+Next step: build Homebrew bash 5.3 from source with debug info, break on
+the failing call site (memset/memmove entry with rdx = -(len)<<32), walk
+the real frame chain, and identify which struct the {0,-match_len} pair
+belongs to. Until fixed, any brew code path executing a matching
+[[ =~ ]] in shell (utils/os.sh line 89 et al during vendor-install)
+remains blocked; non-regex brew operations are unaffected.
