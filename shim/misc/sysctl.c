@@ -437,14 +437,22 @@ int macify_uname(struct utsname *buf) {
         if (!real_uname) real_uname = macify_elf_lookup("uname");
         return real_uname ? real_uname(buf) : -1;
     }
-    memset(buf, 0, sizeof(*buf));
-    strncpy(buf->sysname, "Darwin", sizeof(buf->sysname) - 1);
+    /* Field layouts differ: glibc uses six 65-byte fields; macOS uses
+     * five _SYS_NAMELEN (256-byte) fields. The caller sized its buffer
+     * for the macOS layout, so fill at macOS offsets:
+     *   sysname@0, nodename@256, release@512, version@768, machine@1024.
+     * Writing through glibc's struct members left machine (and anything
+     * past offset 390) untouched — observed as empty `uname -m`, which
+     * cascaded into Homebrew's os.sh platform checks. */
+    memset(buf, 0, 5 * 256);
     char hostname[256] = {0};
     gethostname(hostname, sizeof(hostname) - 1);
-    strncpy(buf->nodename, hostname, sizeof(buf->nodename) - 1);
-    strncpy(buf->release, "23.5.0", sizeof(buf->release) - 1);
-    strncpy(buf->version, "Darwin Kernel Version 23.5.0: macOS 14.5",
-            sizeof(buf->version) - 1);
-    strncpy(buf->machine, "x86_64", sizeof(buf->machine) - 1);
+    memcpy((char *)buf + 0 * 256,    "Darwin", sizeof("Darwin"));
+    memcpy((char *)buf + 1 * 256,    hostname, strlen(hostname) + 1);
+    memcpy((char *)buf + 2 * 256,    "23.5.0", sizeof("23.5.0"));
+    memcpy((char *)buf + 3 * 256,
+           "Darwin Kernel Version 23.5.0: root;xnu_11215.81.4~3/RELEASE_X86_64",
+           sizeof("Darwin Kernel Version 23.5.0: root;xnu_11215.81.4~3/RELEASE_X86_64"));
+    memcpy((char *)buf + 4 * 256,    "x86_64", sizeof("x86_64"));
     return 0;
 }
