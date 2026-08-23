@@ -222,7 +222,10 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             "execl", "execle", "execlp",
             "posix_spawn", "posix_spawnp",
             "system", "popen",
-            "regcomp", "regexec", "regfree", "regerror", NULL
+            "regcomp", "regexec", "regfree", "regerror",
+            "realpath$DARWIN_EXTSN",
+            "stat$INODE64", "lstat$INODE64", "fstat$INODE64",
+            "fstatat$INODE64", "opendir$INODE64", NULL
         };
         if (g_ndylibs > 0 && g_dylibs[0].handle) {
             for (int i = 0; interpose_syms[i]; i++) {

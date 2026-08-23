@@ -214,6 +214,9 @@ static void macify_save_read_ptr(FILE *fp);
 static void macify_restore_read_ptr(FILE *fp);
 
 FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
+__attribute__((visibility("hidden")))
+FILE *macify_do_fopen(const char *path, const char *mode)
+        __asm__("macify_do_fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = macify_elf_lookup("fopen");
@@ -282,6 +285,13 @@ FILE *macify_fopen(const char *path, const char *mode) {
         macify_save_read_ptr(fp);
     }
     return fp;
+}
+
+
+/* Hidden forwarder so $-variant aliases (fopen$DARWIN_EXTSN) reuse the
+ * translating hook without cross-TU preemption hazards. */
+FILE *macify_do_fopen(const char *path, const char *mode) {
+    return macify_fopen(path, mode);
 }
 
 int macify_msync(void *addr, size_t length, int flags) __asm__("msync");

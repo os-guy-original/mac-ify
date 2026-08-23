@@ -25,8 +25,10 @@ static void macify_untranslate_inplace(char *p) {
     }
 }
 
-char *macify_realpath(const char *path, char *resolved) __asm__("realpath");
-char *macify_realpath(const char *path, char *resolved) {
+__attribute__((visibility("hidden")))
+char *macify_do_realpath(const char *path, char *resolved)
+        __asm__("macify_do_realpath");
+char *macify_do_realpath(const char *path, char *resolved) {
     static char *(*real)(const char *, char *) = NULL;
     if (!real) real = macify_elf_lookup("realpath");
     const char *eff = path;
