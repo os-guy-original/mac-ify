@@ -832,3 +832,52 @@ void FSEventStreamStop(void) {}
 void FSEventsGetCurrentEventId(void) {}
 void FSEventsPurgeEventsForDeviceUpToEventId(void) {}
 void objc_setProperty_nonatomic(void) {}
+
+/* ── Locale/preferences stubs ────────────────────────────────────
+ * Some macOS binaries/dylibs query user locale prefs at startup.
+ * Unbound, they land on the unresolved stub whose -1 result gets
+ * dereferenced by callers (observed: CFLocaleCopyPreferredLanguages()
+ * → -1 → CFArrayGetCount(-1) → SIGSEGV inside the filesystem jail).
+ *
+ * Provide honest empties: zero-element array, NULL values, and a
+ * stable token for kCFPreferencesCurrentApplication. */
+
+static struct sc_obj macify_empty_array_obj;   /* zeros: tag invalid → count 0 */
+
+/* Build a proper tagged empty array once. */
+static const void *macify_locale_langs_array(void) {
+    static struct sc_obj arr;
+    static int init = 0;
+    if (!init) {
+        memset(&arr, 0, sizeof(arr));
+        arr.tag = SC_TAG_ARRAY;
+        arr.count = 0;
+        init = 1;
+    }
+    return &arr;
+}
+
+long macify_CFLocaleCopyPreferredLanguages(void) __asm__("CFLocaleCopyPreferredLanguages");
+long macify_CFLocaleCopyPreferredLanguages(void) {
+    /* macOS returns CFArrayRef; ours is a pointer to a tagged fake.
+     * Callers pass it back into CFArrayGetCount/GetValueAtIndex. */
+    return (long)(intptr_t)macify_locale_langs_array();
+}
+
+void *macify_CFPreferencesCopyAppValue(const void *key, const void *appID)
+        __asm__("CFPreferencesCopyAppValue");
+void *macify_CFPreferencesCopyAppValue(const void *key, const void *appID) {
+    (void)key; (void)appID;
+    return NULL;   /* "preference not set" — documented macOS outcome */
+}
+
+/* Data symbol: applications compare/copy this token. Any stable,
+ * non-NULL identity works because our CF readers tag-check. */
+static const char macify_kCFPrefsApp_tok[8] = { 0 };
+void *kCFPreferencesCurrentApplication = (void *)&macify_kCFPrefsApp_tok;
+
+const char *macify_querylocale(int category) __asm__("querylocale");
+const char *macify_querylocale(int category) {
+    (void)category;
+    return "C";
+}

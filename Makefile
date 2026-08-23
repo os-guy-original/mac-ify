@@ -6,9 +6,12 @@ BINDIR     := $(DESTDIR)$(PREFIX)/bin
 LIBDIR     := $(DESTDIR)$(PREFIX)/lib/macify
 SCRIPTSDIR := $(DESTDIR)$(PREFIX)/lib/macify/scripts
 
-.PHONY: all build test test-smoke test-functional test-real asan clean shim shell install uninstall
+.PHONY: all build jail test test-smoke test-functional test-real asan clean shim shell install uninstall
 
-all: shim build binaries
+jail:
+	$(CC) $(CFLAGS) -o build/macify-jail src/jail.c
+
+all: shim build binaries jail
 
 shim:
 	$(MAKE) -C shim

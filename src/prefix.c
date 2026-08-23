@@ -361,6 +361,14 @@ void macify_init_prefix(void) {
 int macify_translate_path(const char *path, char *out, size_t out_size) {
     if (!path || !out || out_size == 0) return -1;
 
+    /* Jail mode: the process is already chrooted into the prefix, so
+     * absolute paths are canonical — translation must be identity or
+     * every open would double-prefix. */
+    if (getenv("MACIFY_JAILED")) {
+        snprintf(out, out_size, "%s", path);
+        return 0;
+    }
+
     const char *prefix = macify_get_prefix();
     if (!prefix || macify_prefix_len == 0) return -1;
 

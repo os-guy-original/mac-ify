@@ -132,6 +132,10 @@ case "$CMD" in
         ;;
     run)
         [ $# -gt 0 ] || die "usage: macify run <binary> [args...]"
+        if [ -z "${MACIFY_NO_JAIL:-}" ] && [ -x "${APP%macify}macify-jail" ]; then
+            export MACIFY_JAIL_ROOT="$PREFIX"
+            exec "${APP%macify}macify-jail" "$APP" $VERBOSE_FLAG "$@"
+        fi
         exec "$APP" $VERBOSE_FLAG "$@"
         ;;
     doctor)
@@ -182,6 +186,10 @@ case "$CMD" in
         exit 1
         ;;
     *)
+        if [ -z "${MACIFY_NO_JAIL:-}" ] && [ -x "${APP%macify}macify-jail" ]; then
+            export MACIFY_JAIL_ROOT="$PREFIX"
+            exec "${APP%macify}macify-jail" "$APP" $VERBOSE_FLAG "$CMD" "$@"
+        fi
         exec "$APP" $VERBOSE_FLAG "$CMD" "$@"
         ;;
 esac
