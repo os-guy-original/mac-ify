@@ -7,6 +7,24 @@
 #include <termios.h>
 
 /* ── realpath ────────────────────────────────────────────────── */
+/* host→virtual back-translation: results from real libc calls carry the
+ * real prefix (/home/<u>/.macify/...). macOS binaries must see virtual
+ * paths, otherwise their validation stats fail and they discard the
+ * result (observed: ruby File.realpath / Dir.pwd returned "" because
+ * stat() could not confirm the host-form path in-view). */
+static void macify_untranslate_inplace(char *p) {
+    extern const char *macify_get_prefix(void);
+    const char *prefix = macify_get_prefix();
+    size_t plen;
+    if (!p || !prefix) return;
+    plen = strlen(prefix);
+    if (plen == 0) return;
+    if (strncmp(p, prefix, plen) == 0 && (p[plen] == '/' || p[plen] == '\0')) {
+        if (p[plen] == '\0') { p[0] = '/'; p[1] = '\0'; }
+        else memmove(p, p + plen, strlen(p + plen) + 1);
+    }
+}
+
 char *macify_realpath(const char *path, char *resolved) __asm__("realpath");
 char *macify_realpath(const char *path, char *resolved) {
     static char *(*real)(const char *, char *) = NULL;
@@ -19,14 +37,26 @@ char *macify_realpath(const char *path, char *resolved) {
         extern int macify_translate_path(const char *, char *, size_t);
         if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
     }
-    char *r = real(eff, resolved);
-    if (getenv("MACIFY_TRACE_OPEN")) {
-        char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: realpath(\"%s\") = %s errno=%d\n",
-            path ? path : "(null)", r ? r : "NULL", r ? 0 : errno);
-        (void)write(2, b, n);
+    {
+        /* Always resolve through our own buffer so we can back-translate,
+         * regardless of the caller's resolved==NULL malloc convention. */
+        static __thread char tbuf[4096];
+        char *r = real(eff, tbuf);
+        if (r) macify_untranslate_inplace(r);
+        if (getenv("MACIFY_TRACE_OPEN")) {
+            char b[6144]; int n = snprintf(b, sizeof(b),
+                "macify: realpath(\"%s\") = %s errno=%d\n",
+                path ? path : "(null)", r ? r : "NULL", r ? 0 : errno);
+            (void)write(2, b, n);
+        }
+        if (!r) return NULL;
+        if (!resolved) {
+            char *heap = strdup(r);
+            return heap;
+        }
+        snprintf(resolved, 4096, "%s", r);
+        return resolved;
     }
-    return r;
 }
 
 /* ── readlink ────────────────────────────────────────────────── */
@@ -43,6 +73,7 @@ ssize_t macify_readlink(const char *path, char *buf, size_t bufsiz) {
         if (macify_translate_path(path, tp, sizeof(tp)) == 0) eff = tp;
     }
     ssize_t r = real(eff, buf, bufsiz);
+    if (r > 0) macify_untranslate_inplace(buf);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: readlink(\"%s\") = %zd errno=%d\n",
@@ -58,6 +89,7 @@ char *macify_getcwd(char *buf, size_t size) {
     static char *(*real)(char *, size_t) = NULL;
     if (!real) real = macify_elf_lookup("getcwd");
     char *r = real(buf, size);
+    if (r) macify_untranslate_inplace(r);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
             "macify: getcwd() = %s\n", r ? r : "NULL");
