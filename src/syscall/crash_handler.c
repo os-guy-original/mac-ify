@@ -3,6 +3,17 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 
+/* Raw-flush guard: the hand-rolled flushes below read _IO_write_base/ptr
+ * straight out of glibc's stdout. If the dual-layout patching ever leaves
+ * a poisoned pair ({bufaddr,-1}), a naive diff check still passes and the
+ * write() faults (observed: EFAULT on 0xffffffff00010000 in brew.sh).
+ * Require both endpoints to be plausible userspace before writing. */
+static int macify_flush_sane(void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v > 0x10000 && (v >> 47) == 0;
+}
+
+
 /* SIGILL handler — slow path.
  * 
  * Invoked when a patched UD2 (was: syscall) executes. Translates
@@ -54,7 +65,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
             if (stdout) {
                 char **base = (char **)((char *)stdout + 0x20);
                 char **ptr = (char **)((char *)stdout + 0x28);
-                if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                    && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                     write(1, *base, *ptr - *base);
                 }
             }
@@ -81,7 +93,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         if (stdout) {
             char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
             char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
-            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                    && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                 write(1, *base, *ptr - *base);
             }
         }
@@ -151,7 +164,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                 if (stdout) {
                     char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
                     char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
-                    if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                    if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                    && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                         write(1, *base, *ptr - *base);
                     }
                 }
@@ -225,7 +239,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                 if (stdout) {
                     char **base = (char **)((char *)stdout + 0x20);
                     char **ptr = (char **)((char *)stdout + 0x28);
-                    if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                    if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                    && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                         write(1, *base, *ptr - *base);
                     }
                 }
@@ -263,7 +278,8 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
                         if (stdout) {
                             char **base = (char **)((char *)stdout + 0x20);
                             char **ptr = (char **)((char *)stdout + 0x28);
-                            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+                            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                    && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                                 write(1, *base, *ptr - *base);
                             }
                         }

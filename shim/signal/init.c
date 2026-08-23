@@ -1,4 +1,8 @@
 /* init.c — constructor, signal stack setup, crash handler installation */
+#define _GNU_SOURCE
+#include <sys/prctl.h>
+#include <dlfcn.h>
+#include <signal.h>
 #include "signal_internal.h"
 #include <sys/syscall.h>
 #include <pwd.h>
@@ -47,6 +51,15 @@ void macify_restore_rt(void) {
 
 /* Constructor to initialize the stdio pointers and signal handling. */
 __attribute__((constructor))
+static void macify_allow_ptrace(void) {
+    /* Debug aid: MACIFY_ALLOW_PTRACE=1 lets a tracer attach to any
+     * process in this tree (yama ptrace_scope=1 blocks non-children,
+     * and the brew.sh bash is a deep fork/exec descendant). */
+    if (getenv("MACIFY_ALLOW_PTRACE"))
+        prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+}
+
+__attribute__((constructor))
 static void macify_init_stdio(void) {
     /* Start with glibc's FILE structs. The macify loader will switch to
      * macOS FILE structs later (via macify_use_macos_stdio) if the binary
@@ -54,6 +67,15 @@ static void macify_init_stdio(void) {
     __stderrp = stderr;
     __stdinp = stdin;
     __stdoutp = stdout;
+
+    /* Unbuffer the standards: a guest's inline putc macro decrements _w
+     * (Darwin offset 0xc = glibc read_ptr.hi) on its fast path and writes
+     * through _p (= glibc flags). With _w <= 0 from the start, the macro
+     * always falls into __swbuf/fgetc — both interposed — and glibc fields
+     * stay coherent. Output goes per-char until the macos_sFILE facade
+     * lands; correctness over speed for now. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
 
     /* Map a zeroed page at 0xfbad2000 so that dereferencing glibc's _flags
      * (0xfbad2084 etc.) as a pointer returns 0 instead of SIGSEGV.
@@ -92,7 +114,9 @@ static void macify_init_stdio(void) {
         char *buf = mmap((void *)0x10000, 4096, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
         if (buf && buf != MAP_FAILED) {
-            setvbuf(stdout, buf, _IOLBF, 4096);
+            /* disabled for macos-stdio coherence: keep standards
+             * unbuffered so guest inline macros take interposed paths */
+            munmap(buf, 4096);
         } else {
             /* Fallback: try any low address */
             for (uintptr_t addr = 0x20000; addr < 0x10000000; addr += 0x1000) {

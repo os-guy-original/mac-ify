@@ -330,6 +330,17 @@ void px_proxy_factory_free_proxies(char **proxies) {
  * via jmp (not call). This preserves the caller's return address in
  * place, so __sigsetjmp saves the REAL caller, not the shim. */
 #include <setjmp.h>
+
+/* Raw-flush guard: the hand-rolled flushes below read _IO_write_base/ptr
+ * straight out of glibc's stdout. If the dual-layout patching ever leaves
+ * a poisoned pair ({bufaddr,-1}), a naive diff check still passes and the
+ * write() faults (observed: EFAULT on 0xffffffff00010000 in brew.sh).
+ * Require both endpoints to be plausible userspace before writing. */
+static int macify_flush_sane(void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v > 0x10000 && (v >> 47) == 0;
+}
+
 #undef sigsetjmp
 extern int __sigsetjmp(sigjmp_buf env, int savesigs);
 __attribute__((naked))
@@ -653,7 +664,8 @@ void exit(int status) {
         if (stdout) {
             char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
             char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
-            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                 syscall(1, 1, *base, *ptr - *base);
             }
         }
@@ -677,7 +689,8 @@ void _exit(int status) {
     if (stdout) {
         char **base = (char **)((char *)stdout + 0x20);  /* _IO_write_base */
         char **ptr = (char **)((char *)stdout + 0x28);  /* _IO_write_ptr */
-        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+        if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
             syscall(1, 1, *base, *ptr - *base);
         }
     }

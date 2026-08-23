@@ -6,6 +6,8 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <poll.h>
+static int macify_flush_sane(void *p);
+
 
 int macify_wait4(int pid, int *status, int options, void *rusage) __asm__("wait4");
 int macify_wait4(int pid, int *status, int options, void *rusage) {
@@ -370,6 +372,17 @@ static struct {
     int valid;
 } macify_saved_fps[MACIFY_MAX_SAVED_FPS];
 
+/* The three standard streams stay glibc-owned end to end: glibc's own
+ * overflow/underflow/seekoff juggling reads those fields constantly, so a
+ * poisoned qword there spreads through every slot (observed: brew.sh died
+ * in _IO_file_overflow on write_base = {bufaddr,-1}). Inline putc macros
+ * reach stdout through __swbuf -> real fputc instead; the -1 patch is
+ * redundant for these and only harmful. */
+static int macify_is_glibc_standard(FILE *fp) {
+    extern FILE *stdout, *stderr, *stdin;
+    return fp == stdout || fp == stderr || fp == stdin;
+}
+
 static void macify_save_read_ptr(FILE *fp) {
     for (int i = 0; i < MACIFY_MAX_SAVED_FPS; i++) {
         if (macify_saved_fps[i].fp == fp && macify_saved_fps[i].valid) {
@@ -400,8 +413,20 @@ static void macify_save_read_ptr(FILE *fp) {
 static void macify_fix_read_end(FILE *fp) {
     char **read_ptr = (char **)((char *)fp + 8);
     char **read_end = (char **)((char *)fp + 0x10);
-    if (*read_end < *read_ptr || *read_end - *read_ptr > 65536) {
-        *read_end = *read_ptr;
+    if (((intptr_t)*read_ptr) >> 32 != 0
+        && ((intptr_t)*read_ptr) >> 32 != -1) {
+        /* read_ptr itself is sane userspace; old behavior applies. */
+        if (*read_end < *read_ptr || *read_end - *read_ptr > 65536)
+            *read_end = *read_ptr;
+        return;
+    }
+    /* read_ptr carries the -1 poison in its high dword — copying it into
+     * read_end would propagate the corruption. Reset both to the buffer
+     * so glibc refills from scratch. */
+    char **buf_base = (char **)((char *)fp + 0x38);
+    if ((intptr_t)*buf_base > 0 && ((intptr_t)*buf_base) >> 40 == 0) {
+        *read_ptr = *buf_base;
+        *read_end = *buf_base;
     }
 }
 
@@ -461,7 +486,8 @@ int __srget(FILE *fp) {
     }
     /* Set _r = -1 to force the next getc to call __srget again.
      * SKIP this when getc is patched. */
-    if (c != EOF && is_macos && !macify_getc_patched && !macify_skip_r_patch) {
+    if (c != EOF && is_macos && !macify_getc_patched && !macify_skip_r_patch
+        && !macify_is_glibc_standard(fp)) {
         macify_save_read_ptr(fp);
         *(int *)((char *)fp + 8) = -1;
     }
@@ -497,7 +523,8 @@ int putc_unlocked(int ch, FILE *fp) {
         extern FILE *__stdoutp, *__stderrp;
         if (fp == __stdoutp || fp == __stderrp) {
     
-            if (!macify_skip_r_patch) *(int *)((char *)fp + 0x0c) = -1;
+            if (!macify_skip_r_patch && !macify_is_glibc_standard(fp))
+                *(int *)((char *)fp + 0x0c) = -1;
         }
     }
     return r;
@@ -515,7 +542,9 @@ int getc_unlocked(FILE *fp) {
     int c = real_fgetc ? real_fgetc(fp) : EOF;
     if (c != EOF) {
         macify_save_read_ptr(fp);
-        if (!macify_getc_patched && !macify_skip_r_patch) *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
+        if (!macify_getc_patched && !macify_skip_r_patch
+            && !macify_is_glibc_standard(fp))
+            *(int *)((char *)fp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(fp);
         /* skip — caller detects EOF via return value */
@@ -539,7 +568,8 @@ int putchar_unlocked(int ch) {
     int r = real_fputc ? real_fputc(ch, __stdoutp) : EOF;
     if (r != EOF) {
 
-        if (!macify_skip_r_patch) *(int *)((char *)__stdoutp + 0x0c) = -1;  /* _w = -1 */
+        if (!macify_skip_r_patch && !macify_is_glibc_standard(__stdoutp))
+            *(int *)((char *)__stdoutp + 0x0c) = -1;  /* _w = -1 */
     }
     return r;
 }
@@ -557,7 +587,9 @@ int getchar_unlocked(void) {
     int c = real_fgetc ? real_fgetc(__stdinp) : EOF;
     if (c != EOF) {
         macify_save_read_ptr(__stdinp);
-        if (!macify_getc_patched && !macify_skip_r_patch) *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
+        if (!macify_getc_patched && !macify_skip_r_patch
+            && !macify_is_glibc_standard(__stdinp))
+            *(int *)((char *)__stdinp + 8) = -1;  /* _r = -1 */
     } else {
         macify_restore_read_ptr(__stdinp);
         /* skip */
@@ -660,7 +692,8 @@ size_t macify_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
             (flags_before & 0x20) ? 1 : 0, (flags_before & 0x10) ? 1 : 0);
         (void)write(2, b, n);
     }
-    if (r > 0 && !macify_getc_patched && !macify_skip_r_patch) {
+    if (r > 0 && !macify_getc_patched && !macify_skip_r_patch
+        && !macify_is_glibc_standard(stream)) {
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
     }
@@ -689,7 +722,8 @@ int macify_fgetc(FILE *stream) {
     /* Sync EOF/ERR flags ONLY at EOF — writing to offset 0x10 corrupts
      * _IO_read_end, breaking subsequent buffer reads. */
     /* skip sync — writing to offset 0x10 corrupts _IO_read_end */
-    if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
+    if (r != EOF && !macify_getc_patched && !macify_skip_r_patch
+        && !macify_is_glibc_standard(stream)) {
         *(int *)((char *)stream + 8) = -1;
     }
     return r;
@@ -704,8 +738,8 @@ int macify_ungetc(int c, FILE *stream) {
     if (!real_ungetc) real_ungetc = macify_elf_lookup("ungetc");
     if (!macify_getc_patched) macify_restore_read_ptr(stream);
     int r = real_ungetc(c, stream);
-    if (r != EOF && !macify_getc_patched && !macify_skip_r_patch) {
-        /* Re-save and re-corrupt _r = -1 */
+    if (r != EOF && !macify_getc_patched && !macify_skip_r_patch
+        && !macify_is_glibc_standard(stream)) {
         macify_save_read_ptr(stream);
         *(int *)((char *)stream + 8) = -1;
     }
@@ -964,7 +998,7 @@ FILE *macify_fdopen(int fd, const char *mode) {
     if (fp && macify_caller_is_macos_text(__builtin_return_address(0))) {
         /* Save initial _IO_read_ptr and _IO_read_end. */
         macify_save_read_ptr(fp);
-        if (!macify_skip_r_patch) {
+        if (!macify_skip_r_patch && !macify_is_glibc_standard(fp)) {
             *(int *)((char *)fp + 8) = -1;
         }
     }
@@ -1016,6 +1050,11 @@ int macify_puts(const char *s) {
 }
 
 /* fflush — handle macOS FILE structs */
+static int macify_flush_sane(void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v > 0x10000 && (v >> 47) == 0;
+}
+
 int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
@@ -1033,7 +1072,8 @@ int macify_fflush(FILE *stream) {
         for (int i = 0; streams[i]; i++) {
             char **base = (char **)((char *)streams[i] + 0x20);  /* _IO_write_base */
             char **ptr = (char **)((char *)streams[i] + 0x28);  /* _IO_write_ptr */
-            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576) {
+            if (*ptr > *base && (size_t)(*ptr - *base) < 1048576
+                && macify_flush_sane(*base) && macify_flush_sane(*ptr)) {
                 int fd = (streams[i] == __stderrp) ? 2 : 1;
                 write(fd, *base, *ptr - *base);
                 *ptr = *base;  /* reset write pointer */
@@ -1138,6 +1178,14 @@ int macify_system(const char *command) {
 /* popen/pclose — FILE*→pid registry. Homebrew runs concurrent-ruby thread
  * pools that popen concurrently, so the table is mutex-guarded and grows. */
 #include <pthread.h>
+
+/* Raw-flush guard: the hand-rolled flushes below read _IO_write_base/ptr
+ * straight out of glibc's stdout. If the dual-layout patching ever leaves
+ * a poisoned pair ({bufaddr,-1}), a naive diff check still passes and the
+ * write() faults (observed: EFAULT on 0xffffffff00010000 in brew.sh).
+ * Require both endpoints to be plausible userspace before writing. */
+
+
 static pthread_mutex_t popen_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct { FILE *f; pid_t pid; } *popen_table;
 static int popen_count, popen_cap;

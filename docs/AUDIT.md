@@ -261,22 +261,46 @@ $INODE64 symbol aliases Homebrew-built binaries import (realpath,
 fopen, fdopen, select, getgroups + opendir family), routed through
 hidden macify_do_* forwarders; must-interpose list extended (c3b5ad4).
 
-## NEW blocker: _IO_2_1_stdout_ trashed on brew's git-config path
+## NEW blocker SOLVED: stdout trashing on brew's git-config path
 
-With HOMEBREW_REPOSITORY set, brew.sh runs read-homebrew-git-config +
-set-homebrew-version-from-git (git.sh): many < redirects over .git/
-config/HEAD/refs, two successful capture-group [[ =~ ]] matches, then
-`echo > describe-cache/<hash>` after dup2(3,1). Death sequence
-(strace): dup2(3,1) → SIGSEGV si_addr=0xffffffff00010000 inside glibc
-_IO_file_overflow → write(1, 0xffffffff00010000, 1)=EFAULT → silent
-exit_group(0). At crash time EVERY pointer field of real
-_IO_2_1_stdout_ holds {lo=0x00010000, hi∈{0,-1}}; shorts at +0x10 read
-{_flags=0,_file=1} in Darwin __sFILE terms — i.e., Darwin-layout
-field writes landed on the glibc struct. Note macos_sFILE switch
-(macify_use_macos_stdio) never fires; guest macros operate directly
-on the glibc FILE with per-call _r/_w=-1 patching as mitigation.
-Baseline (pre-9518f7c) died earlier at the [[ =~ ]] bug in this same
-path, so this corruption is a pre-existing layer, newly exposed.
-Oracle consultation in flight; watchpoint via gdb follow-exec missed
-the writer (fork/exec descendants detach).
+Root cause PROVEN via hardware-watchpoint attach (yama workaround:
+shim constructor now honors MACIFY_ALLOW_PTRACE=1 → prctl
+PR_SET_PTRACER_ANY) plus elimination:
+
+1. init.c mapped stdout's glibc buffer at fixed 0x10000, so read_ptr
+   legitimately held {0x10000-ish, hi=0}.
+2. Guest bash's INLINED Darwin putc macro runs `--(fp)->_w`: on glibc
+   that decrements read_ptr.HI (offset 0xc) → {bufaddr, -1} poison.
+   Fast path then stores chars through _p (= glibc flags → absorbed by
+   the 0xfbad2000 safety page → silent output loss).
+3. Later glibc internals computed with poisoned pairs and
+   _IO_file_overflow wrote them into the write slots (watchpoint caught
+   glibc itself at overflow+168 writing {0x10000,-2}); final echo into
+   describe-cache/<hash> faulted write(1, 0xffffffff00010000).
+
+Fix (init.c): standards are now setvbuf(_IONBF) and the 0x10000
+mapping is disabled — _w starts <= 0 so inline putc always falls into
+__swbuf → interposed fputc, keeping glibc fields coherent. Cost:
+per-char writes until the macos_sFILE facade replaces the whole
+arrangement. Verified: brew --version prints banner non-jailed AND
+jailed through bin/brew wrapper; suites 16/16 unit, 27/29 smoke (+2
+pre-existing curl), 23/23 real.
+
+Hardening from Oracle review kept regardless: every -1 patch site in
+process.c now skips glibc's three standard streams; fix_read_end no
+longer propagates a poisoned read_ptr into read_end (resets both to
+buf_base instead); all hand-rolled flush sites (crash_handler.c x5,
+misc_stubs.c x2, process.c fflush(NULL)) validate pointer sanity via
+macify_flush_sane before raw write().
+
+Also learned: guest `kill -STOP $$` arrives as SIGCHLD — Darwin
+signal numbers (STOP=17) pass untranslated (Linux 17=SIGCHLD).
+Signal translation table needed eventually; worked around with a
+file-gated spin for the watchdog.
+
+Remaining for full brew: ruby realpath emptiness (brew list/search
+exec cmd/*.rb and die silently at require_relative "global"), jail
+socket crash, and long-term the macos_sFILE facade (~25 stdio exports;
+note macos_stdio.c's layout comments claim _bf@0x14/0x1c but real
+Darwin __sFILE has _bf{base@0x18,size@0x20} — fix before enabling).
 
