@@ -72,14 +72,27 @@ int macify_regexec(const void *preg, const char *string, size_t nmatch,
     if (!w || w->cookie != MACIFY_REGEX_COOKIE || !real_regexec)
         return REG_NOMATCH;
     regmatch_t *pm = (regmatch_t *)pmatch_v;
-    int rc = real_regexec(&w->real, string, nmatch, pm, eflags & 0x3);
-    if (rc == 0 && pm && nmatch > 0) {
-        /* regoff_t is int-sized on both ABIs; normalize -1 sentinels */
+    if (!pmatch_v || nmatch == 0)
+        return real_regexec(&w->real, string, nmatch, NULL, eflags & 0x3);
+    /*
+     * ABI translation: Darwin regoff_t is __off_t (8B on LP64) so the
+     * caller's regmatch_t entries are 16 bytes {long,long}; glibc packs
+     * two int32 into 8. Passing the caller's buffer to glibc half-fills
+     * each slot — bash then reads the packed pair as one long and
+     * memsets -(eo<<32) bytes ([[ =~ ]] heap corruption). Run glibc on
+     * our own buffer and widen: entry i at [i*16], rm_so +0, rm_eo +8.
+     */
+    regmatch_t *tmp = (regmatch_t *)calloc(nmatch, sizeof(regmatch_t));
+    if (!tmp) return REG_NOMATCH;
+    int rc = real_regexec(&w->real, string, nmatch, tmp, eflags & 0x3);
+    if (rc == 0) {
+        long *out = (long *)pm;
         for (size_t i = 0; i < nmatch; i++) {
-            if (pm[i].rm_so < -1) pm[i].rm_so = -1;
-            if (pm[i].rm_eo < -1) pm[i].rm_eo = -1;
+            out[2 * i]     = (long)tmp[i].rm_so;
+            out[2 * i + 1] = (long)tmp[i].rm_eo;
         }
     }
+    free(tmp);
     return rc;
 }
 
