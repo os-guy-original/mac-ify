@@ -218,3 +218,26 @@ the real frame chain, and identify which struct the {0,-match_len} pair
 belongs to. Until fixed, any brew code path executing a matching
 [[ =~ ]] in shell (utils/os.sh line 89 et al during vendor-install)
 remains blocked; non-regex brew operations are unaffected.
+
+## ruby realpath/getcwd emptiness (blocks direct brew.rb invocation)
+
+State after back-translation fix (31deb10): C-level hooks VERIFIED
+returning correct virtual paths via MACIFY_TRACE_OPEN — e.g.
+realpath("/usr/local/Homebrew/Library/Homebrew/dirtest.rb") returned
+the virtual path, getcwd returned "/usr/local" when cwd was in-prefix.
+Yet Ruby still observes "" for File.realpath and Dir.pwd (__dir__
+degrades to ".", so brew.rb dies at require_relative "global").
+
+The transformation happens inside Ruby between the libc return and the
+Ruby value — likely a dev/inode validation pass whose stat view differs
+under the loader. Isolation facts collected: File.exist?(host-form)=true,
+File.expand_path works, marker-probe proved ruby does NOT route through
+the interposed symbol for File.realpath (marker returned untouched).
+Next session: determine ruby's actual resolution path (pure-Ruby walk?
+direct syscall? alternate symbol), starting from a Homebrew-matching
+debug build of the vendored ruby.
+
+Related jail limitation: TCPServer.new(0) crashes under jail (socket
+path); Cellar portable-ruby 3.4.5 ships no json parser anywhere
+(vendor 4.0.6 is the full one — restored from ghcr blob sha256:ef0bf45e,
+verified, boots as VEND-OK 4.0.6).
