@@ -1,6 +1,53 @@
 /* string.c — BSD string functions and fortified variants */
 #include "../shim.h"
 
+/* ── qsort_r / qsort_b: Darwin ABI adapters ──────────────────────────
+ * GROUND TRUTH (Apple libc): macOS qsort_r is BSD-style:
+ *     void qsort_r(void *base, size_t nel, size_t width,
+ *                  void *thunk,
+ *                  int (*compar)(void *thunk, const void *a, const void *b));
+ * glibc's qsort_r is a DIFFERENT argument order and compar shape:
+ *     void qsort_r(void *base, size_t nel, size_t width,
+ *                  int (*compar)(const void *a, const void *b, void *arg),
+ *                  void *arg);
+ * A Darwin-built guest's compar pointer lands in glibc's `arg` slot and
+ * glibc's arg lands in the guest's `thunk` slot; glibc then CALLS the
+ * guest's compar with (a, b, thunk) — i.e. with the thunk as its FIRST
+ * argument. Observed: rubygems boot SIGSEGVs inside glibc qsort_r
+ * (gdb backtrace frames 7-9: qsort_r called from guest text) while
+ * sorting during `require "rubygems"` — the trampoline jumps to a
+ * bogus address derived from the thunk. This breaks EVERY Darwin
+ * binary that sorts with a context, not just ruby. */
+struct macify_qsort_r_ctx {
+    void *thunk;
+    int (*compar)(void *, const void *, const void *);
+};
+
+static int macify_qsort_r_cmp(const void *a, const void *b, void *arg) {
+    struct macify_qsort_r_ctx *ctx = (struct macify_qsort_r_ctx *)arg;
+    return ctx->compar(ctx->thunk, a, b);
+}
+
+void macify_qsort_r(void *base, size_t nel, size_t width, void *thunk,
+                    int (*compar)(void *, const void *, const void *))
+        __asm__("qsort_r");
+void macify_qsort_r(void *base, size_t nel, size_t width, void *thunk,
+                    int (*compar)(void *, const void *, const void *)) {
+    struct macify_qsort_r_ctx ctx = { thunk, compar };
+    qsort_r(base, nel, width, macify_qsort_r_cmp, &ctx);
+}
+
+/* macOS qsort_b takes a block (compare function with no separate thunk);
+ * glibc has no equivalent. Map it onto qsort with the block as the
+ * comparator — signature-compatible (both take two const void*). */
+void macify_qsort_b(void *base, size_t nel, size_t width,
+                    int (*compar)(const void *, const void *))
+        __asm__("qsort_b");
+void macify_qsort_b(void *base, size_t nel, size_t width,
+                    int (*compar)(const void *, const void *)) {
+    qsort(base, nel, width, compar);
+}
+
 /* _memset_pattern16 — macOS-specific memset with 16-byte pattern. */
 
 void memset_pattern16(void *dst, const void *pattern, size_t len) {
