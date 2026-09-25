@@ -734,20 +734,27 @@ int macify_accept(int sockfd, void *addr, socklen_t *addrlen) {
     return ret;
 }
 
-/* getsockname / getpeername — convert Linux sockaddr to macOS format.
- * Linux sockaddr: [sa_family(2)] [data(14)]
- * macOS sockaddr:  [sa_len(1)] [sa_family(1)] [data(14)]
- * curl reads sa_family from offset 1 (macOS layout), so we must shift. */
+/* getsockname / getpeername / accept / recvfrom — convert a Linux sockaddr
+ * (filled by the kernel) to macOS layout.
+ *
+ * Linux sockaddr: [sa_family(2)] [port(2)] [addr(4)] ...
+ * macOS sockaddr: [sa_len(1)] [sa_family(1)] [port(2)] [addr(4)] ...
+ *
+ * The Linux 2-byte family occupies the same two bytes as macOS's
+ * sa_len + sa_family, so port/flowinfo/addr/scope keep their offsets.
+ * Only bytes 0-1 change; the payload must NOT be shifted. Shifting the
+ * payload by one byte (as this function used to) turns sin_port 0x0035
+ * into 0x0000 and 127.0.0.1 into 53.127.0.0, which makes callers that
+ * validate the peer (e.g. c-ares matching a DNS reply's source against
+ * the server it queried) reject every reply. */
 void linux_to_macos_sockaddr(void *addr, socklen_t addrlen) {
     if (!addr || addrlen < 2) return;
     uint8_t *p = (uint8_t *)addr;
     uint8_t linux_family = p[0];  /* Linux: family is at offset 0 (low byte) */
     uint8_t macos_family = linux_family;
     if (linux_family == LINUX_AF_INET6) macos_family = MACOS_AF_INET6;
-    /* Shift: move bytes 1..N right by 1, put sa_len at 0, sa_family at 1 */
-    memmove(p + 1, p, addrlen - 1);
     p[0] = (uint8_t)addrlen;  /* sa_len */
-    p[1] = macos_family;     /* sa_family */
+    p[1] = macos_family;      /* sa_family */
 }
 
 int macify_getsockname(int sockfd, void *addr, socklen_t *addrlen) __asm__("getsockname");
