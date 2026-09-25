@@ -667,13 +667,47 @@ being correctly resolved (`378 resolved, 0 unresolved`), `__swbuf`/`putchar`
 /`fputc` all bound to the shim, and `echo -e`/`printf` (which do not use
 this path) working.
 
-### Next step
+### The branch, resolved (register trace)
 
-Find who is clobbering `r13` (and `rbx`) between bash setting them and
-this code reading them. The putc patch and the stdio shims are the only
-things that rewrite guest register state, and the patch has been excluded
-by output comparison but **not** excluded as a register-value disturbance
-— a patch that is output-neutral can still corrupt a callee-saved
-register that a later branch depends on. The concrete experiment is to
-break at `0x1000696ba` (`test r13d,r13d`) and watch `r13` backwards to find
-the last instruction that wrote it.
+Single-stepping the real path with `rax` visible:
+
+    s00 0x69771  jmp  -> r12=...01  rax=0x1
+    s01 0x6977f  cmp  [rbx],0      (rbx=&_terminating_signal = 0)
+    s02 0x69782  je   TAKEN        -> 0x6978b
+    s03 0x6978b
+    s04 0x69792  cmp  [rax],0      rax=0x...6eec  -> 0
+    s05 0x69795  je   TAKEN        -> 0x6979c
+    s06 0x6979c  test r13d,r13d
+    s07 0x6979f  sete al           al = 1   (r13d == 0)
+    s08 0x697a2  xor  r12b,1       r12 -> ...00
+    s09 0x697a6  or   r12b,al      r12 -> ...01      <-- re-arms the flag
+    s10 0x697a9  jne  TAKEN        -> 0x697b3, skipping 0x697ae
+    s11 0x697b3
+
+The call at `0x697ae` — the one that would emit the trailing newline — is
+never executed. The reason is line s09: `xor r12b,1` clears the flag and
+`or r12b,al` immediately sets it again, because `al` is 1 whenever
+`r13d == 0`.
+
+`r13d` is **not** the `nflag`. It is the *escape* flag: `0x100069617:
+mov r13d,1` sits inside the `-e` option handler, and the whole option
+block is skipped for a plain `echo` (the first argument does not start
+with `-`, so `0x100069585: je 0x100069655` jumps over it). Verified:
+`r13d == 0` for `echo A` **and** for `echo -n A` — which is correct,
+because `-n` is handled by a different variable entirely.
+
+So on a real macOS run the same `r13d == 0` holds and the same
+`xor`/`or` pair executes. The difference has to be in `r12` entering this
+sequence, not in `r13`. Traced: `r12` is `0x...f10` at `0x6976e` and
+`0x...f01` one instruction later, i.e. `mov r12b,0x1` has just run. The
+upper bits of `r12` (`0x65fadf00`) are loop-carried garbage, but the
+branch only reads the low byte, so that is not it either.
+
+**Where this leaves the investigation.** The control flow is fully
+mapped and the skipped call is identified, but the *reason* the flag
+ends up set is not yet explained by anything in the loader — no symbol is
+misbound, no shim function is entered, and the guest executes a
+self-consistent instruction stream. The remaining suspects are all in
+"how the guest's own data got into this state before echo ran", and the
+next step is to compare against a real macOS run of the same binary (or a
+second bash build) rather than to keep reading disassembly.
