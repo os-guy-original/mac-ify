@@ -933,11 +933,54 @@ force produced a "truncate-at-comma" sort order. It did not. The two runs
 above are identical, so the guard should be recorded as removed for the
 dangling-pointer bug, not as fixing a reproduced sort or strtold fault.
 
-Still armed, and suspect for the same reason: `src/runtime.c` calls
-`unsetenv("LC_CTYPE")` before entering the guest, with a comment claiming
-the shim re-forces `LC_CTYPE=C` afterwards. It does not, and the crash that
-motivated the unset is handled elsewhere, so this now only discards a
-user's `LC_CTYPE` for no benefit. Not yet tested either way.
+### 3b. The `unsetenv("LC_CTYPE")` is gone too
+
+`src/runtime.c` used to call `unsetenv("LC_CTYPE")` before entering the
+guest, with a comment claiming the shim re-forced `LC_CTYPE=C` afterwards.
+It did not, so the call only discarded the user's locale: a guest run with
+`LC_CTYPE=de_DE.UTF-8` and no `LC_ALL` fell back to `C`, which is how ruby
+reported `US-ASCII`. Removed.
+
+It was not protecting anything. The crash it was added for (sort under a
+UTF-8 ctype) is handled by the `0xfbad2000` page mapping and the
+`__SEOF`/`__SERR` patcher, and the same failure it supposedly prevented was
+already reachable at HEAD through `LANG`/`LC_ALL`, which were never unset:
+
+    HEAD:  LC_CTYPE=en_US.UTF-8  sort -n < file  -> rc=0
+    HEAD:  LANG=en_US.UTF-8      sort -n < file  -> rc=2  close failed
+    HEAD:  LC_ALL=en_US.UTF-8    sort -n < file  -> rc=2  close failed
+
+Removing it: `make test` 16/16, `make test-real` 23/23, 360 runs of
+`sort -n/-rn/-k` across `LC_CTYPE`/`LANG`/`LC_ALL` in `en_US.UTF-8` show no
+segfault and no hang, and ruby now reports `UTF-8` under `LC_CTYPE` alone.
+
+### 3c. The "close failed: -: Invalid argument" that exposed it
+
+The `rc=2` above was a real pre-existing defect that mounting the locale
+data made reachable. Under a multibyte `LC_CTYPE`, `sort -n` reading a
+small *regular file* on stdin failed while the same input from a pipe or a
+named file argument passed:
+
+    lseek(0, -32, SEEK_CUR)  = -1 EINVAL   <- glibc _IO_file_sync
+    lseek(0, 0, SEEK_CUR)    = 7
+    close(0)                 = 0
+    write(2, "sort_macos: close failed: -: Invalid argument")
+
+`sort` calls `fflush(stdin)` at exit. glibc's `fflush` on a readable stream
+runs `_IO_file_sync`, which seeks by the difference between `_IO_read_ptr`
+and `_IO_read_end`; the inlined getc macros leave `_IO_read_end` 32 bytes
+past `_IO_read_ptr`, so the sync seeks below the start of the file, fails,
+and returns EINVAL. `fclose` was not involved: it returned 0 in a trace
+(`macify: fclose(...) = 0`), as did the raw syscall. `macify_fflush`
+returned the EINVAL, and `sort` reported it as a close failure.
+
+Fixed in `macify_fflush` (`shim/io/process.c`): on that failure only,
+collapse the read buffer (`_IO_read_ptr = _IO_read_end`) so the sync delta
+is zero, and retry. Normal buffered reads are untouched — the repair runs
+only after glibc has already reported the stream failed. Verified:
+`rc=0` and the correct order `2 3 10` for `LC_CTYPE`/`LANG`/`LC_ALL` in
+`en_US.UTF-8` and `LC_ALL=tr_TR.UTF-8`; the `DBG` trace showed the corrupt
+`d(re-rp)=32` collapsed to `0` on retry.
 
 ### 4. Newly reachable and NOT fixed: a guest hangs when LC_MESSAGES is tr_TR
 

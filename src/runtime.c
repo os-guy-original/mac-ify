@@ -379,12 +379,13 @@ void call_main_and_exit(uint64_t entry, uint64_t stack_top) {
         }
     }
 
-    /* Clear LC_CTYPE from environment to prevent glibc from using a
-     * UTF-8 locale that causes sort -n to crash via inlined getc.
-     * glibc reads LC_* env vars at startup; clearing LC_CTYPE forces
-     * the default "C" locale. The macOS binary can still call
-     * setlocale() to set it (our shim re-forces LC_CTYPE=C after). */
-    unsetenv("LC_CTYPE");
+    /* LC_CTYPE is passed through as the user set it. It used to be cleared
+     * here, to keep glibc off a UTF-8 ctype because sort -n crashed through
+     * an inlined getc; that crash is handled by the 0xfbad2000 page mapping
+     * and the __SEOF/__SERR patcher, so clearing it only threw away the
+     * user's locale. A user with LC_CTYPE=de_DE.UTF-8 and no LC_ALL got a
+     * guest in the C locale, which is how ruby came back reporting
+     * US-ASCII. See docs/AUDIT.md, "Guest locales". */
 
     /* The asm block switches to the macOS binary's stack, calls main(),
      * then returns here. We flush stdio buffers before exiting because
