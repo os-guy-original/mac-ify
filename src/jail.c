@@ -261,6 +261,42 @@ int main(int argc, char **argv) {
         fprintf(stderr, "macify-jail: tmpfs /tmp failed (%s) — continuing\n",
                 strerror(errno));
 
+    /* The guest runs on the host's glibc, so the locale archive and the
+     * charset converters it loads are the host's data. Past the chroot
+     * those paths resolve inside the prefix, where there is no locale
+     * data at all, and setlocale() then failed for every locale except
+     * the built-in C: every guest fell back to single-byte semantics and
+     * bash warned on each start that it could not change locale. Bind the
+     * host's copies in. This is the guest's own libc reaching its own
+     * files, not a hole in the jail. */
+    {
+        static const char *libdata[] = { "/usr/lib/locale", "/usr/lib/gconv" };
+        for (size_t i = 0; i < sizeof(libdata) / sizeof(libdata[0]); i++) {
+            char dst[4096];
+            struct stat st;
+            if (stat(libdata[i], &st) != 0) continue;  /* host lacks it */
+            snprintf(dst, sizeof(dst), "%s%s", root, libdata[i]);
+            if (stat(dst, &st) != 0 && mkdir(dst, 0755) != 0) {
+                fprintf(stderr, "macify-jail: mkdir %s failed (%s)\n",
+                        dst, strerror(errno));
+                continue;
+            }
+            if (mount(libdata[i], dst, NULL, MS_BIND | MS_REC, NULL) != 0) {
+                fprintf(stderr,
+                    "macify-jail: bind %s failed (%s) — continuing\n",
+                    libdata[i], strerror(errno));
+                continue;
+            }
+            /* Read-only: the guest has no reason to write locale data,
+             * and a jail must not hand it a writable host directory. */
+            if (mount(NULL, dst, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY,
+                      NULL) != 0)
+                fprintf(stderr,
+                    "macify-jail: remount %s read-only failed (%s) — continuing\n",
+                    dst, strerror(errno));
+        }
+    }
+
     /* Self-referential alias: macOS binaries bake their install prefix
      * ("/home/<user>/.macify") into load paths at build time. Inside the
      * jail that path only exists if the root aliases itself there. */
