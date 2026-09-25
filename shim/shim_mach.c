@@ -358,6 +358,19 @@ int thread_info(uint32_t thread, int flavor, void *thread_info_out, uint32_t *co
 /* ── proc_pidpath / proc_pidinfo ──────────────────────────────── */
 
 int proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
+    /* Self: report the GUEST spelling of the executable — callers use
+     * this to locate their own install tree (same contract as dyld). */
+    extern const char *macify_guest_exec_path(void);
+    if (pid == getpid() || pid == 0) {
+        const char *gp = macify_guest_exec_path();
+        if (gp && gp[0] == '/' && buffersize > 0) {
+            uint32_t n = (uint32_t)strlen(gp);
+            if (n >= buffersize) n = buffersize - 1;
+            memcpy(buffer, gp, n);
+            ((char *)buffer)[n] = '\0';
+            return (int)n;
+        }
+    }
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/exe", pid);
     ssize_t len = readlink(path, (char *)buffer, buffersize - 1);
@@ -371,7 +384,10 @@ int proc_pidpath(int pid, void *buffer, uint32_t buffersize) {
         return 0;
     }
     ((char *)buffer)[len] = '\0';
-    return (int)len;
+    /* Host->guest back-translation for other pids (children we spawned). */
+    extern void macify_untranslate_path(char *, size_t);
+    macify_untranslate_path((char *)buffer, (size_t)buffersize);
+    return (int)strlen((char *)buffer);
 }
 
 int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize) {

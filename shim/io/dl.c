@@ -268,3 +268,43 @@ int dlclose(void *handle) {
     if (real_dlclose) return real_dlclose(handle);
     return 0;
 }
+
+/* ── dladdr ───────────────────────────────────────────────────── */
+/* Guest binaries introspect their own code with dladdr. Darwin's
+ * dyld answers for every image it loaded; glibc's dladdr only knows
+ * ELF objects IT loaded — the manually mmap'd Mach-O segments are
+ * anonymous and invisible to it, so ruby's enable-load-relative build
+ * computes an empty libruby path and its default $LOAD_PATH is broken.
+ * Uses glibc's own Dl_info type (declared in <dlfcn.h>). */
+
+/* The loader exports the guest __TEXT range. An address inside it
+ * belongs to the guest executable; report its GUEST spelling, exactly
+ * what dyld would serve on a real Mac (ruby's enable-load-relative
+ * build derives its default $LOAD_PATH from this). */
+extern const char *macify_guest_exec_path(void);
+extern uintptr_t g_macos_text_lo;
+extern uintptr_t g_macos_text_hi;
+
+int dladdr(const void *addr, Dl_info *info) {
+    typedef int (*dladdr_fn)(const void *, void *);
+    static dladdr_fn real_dladdr = NULL;
+    if (!real_dladdr) {
+        if (!real_dlsym) dl_iterate_phdr(find_dlsym_cb, &real_dlsym);
+        if (real_dlsym) real_dladdr = (dladdr_fn)real_dlsym(RTLD_DEFAULT, "dladdr");
+    }
+
+    uintptr_t a = (uintptr_t)addr;
+    if (g_macos_text_lo && a >= g_macos_text_lo && a < g_macos_text_hi) {
+        /* TLS buffer: callers read dli_fname after we return. */
+        static __thread char fname[4096];
+        snprintf(fname, sizeof(fname), "%s", macify_guest_exec_path());
+        if (info) {
+            info->dli_fname = fname;
+            info->dli_fbase = (void *)g_macos_text_lo;
+            info->dli_sname = NULL;
+            info->dli_saddr = NULL;
+        }
+        return 1;
+    }
+    return real_dladdr ? real_dladdr(addr, info) : 0;
+}

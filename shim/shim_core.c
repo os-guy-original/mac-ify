@@ -251,6 +251,40 @@ static int __macify_argc = 0;
 static char **__macify_argv = NULL;
 static char __macify_exec_path[4096] = "/macify/app";
 
+/* Back-translate a host path to guest spelling, in place.
+ * "/home/u/.macify/usr/local/bin" -> "/usr/local/bin". No-op when the
+ * path is not inside the prefix (covers jail mode, where paths are
+ * already guest spelling). Shared by exec-path introspection APIs. */
+void macify_untranslate_path(char *p, size_t sz) {
+    (void)sz;
+    extern const char *macify_get_prefix(void);
+    if (!p || !p[0]) return;
+    const char *prefix = macify_get_prefix();
+    if (!prefix) return;
+    size_t plen = strlen(prefix);
+    if (plen == 0) return;
+    if (strncmp(p, prefix, plen) != 0) return;
+    if (p[plen] != '/' && p[plen] != '\0') return;
+    if (p[plen] == '\0') { p[0] = '/'; p[1] = '\0'; }
+    else memmove(p, p + plen, strlen(p + plen) + 1);
+}
+
+/* Guest-visible spelling of the running executable. Shared by the
+ * exec-path introspection APIs (_NSGetExecutablePath, dladdr) so every
+ * consumer sees the same truth. Falls back to argv[0] when the loader
+ * never told us the opened path, then to the historic placeholder. */
+const char *macify_guest_exec_path(void) {
+    static char guest[4096] = "";
+    if (!guest[0]) {
+        snprintf(guest, sizeof(guest), "%s", __macify_exec_path);
+        macify_untranslate_path(guest, sizeof(guest));
+        if (guest[0] != '/' && __macify_argv && __macify_argv[0] &&
+            __macify_argv[0][0] == '/')
+            snprintf(guest, sizeof(guest), "%s", __macify_argv[0]);
+    }
+    return guest;
+}
+
 void __macify_set_args(int argc, char **argv, const char *exec_path) {
     __macify_argc = argc;
     __macify_argv = argv;
@@ -282,12 +316,16 @@ char ***_NSGetArgv(void) {
 
 int _NSGetExecutablePath(char *buf, uint32_t *bufsize) {
     if (!buf || !bufsize) return -1;
-    size_t len = strlen(__macify_exec_path);
+    /* Guests must see the GUEST spelling of their own executable
+     * (portable-ruby, Homebrew shim scripts, and any binary that
+     * introspects its install location). */
+    const char *guest_path = macify_guest_exec_path();
+    size_t len = strlen(guest_path);
     if (*bufsize < len + 1) {
         *bufsize = len + 1;
         return -1;
     }
-    memcpy(buf, __macify_exec_path, len + 1);
+    memcpy(buf, guest_path, len + 1);
     *bufsize = len;
     return 0;
 }
