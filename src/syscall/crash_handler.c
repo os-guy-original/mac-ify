@@ -1,6 +1,7 @@
 /* crash_handler.c — crash handler for SIGSEGV/SIGBUS/SIGFPE */
 #include "syscall_internal.h"
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/wait.h>
 
 /* Raw-flush guard: the hand-rolled flushes below read _IO_write_base/ptr
@@ -11,6 +12,60 @@
 static int macify_flush_sane(void *p) {
     uintptr_t v = (uintptr_t)p;
     return v > 0x10000 && (v >> 47) == 0;
+}
+
+/* Same sanity envelope, for guest pointers the crash reporter wants to READ.
+ *
+ * The reporter runs in the signal handler after the faulting context is
+ * already torn down, so every guest pointer it touches (RIP's instruction
+ * bytes, rbx's heap object, the Go m/g chain) is unverified — and the most
+ * common one, RIP, is 0 on exactly the crashes we most want to report
+ * (nil deref, NULL function pointer). Dereferencing it faults *inside the
+ * crash handler*, turning a diagnosable guest crash into a silent re-entrant
+ * SIGSEGV with no report at all.
+ *
+ * Check readability instead of guessing: parse /proc/self/maps once per
+ * report and require the address to fall inside a readable mapping. This is
+ * a plain read of a file the process already owns, so it is signal-safe and
+ * cannot itself fault. */
+typedef struct { uintptr_t lo, hi; } map_range;
+
+/* Returns 1 if [p, p+len) is entirely inside a readable mapping. */
+static int macify_readable(const void *p, size_t len) {
+    static map_range ranges[512];
+    static int n_ranges = -1;
+    uintptr_t v = (uintptr_t)p;
+
+    if (v < 0x1000) return 0;                 /* NULL page and low arena */
+    if (v + len < v) return 0;                /* wraps */
+
+    if (n_ranges < 0) {
+        /* Snapshot this process's mappings. Only the r-bit matters: a
+         * mapping we cannot read back is exactly the case we must skip. */
+        int fd = open("/proc/self/maps", O_RDONLY);
+        if (fd < 0) { n_ranges = 0; return 0; }
+        char line[512];
+        FILE *f = fdopen(fd, "r");
+        if (!f) { close(fd); n_ranges = 0; return 0; }
+        n_ranges = 0;
+        while (n_ranges < (int)(sizeof(ranges)/sizeof(ranges[0])) &&
+               fgets(line, sizeof(line), f)) {
+            unsigned long long lo, hi;
+            char perms[8];
+            if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3) continue;
+            if (perms[0] != 'r') continue;     /* not readable */
+            ranges[n_ranges].lo = (uintptr_t)lo;
+            ranges[n_ranges].hi = (uintptr_t)hi;
+            n_ranges++;
+        }
+        fclose(f);
+    }
+    if (n_ranges == 0) return 0;
+
+    for (int i = 0; i < n_ranges; i++) {
+        if (v >= ranges[i].lo && v + len <= ranges[i].hi) return 1;
+    }
+    return 0;
 }
 
 
@@ -298,11 +353,11 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
     int pos = 0;
     pos += snprintf(buf + pos, sizeof(buf) - pos,
         "\nmacify: CRASH handler invoked\n"
-        "pid=%d sig=%d code=%d adr=%016lx\nrip=%016lx\nrsp=%016lx\nrbp=%016lx\n"
+        "pid=%d tid=%d sig=%d code=%d adr=%016lx\nrip=%016lx\nrsp=%016lx\nrbp=%016lx\n"
         "rax=%016lx\nrbx=%016lx\nrcx=%016lx\nrdx=%016lx\n"
         "rdi=%016lx\nrsi=%016lx\nr8 =%016lx\nr9 =%016lx\n"
         "r10=%016lx\nr11=%016lx\nr12=%016lx\nr13=%016lx\nr14=%016lx\nr15=%016lx\n",
-        getpid(), sig, info->si_code, (unsigned long)info->si_addr,
+        getpid(), (int)syscall(SYS_gettid), sig, info->si_code, (unsigned long)info->si_addr,
         (unsigned long)regs[REG_RIP], (unsigned long)regs[REG_RSP],
         (unsigned long)regs[REG_RBP],
         (unsigned long)regs[REG_RAX], (unsigned long)regs[REG_RBX],
@@ -313,24 +368,31 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         (unsigned long)regs[REG_R12], (unsigned long)regs[REG_R13],
         (unsigned long)regs[REG_R14], (unsigned long)regs[REG_R15]);
 
-    /* Dump bytes at RIP to identify the faulting instruction */
+    /* Dump bytes at RIP to identify the faulting instruction. RIP is 0 on
+     * the crashes this reporter exists for, so validate before reading. */
     {
         uint8_t *rip_ptr = (uint8_t *)regs[REG_RIP];
         char ibuf[128];
-        int in = snprintf(ibuf, sizeof(ibuf),
-            "rip bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-            rip_ptr[0], rip_ptr[1], rip_ptr[2], rip_ptr[3],
-            rip_ptr[4], rip_ptr[5], rip_ptr[6], rip_ptr[7],
-            rip_ptr[8], rip_ptr[9], rip_ptr[10], rip_ptr[11],
-            rip_ptr[12], rip_ptr[13], rip_ptr[14], rip_ptr[15]);
-        write(2, ibuf, in);
+        if (macify_readable(rip_ptr, 16)) {
+            int in = snprintf(ibuf, sizeof(ibuf),
+                "rip bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                rip_ptr[0], rip_ptr[1], rip_ptr[2], rip_ptr[3],
+                rip_ptr[4], rip_ptr[5], rip_ptr[6], rip_ptr[7],
+                rip_ptr[8], rip_ptr[9], rip_ptr[10], rip_ptr[11],
+                rip_ptr[12], rip_ptr[13], rip_ptr[14], rip_ptr[15]);
+            write(2, ibuf, in);
+        } else {
+            int in = snprintf(ibuf, sizeof(ibuf),
+                "rip bytes: <unreadable rip %#lx>\n", (unsigned long)rip_ptr);
+            write(2, ibuf, in);
+        }
     }
 
-    /* Dump the heap object at rbx (if rbx looks like a heap pointer) to
+    /* Dump the heap object at rbx (if rbx is a readable heap pointer) to
      * understand what struct the crash was operating on. */
     {
         uint64_t rbx_val = (uint64_t)regs[REG_RBX];
-        if (rbx_val > 0x10000 && rbx_val < 0x7fffffffffffUL) {
+        if (macify_readable((void *)rbx_val, 64)) {
             char obuf[512];
             /* Read 8 qwords from [rbx] */
             uint64_t *p = (uint64_t *)rbx_val;
@@ -366,17 +428,19 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         }
     }
 
-    /* Go runtime state */
+    /* Go runtime state. Each hop is a guest pointer we did not produce, so
+     * every dereference is validated — a torn-down g/m chain would fault
+     * here and lose the whole report. */
     pos += snprintf(buf + pos, sizeof(buf) - pos, "g_tls_g_addr=%lu\n", (unsigned long)g_tls_g_addr);
     if (g_tls_g_addr) {
         uint64_t g = 0;
-        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL)
+        if (macify_readable((void *)g_tls_g_addr, 8))
             g = *(volatile uint64_t *)g_tls_g_addr;
         pos += snprintf(buf + pos, sizeof(buf) - pos, "Go tls_g=0x%lx\n", (unsigned long)g);
-        if (g > 0x10000 && g < 0x7fffffffffffUL) {
+        if (g && macify_readable((void *)g, 0x30 + 8)) {
             uint64_t m = *(volatile uint64_t *)(g + 0x30);
             pos += snprintf(buf + pos, sizeof(buf) - pos, "g.m=0x%lx\n", (unsigned long)m);
-            if (m > 0x10000 && m < 0x7fffffffffffUL) {
+            if (m && macify_readable((void *)m, 0xc0)) {
                 pos += snprintf(buf + pos, sizeof(buf) - pos,
                     "m.g0=0x%lx m.gsignal=0x%lx m.curg=0x%lx\n",
                     (unsigned long)*(volatile uint64_t *)m,
@@ -409,7 +473,10 @@ void crash_handler(int sig, siginfo_t *info, void *uctx) {
         for (int i = 0; i < 32; i++) {
             uint64_t addr = sp + (uint64_t)i * 8;
             uint64_t val = 0;
-            if (addr > 0x10000 && addr < 0x7fffffffffffUL) {
+            /* The stack walk runs off the top of the mapping on a bad RSP
+             * (stack overflow is a common guest crash), so validate each
+             * slot rather than range-checking the base only. */
+            if (macify_readable((void *)addr, 8)) {
                 val = *(volatile uint64_t *)addr;
             }
             char tag[32] = "";

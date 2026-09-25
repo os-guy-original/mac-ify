@@ -1,6 +1,57 @@
 /* crash_handler.c — crash handler that prints register/stack/Go state */
 #include "signal_internal.h"
 #include <ucontext.h>
+#include <fcntl.h>
+#include <stdio.h>
+
+/* Readability guard for the guest pointers this reporter dereferences.
+ *
+ * The reporter runs after the faulting context is torn down, and the most
+ * common value it wants — RIP — is 0 on exactly the crashes worth
+ * reporting (nil deref, NULL function pointer). Dereferencing that faults
+ * INSIDE the handler, so the process dies with no report at all and the
+ * bug looks like a silent hang or a bare 139.
+ *
+ * The Go chain is worse: g/m/gsignal are guest pointers produced by a
+ * runtime that may only be half-initialised, and gs:0x30 in particular
+ * can hold a non-pointer. Every hop is validated before it is followed.
+ *
+ * Parse /proc/self/maps once and require each address to land in a
+ * readable mapping. That is a plain read of a file the process owns, so
+ * it is signal-safe and cannot itself fault. */
+typedef struct { uintptr_t lo, hi; } ch_map;
+static ch_map ch_ranges[512];
+static int ch_nranges = -1;
+
+static int ch_readable(const void *p, size_t len) {
+    uintptr_t v = (uintptr_t)p;
+    if (v < 0x1000) return 0;
+    if (v + len < v) return 0;
+
+    if (ch_nranges < 0) {
+        int fd = open("/proc/self/maps", O_RDONLY);
+        if (fd < 0) { ch_nranges = 0; return 0; }
+        FILE *f = fdopen(fd, "r");
+        if (!f) { close(fd); ch_nranges = 0; return 0; }
+        ch_nranges = 0;
+        char line[512];
+        while (ch_nranges < (int)(sizeof(ch_ranges)/sizeof(ch_ranges[0])) &&
+               fgets(line, sizeof(line), f)) {
+            unsigned long long lo, hi;
+            char perms[8];
+            if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3) continue;
+            if (perms[0] != 'r') continue;   /* not readable */
+            ch_ranges[ch_nranges].lo = (uintptr_t)lo;
+            ch_ranges[ch_nranges].hi = (uintptr_t)hi;
+            ch_nranges++;
+        }
+        fclose(f);
+    }
+    for (int i = 0; i < ch_nranges; i++) {
+        if (v >= ch_ranges[i].lo && v + len <= ch_ranges[i].hi) return 1;
+    }
+    return 0;
+}
 
 void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     const char msg[] = "\nmacify: CRASH handler invoked\n";
@@ -18,7 +69,7 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
         write(2, sb, sn);
         for (int i = 0; i < 8; i++) {
             uint64_t val = 0;
-            if (sp + i*8 > 0x10000 && sp + i*8 < 0x7fffffffffffUL) {
+            if (ch_readable((void *)(sp + i*8), 8)) {
                 val = *(volatile uint64_t *)(sp + i*8);
             }
             sn = snprintf(sb, sizeof(sb), " 0x%016lx", (unsigned long)val);
@@ -95,9 +146,10 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
     extern uint64_t g_tls_g_addr;
     if (!g_tls_g_addr) {
         write(2, "stack:\n", 7);
-        uint64_t *sp = (uint64_t *)regs[REG_RSP];
         for (int s = 0; s < 8; s++) {
-            uint64_t val = sp[s];
+            uint64_t addr = (uint64_t)regs[REG_RSP] + (uint64_t)s * 8;
+            uint64_t val = 0;
+            if (ch_readable((void *)addr, 8)) val = *(volatile uint64_t *)addr;
             buf[0] = 's'; buf[1] = 'p'; buf[2] = '+'; buf[3] = '0' + s; buf[4] = ':';
             for (int i = 0; i < 16; i++) {
                 int nibble = (val >> (60 - i*4)) & 0xf;
@@ -107,7 +159,14 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             write(2, buf, 22);
         }
     } else {
-        /* Go binary: print runtime state */
+        /* Go binary: print runtime state.
+         *
+         * Read the g pointer from THIS thread's gs:0x30, not from the
+         * g_tls_g_addr global. g_tls_g_addr holds the main thread's slot;
+         * every thread the shim starts gets its own GS base
+         * (shim/pthread/create.c), so the global is the wrong g precisely
+         * on the threads most likely to be crashing. gs:0x30 is also the
+         * value Go itself uses, so it is the one that can be trusted. */
         uint64_t gs_val = 0;
         __asm__ volatile("movq %%gs:0x30, %0" : "=r"(gs_val));
         write(2, "gs:0x30=", 8);
@@ -128,10 +187,18 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
         buf[16] = '\n';
         write(2, buf, 17);
 
+        /* Fall back to the main thread's slot only if this thread's is
+         * unreadable as a g — and say which one was used, so a stale
+         * global is never mistaken for live per-thread state. */
         uint64_t g = 0;
-        if (g_tls_g_addr > 0x10000 && g_tls_g_addr < 0x7fffffffffffUL)
+        if (ch_readable((void *)gs_val, 0x38)) {
+            g = gs_val;
+            write(2, "Go g=gs:0x30 (this thread)\n", 26);
+        } else if (ch_readable((void *)g_tls_g_addr, 8)) {
             g = *(volatile uint64_t *)g_tls_g_addr;
-        write(2, "Go g=", 5);
+            write(2, "Go g=g_tls_g_addr (main thread, gs:0x30 unusable)\n", 51);
+        }
+        write(2, "g=", 2);
         for (int i = 0; i < 16; i++) {
             int nibble = (g >> (60 - i*4)) & 0xf;
             buf[i] = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
@@ -139,10 +206,10 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
         buf[16] = '\n';
         write(2, buf, 17);
 
-        if (g > 0x10000 && g < 0x7fffffffffffUL) {
+        if (ch_readable((void *)g, 0x38)) {
             uint64_t m = *(volatile uint64_t *)(g + 0x30);
             uint64_t gsignal = 0, curg = 0, g0 = 0;
-            if (m > 0x10000 && m < 0x7fffffffffffUL) {
+            if (ch_readable((void *)m, 0xc0)) {
                 g0 = *(volatile uint64_t *)m;
                 gsignal = *(volatile uint64_t *)(m + 0x48);
                 curg = *(volatile uint64_t *)(m + 0xb8);
@@ -171,7 +238,8 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             buf[16] = '\n';
             write(2, buf, 17);
 
-            int32_t mlocks = *(volatile int32_t *)(m + 0x108);
+            int32_t mlocks = ch_readable((void *)(m + 0x108), 4)
+                                  ? *(volatile int32_t *)(m + 0x108) : 0;
             write(2, "m.locks=", 8);
             char lb[24]; int ln = 0;
             if (mlocks < 0) { lb[ln++] = '-'; mlocks = -mlocks; }
@@ -185,10 +253,13 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             /* Print key m offsets */
             {
                 char mbuf[256]; int mn = 0;
-                uint64_t m48 = *(volatile uint64_t *)(m + 0x48);
-                uint64_t m50 = *(volatile uint64_t *)(m + 0x50);
-                uint64_t m58 = *(volatile uint64_t *)(m + 0x58);
-                uint64_t m60 = *(volatile uint64_t *)(m + 0x60);
+                uint64_t m48 = 0, m50 = 0, m58 = 0, m60 = 0;
+                if (ch_readable((void *)m, 0x68)) {
+                    m48 = *(volatile uint64_t *)(m + 0x48);
+                    m50 = *(volatile uint64_t *)(m + 0x50);
+                    m58 = *(volatile uint64_t *)(m + 0x58);
+                    m60 = *(volatile uint64_t *)(m + 0x60);
+                }
                 mn = snprintf(mbuf, sizeof(mbuf),
                     "m+48=0x%lx m+50=0x%lx m+58=0x%lx m+60=0x%lx\n",
                     (unsigned long)m48, (unsigned long)m50,
@@ -199,7 +270,7 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
                 int offsets[] = {0x48, 0x50, 0x58, 0x60};
                 for (int i = 0; i < 4; i++) {
                     uint64_t gsig = candidates[i];
-                    if (gsig > 0x10000 && gsig < 0x7fffffffffffUL) {
+                    if (ch_readable((void *)gsig, 0x10)) {
                         uint64_t slo = *(volatile uint64_t *)(gsig + 0x0);
                         uint64_t shi = *(volatile uint64_t *)(gsig + 0x8);
                         mn = snprintf(mbuf, sizeof(mbuf),
@@ -213,10 +284,13 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
             }
 
             /* Print g0.stack info */
-            uint64_t stacklo = *(volatile uint64_t *)(g + 0x0);
-            uint64_t stackhi = *(volatile uint64_t *)(g + 0x8);
-            uint64_t stackguard0 = *(volatile uint64_t *)(g + 0x10);
-            uint64_t stackguard1 = *(volatile uint64_t *)(g + 0x18);
+            uint64_t stacklo = 0, stackhi = 0, stackguard0 = 0, stackguard1 = 0;
+            if (ch_readable((void *)g, 0x20)) {
+                stacklo     = *(volatile uint64_t *)(g + 0x0);
+                stackhi     = *(volatile uint64_t *)(g + 0x8);
+                stackguard0 = *(volatile uint64_t *)(g + 0x10);
+                stackguard1 = *(volatile uint64_t *)(g + 0x18);
+            }
             uint64_t cur_rsp = (uint64_t)regs[REG_RSP];
             char sb[256];
             int sn = snprintf(sb, sizeof(sb),
@@ -226,7 +300,7 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
                 (unsigned long)cur_rsp, cur_rsp <= stackguard0);
             write(2, sb, sn);
 
-            if (gsignal > 0x10000 && gsignal < 0x7fffffffffffUL) {
+            if (ch_readable((void *)gsignal, 0x18)) {
                 uint64_t gs_stacklo = *(volatile uint64_t *)(gsignal + 0x0);
                 uint64_t gs_stackhi = *(volatile uint64_t *)(gsignal + 0x8);
                 uint64_t gs_guard0 = *(volatile uint64_t *)(gsignal + 0x10);
@@ -244,7 +318,7 @@ void macify_crash_handler(int sig, siginfo_t *info, void *uctx) {
         uint64_t sp_val = (uint64_t)regs[REG_RSP];
         for (int s = -8; s < 24; s++) {
             uint64_t addr = sp_val + (int64_t)s * 8;
-            if (addr < 0x10000 || addr > 0x7fffffffffffUL) continue;
+            if (!ch_readable((void *)addr, 8)) continue;
             uint64_t val = *(volatile uint64_t *)addr;
             char marker[8];
             if (s < 0) {
