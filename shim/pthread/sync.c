@@ -1,5 +1,31 @@
 #include "pthread_internal.h"
 
+/* ── errno translation at the shim boundary ──────────────────────────
+ * Guests were compiled against the Darwin SDK, where errno constants
+ * have DIFFERENT numeric values than Linux (e.g. ETIMEDOUT: darwin 60
+ * vs Linux 110, EAGAIN: 35 vs 11, ENOTEMPTY: 66 vs 39). glibc's real
+ * pthread functions set Linux-numbered errnos; a Darwin-built guest
+ * comparing `r != ETIMEDOUT` sees 110 instead of 60 and takes a wrong
+ * branch. Ground truth: ruby 3.4.5 thread_pthread.c BUGs on any
+ * pthread_cond_timedwait result != 0 && != ETIMEDOUT(=45 in its baked
+ * SDK value; darwin15 = 45? see below) — thread creation died 10/10
+ * runs under mac-ify until this translation existed.
+ * Only guest callers get translated numbers: shim-internal callers
+ * (spawn, tls, once) keep raw Linux values because they compare
+ * against Linux headers. */
+static int sync_errno_out(int r, void *ret_addr) {
+    if (r && r != -1 && macify_caller_is_macos_text(ret_addr))
+        return macify_linux_to_macos_errno(r);
+    return r;
+}
+
+/* Public form for other shim files whose wrappers call the sync
+ * functions internally but whose OWN callers are guests (e.g.
+ * pthread_cond_timedwait_relative_np in core.c). */
+int macify_sync_errno_out(int r, void *ret_addr) {
+    return sync_errno_out(r, ret_addr);
+}
+
 int   (*real_mutex_lock)(pthread_mutex_t *);
 int   (*real_mutex_trylock)(pthread_mutex_t *);
 int   (*real_mutex_unlock)(pthread_mutex_t *);
@@ -100,13 +126,13 @@ int pthread_mutex_lock(pthread_mutex_t *m) {
         char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_mutex_lock(%p) -> %d\n", m, r);
         (void)write(2, b, n);
     }
-    return r;
+    return sync_errno_out(r, __builtin_return_address(0));
 }
 
 int pthread_mutex_trylock(pthread_mutex_t *m) {
     LAZY_INIT();
     convert_macos_mutex(m);
-    return real_mutex_trylock(m);
+    return sync_errno_out(real_mutex_trylock(m), __builtin_return_address(0));
 }
 
 int pthread_mutex_unlock(pthread_mutex_t *m) {
@@ -116,7 +142,7 @@ int pthread_mutex_unlock(pthread_mutex_t *m) {
         char b[128]; int n = snprintf(b, sizeof(b), "macify: pthread_mutex_unlock(%p) sig=0x%x\n", m, *(unsigned*)m);
         (void)write(2, b, n);
     }
-    return real_mutex_unlock(m);
+    return sync_errno_out(real_mutex_unlock(m), __builtin_return_address(0));
 }
 
 int pthread_mutex_init(pthread_mutex_t *m, const pthread_mutexattr_t *a) {
@@ -144,7 +170,8 @@ int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
     LAZY_INIT();
     convert_macos_cond(c);
     convert_macos_mutex(m);
-    return real_cond_wait(get_glibc_cond(c), m);
+    int r = real_cond_wait(get_glibc_cond(c), m);
+    return sync_errno_out(r, __builtin_return_address(0));
 }
 
 int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
@@ -152,19 +179,22 @@ int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
     LAZY_INIT();
     convert_macos_cond(c);
     convert_macos_mutex(m);
-    return real_cond_timedwait(get_glibc_cond(c), m, ts);
+    int r = real_cond_timedwait(get_glibc_cond(c), m, ts);
+    return sync_errno_out(r, __builtin_return_address(0));
 }
 
 int pthread_cond_signal(pthread_cond_t *c) {
     LAZY_INIT();
     convert_macos_cond(c);
-    return real_cond_signal(get_glibc_cond(c));
+    int r = real_cond_signal(get_glibc_cond(c));
+    return sync_errno_out(r, __builtin_return_address(0));
 }
 
 int pthread_cond_broadcast(pthread_cond_t *c) {
     LAZY_INIT();
     convert_macos_cond(c);
-    return real_cond_broadcast(get_glibc_cond(c));
+    int r = real_cond_broadcast(get_glibc_cond(c));
+    return sync_errno_out(r, __builtin_return_address(0));
 }
 
 int pthread_cond_init(pthread_cond_t *c, const pthread_condattr_t *a) {
@@ -183,19 +213,19 @@ int pthread_cond_destroy(pthread_cond_t *c) {
 int pthread_rwlock_rdlock(pthread_rwlock_t *rw) {
     LAZY_INIT();
     convert_macos_rwlock(rw);
-    return real_rwlock_rdlock(rw);
+    return sync_errno_out(real_rwlock_rdlock(rw), __builtin_return_address(0));
 }
 
 int pthread_rwlock_wrlock(pthread_rwlock_t *rw) {
     LAZY_INIT();
     convert_macos_rwlock(rw);
-    return real_rwlock_wrlock(rw);
+    return sync_errno_out(real_rwlock_wrlock(rw), __builtin_return_address(0));
 }
 
 int pthread_rwlock_unlock(pthread_rwlock_t *rw) {
     LAZY_INIT();
     convert_macos_rwlock(rw);
-    return real_rwlock_unlock(rw);
+    return sync_errno_out(real_rwlock_unlock(rw), __builtin_return_address(0));
 }
 
 int pthread_rwlock_init(pthread_rwlock_t *rw, const pthread_rwlockattr_t *a) {

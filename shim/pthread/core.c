@@ -93,5 +93,10 @@ int pthread_cond_timedwait_relative_np(pthread_cond_t *c, pthread_mutex_t *m,
     abstime.tv_sec += reltime->tv_sec;
     abstime.tv_nsec += reltime->tv_nsec;
     if (abstime.tv_nsec >= 1000000000) { abstime.tv_sec++; abstime.tv_nsec -= 1000000000; }
-    return pthread_cond_timedwait(c, m, &abstime);
+    /* pthread_cond_timedwait() here resolves to our interposing wrapper,
+     * which would re-translate for shim-internal callers — wrong, since
+     * OUR caller is the guest. Translate explicitly instead. */
+    extern int macify_sync_errno_out(int r, void *ret_addr);
+    int r = pthread_cond_timedwait(c, m, &abstime);
+    return macify_sync_errno_out(r, __builtin_return_address(0));
 }
