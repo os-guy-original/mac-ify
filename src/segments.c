@@ -207,6 +207,17 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
         return NULL;
     }
 
+    if (ordinal_idx < 0 || ordinal_idx >= g_ndylibs) return NULL;
+    loaded_dylib *dy = &g_dylibs[ordinal_idx];
+
+    /* For data symbols like 'environ', dlsym(libc_handle, ...) returns
+     * libc's weak definition, which may differ from the CRT's strong
+     * definition. Check RTLD_DEFAULT first to get the strong definition. */
+    void *addr = NULL;
+    if (strcmp(sym, "environ") == 0 || strcmp(sym, "__environ") == 0) {
+        addr = dlsym(RTLD_DEFAULT, sym);
+    }
+
     /* MUST-INTERPOSE symbols: always resolve to the shim, regardless of
      * two-level bind target. macOS binaries that bind exec-family symbols
      * directly to their libc ordinal would otherwise bypass the shim: the
@@ -214,7 +225,16 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
      * which runs with full host filesystem access and silently breaks
      * prefix isolation. Observed with Homebrew's `/usr/bin/env -i` chain:
      * env's execlp() escaped to the host shell. g_dylibs[0] is always the
-     * shim (main.c pre-loads it before processing LC_LOAD_DYLIB). */
+     * shim (main.c pre-loads it before processing LC_LOAD_DYLIB).
+     *
+     * This check MUST run before macho_dylib_lookup(): when a real Mach-O
+     * CoreFoundation is loaded (ruby, T0003), its CFString* implementations
+     * would otherwise win — but real CF depends on the ObjC/mach runtime
+     * that the loader does not provide, and its string ops fail (observed:
+     * File.realpath/Dir.pwd = ""). The shim's CF implementations are
+     * self-contained and only fire for names it actually exports; a fully
+     * working CF under the loader would still be found for every other
+     * symbol. */
     {
         static const char *const interpose_syms[] = {
             "execve",
@@ -225,7 +245,17 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             "regcomp", "regexec", "regfree", "regerror",
             "realpath$DARWIN_EXTSN",
             "stat$INODE64", "lstat$INODE64", "fstat$INODE64",
-            "fstatat$INODE64", "opendir$INODE64", NULL
+            "fstatat$INODE64", "opendir$INODE64",
+            /* CoreFoundation string ops the shim implements (T0003). */
+            "CFStringCreateWithBytes", "CFStringCreateWithBytesNoCopy",
+            "CFStringCreateWithCString", "CFStringCreateWithCStringNoCopy",
+            "CFStringCreateMutableCopy", "CFStringNormalize",
+            "CFStringGetLength", "CFStringGetBytes",
+            "CFStringGetCString", "CFStringGetCStringPtr",
+            "CFStringGetMaximumSizeForEncoding", "CFStringCompare",
+            "CFStringCreateExternalRepresentation",
+            "CFStringGetFastestEncoding", "CFStringGetSystemEncoding",
+            "CFStringGetTypeID", "CFGetTypeID", "CFRelease", "CFRetain", NULL
         };
         if (g_ndylibs > 0 && g_dylibs[0].handle) {
             for (int i = 0; interpose_syms[i]; i++) {
@@ -249,17 +279,6 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
                 }
             }
         }
-    }
-
-    if (ordinal_idx < 0 || ordinal_idx >= g_ndylibs) return NULL;
-    loaded_dylib *dy = &g_dylibs[ordinal_idx];
-
-    /* For data symbols like 'environ', dlsym(libc_handle, ...) returns
-     * libc's weak definition, which may differ from the CRT's strong
-     * definition. Check RTLD_DEFAULT first to get the strong definition. */
-    void *addr = NULL;
-    if (strcmp(sym, "environ") == 0 || strcmp(sym, "__environ") == 0) {
-        addr = dlsym(RTLD_DEFAULT, sym);
     }
 
     /* Check loaded Mach-O dylibs BEFORE dlsym(dy->handle, sym).

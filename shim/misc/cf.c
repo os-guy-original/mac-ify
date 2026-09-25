@@ -245,6 +245,12 @@ unsigned long CFStringGetBytes(void *theString, long rangeStart, long rangeLengt
                                unsigned char *bytes, unsigned long maxBytes,
                                long *usedBytes) {
     (void)encoding; (void)lossyByte; (void)isExternal;
+    if (getenv("MACIFY_TRACE_CF")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: CFStringGetBytes(str=%p range=%ld..%ld max=%lu)\n",
+            theString, rangeStart, rangeLength, maxBytes);
+        (void)write(2, b, n);
+    }
     if (!theString) { if (usedBytes) *usedBytes = 0; return 0; }
     const struct sc_obj *s = (const struct sc_obj *)theString;
     if (s->tag != SC_TAG_STRING) { if (usedBytes) *usedBytes = 0; return 0; }
@@ -257,10 +263,24 @@ unsigned long CFStringGetBytes(void *theString, long rangeStart, long rangeLengt
     if (rangeStart > total) rangeStart = total;
     if (rangeStart + rangeLength > total) rangeLength = total - rangeStart;
     if (rangeLength == 0) { if (usedBytes) *usedBytes = 0; return 0; }
+    /* Sizing query: real CF documents that with buffer==NULL the FULL
+     * number of bytes the conversion needs is returned in *usedBytes —
+     * callers size their buffers from it (ruby's
+     * rb_str_append_normalized_ospath, Rust std). We previously clamped
+     * to maxBytes here, reporting 0 for a 0-size query, which made the
+     * caller append an empty string (observed: Dir.pwd="" even with the
+     * whole CF chain otherwise working — T0003). Our sc_obj strings are
+     * byte-exact UTF-8, so a UTF-8 request needs exactly rangeLength
+     * bytes and converts rangeLength characters. Non-UTF-8 encodings are
+     * not yet converted byte-wise; no guest in view requests them. */
+    if (!bytes || maxBytes == 0) {
+        if (usedBytes) *usedBytes = rangeLength;
+        return rangeLength;
+    }
     /* Copy as many bytes as fit in `bytes` */
     unsigned long to_copy = (unsigned long)rangeLength;
     if (maxBytes < to_copy) to_copy = maxBytes;
-    if (bytes && to_copy > 0) memcpy(bytes, src + rangeStart, to_copy);
+    memcpy(bytes, src + rangeStart, to_copy);
     if (usedBytes) *usedBytes = (long)to_copy;
     return to_copy;
 }
@@ -305,6 +325,11 @@ void *macify_CFStringCreateWithBytesNoCopy(void *alloc, const void *bytes,
                                             long numBytes, unsigned long encoding,
                                             unsigned char shouldFreeBytes) {
     (void)alloc; (void)encoding; (void)shouldFreeBytes;
+    if (getenv("MACIFY_TRACE_CF")) {
+        char b[256]; int n = snprintf(b, sizeof(b),
+            "macify: CFStringCreateWithBytesNoCopy(bytes=%p n=%ld)\n", bytes, numBytes);
+        (void)write(2, b, n);
+    }
     if (!bytes && numBytes > 0) return NULL;
     struct sc_obj *s = (struct sc_obj *)calloc(1, sizeof(*s));
     s->tag = SC_TAG_STRING;

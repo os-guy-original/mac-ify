@@ -164,11 +164,60 @@ char *macify_crypt(const char *key, const char *salt) {
 
 /* ── CoreFoundation stubs ────────────────────────────────────── */
 
+/* CFStringCreateMutableCopy — ruby's rb_str_normalize_ospath (compiled
+ * into every __APPLE__ ruby, so also Homebrew's portable-ruby) builds
+ * path strings as: CFStringCreateWithBytesNoCopy → CFStringCreateMutableCopy
+ * → CFStringNormalize → CFStringGetLength → CFStringGetBytes. Returning
+ * NULL here made the whole chain produce "": GetLength(NULL)=0, the
+ * GetBytes size query returns 0, and ruby appends nothing — observed as
+ * File.realpath="" and Dir.pwd="" with __dir__ degrading to "." (brew.rb
+ * dies at require_relative "global"). This is general: any __APPLE__
+ * binary normalizing CFString paths was blanked, not just ruby.
+ *
+ * Our sc_obj strings are byte-exact UTF-8; the only legal mutation on a
+ * real mutable string is CFStringNormalize, which we keep as a
+ * byte-preserving no-op (NFC byte identity — see below, and NOT
+ * normalizing guarantees the path round-trips through the host fs
+ * untouched). So the "mutable" copy is an owned deep copy: for every
+ * consumer we serve it is indistinguishable from a normalized one.
+ *
+ * Real CF truncates to maxLen characters when maxLen > 0; we truncate
+ * to maxLen bytes (consistent with the byte-count GetLength convention
+ * used across shim/misc/cf.c). The copy leaks on CFRelease — the shim's
+ * CFString release path is currently a no-op for every CFString; fixing
+ * ownership tags across cf.c is out of scope here. */
 void *macify_CFStringCreateMutableCopy(void *a, long m, void *s) __asm__("CFStringCreateMutableCopy");
-void *macify_CFStringCreateMutableCopy(void *a, long m, void *s) { (void)a;(void)m;(void)s; return NULL; }
+void *macify_CFStringCreateMutableCopy(void *a, long m, void *s) {
+    (void)a;
+    if (!s) return NULL;
+    struct sc_obj *src = (struct sc_obj *)s;
+    if (src->tag != SC_TAG_STRING) return NULL;
+    long len = (long)src->count;
+    if (m > 0 && len > m) len = m;
+    struct sc_obj *dst = (struct sc_obj *)calloc(1, sizeof(*dst));
+    if (!dst) return NULL;
+    dst->tag = SC_TAG_STRING;
+    dst->count = (uint32_t)len;
+    dst->data = malloc((size_t)len + 1);
+    if (!dst->data) { free(dst); return NULL; }
+    memcpy(dst->data, src->data, (size_t)len);
+    ((char *)dst->data)[len] = '\0';
+    return dst;
+}
 
+/* CFStringNormalize — byte-preserving by design. Paths reach us as NFC
+ * UTF-8 (macOS filesystems normalize to NFC), so NFC→NFC identity is
+ * the correct result, and skipping real normalization keeps host-side
+ * lookups byte-identical to what the guest asked for. */
 void macify_CFStringNormalize(void *s, int f) __asm__("CFStringNormalize");
-void macify_CFStringNormalize(void *s, int f) { (void)s;(void)f; }
+void macify_CFStringNormalize(void *s, int f) {
+    if (getenv("MACIFY_TRACE_CF")) {
+        char b[128]; int n = snprintf(b, sizeof(b),
+            "macify: CFStringNormalize(s=%p form=%d)\n", s, f);
+        (void)write(2, b, n);
+    }
+    (void)s;(void)f;
+}
 
 /* ── Unwind stubs ────────────────────────────────────────────── */
 
