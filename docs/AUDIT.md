@@ -368,3 +368,90 @@ every call to find which struct gets the {0,-len} pair the second time.
 
 Rule going forward: every fix must cite a fetched upstream source and
 must generalize — no per-binary patches, ever.
+
+## Go boot flake (T0001) — real rate, three defects fixed, NOT closed
+
+Measured rate at a52ed93 is **~30% of runs** (12/40, 9/40 after this
+session's commits), not the ~40% the task assumed, and it is far lower
+than the 70% an early burst suggested. It is a genuine `rc=139`
+SIGSEGV: `sig=11 code=1 adr=0`, faulting `rip=0`, with `m.curg=0`.
+
+### 1. [FIXED] The crash reporter faulted on the very crashes it reports
+
+`src/syscall/crash_handler.c` and `shim/signal/crash_handler.c` both
+read guest pointers behind a range check only
+(`> 0x10000 && < 0x7fffffffffff`). RIP is **0** on a nil deref, so
+`rip_ptr[0..15]` faulted *inside the SIGSEGV handler*: the process died
+with no report and no exit path, which is why the flake looked like an
+unexplained hang. Now every read is validated against `/proc/self/maps`
+(only `r` mappings, parsed once). The shim reporter additionally read
+the g from the `g_tls_g_addr` **global**; since
+`shim/pthread/create.c` gives each thread its own GS base, that global
+is the wrong g on exactly the threads most likely to be crashing. It now
+reads the faulting thread's own `gs:0x30` and says which source it used.
+
+### 2. [FIXED] Deferral gate accepted a half-initialised Go runtime
+
+`go_is_ready()` treated any non-NULL `m.gsignal` as "ready". That field
+is filled from Go's own heap before a g is scheduled, so it read as
+ready while `m.curg` was still NULL, and `sigtrampgo` then dereferenced
+NULL. Now `m.curg` (offset **0xb8**, derived from
+`docs/golang/runtime2.go-go1.26.4.txt`: g0@0x00, morebuf gobuf@0x08,
+divmod@0x38, procid@0x40, gsignal@0x48) must be non-NULL too.
+
+Related and important: a **synchronous** fault must never be deferred.
+Returning from a SIGSEGV handler without repairing the fault re-executes
+the faulting instruction, so the old "defer everything" path turned a
+crash into an unkillable 100%-CPU spin (reproduced; needed a kill -9).
+Deferral is now limited to kernel-generated signals (SI_USER, SI_TIMER,
+SI_KERNEL, …); a synchronous fault is reported and exits deterministically.
+
+### 3. [FIXED] Go's per-goroutine GS self-test cannot pass under a per-thread GS base
+
+Go re-validates GS in every stack-growth prologue (`runtime.call1024` at
+0x100098300, and the call8192 variant):
+
+    mov gs:0x30, 0x123
+    mov rax, [rip+..]        ; the GLOBAL tls_g
+    cmp rax, 0x123
+    je  <ok>
+    call <abort>
+
+It passes only when GS base is exactly `tls_g - 0x30`, i.e. when
+`gs:0x30` *aliases the global*. macify sets a per-thread GS base so
+concurrent Ms do not share one g pointer, so on a worker thread the
+compare can never succeed. The assertion's only job is detecting a
+platform with no GS, which macify has already satisfied, so the
+conditional skip is rewritten to an unconditional one (`je`→`jmp`, same
+length, no relocation).
+
+### Still open — the flake is reduced, not fixed
+
+Root cause chain established but **not** closed. Verified facts:
+
+- GS base is correct immediately before the guest thread routine runs
+  (`PRE-CALL GSbase=0x7f..2000`) and reads **0** at SIGSEGV delivery on
+  that same tid. The kernel snapshots GS when building the signal frame;
+  for a base installed with `arch_prctl(ARCH_SET_GS)` on a non-main
+  thread the snapshot is not the value we set, so `sigreturn` restores 0
+  and `gs:0x30` reads whatever linear address `0x30` maps to (observed
+  `gs:0x30` values differ per run: 0x23ba…, 0x2995…, 0x3acd…).
+- Re-asserting GS from the handler (both the Go wrapper and the crash
+  handler) did **not** measurably help: 7/25 vs 8/25 baseline over
+  repeated trials. Not the trigger.
+- `patch_go_systemstack` is **not** the cause (A/B: 7/25 with, 8/25
+  without) despite the AUDIT note above flagging its t1 rel32.
+- Letting Go's handler run unwrapped is no better (3 trials: direct
+  5,5,7 /20 vs deferred 6,4,7 /20).
+- Sharing one GS base across threads **hangs** — threads then share a
+  single g. So per-thread GS is required, and the fix must live there.
+- stdout is empty on the crashing runs (0 bytes vs 156 on success), so
+  the fault is during boot, not post-main.
+
+Next step: fix the GS/signal interaction at the source — either
+`wrgsbase` on kernels ≥ 5.15 (this host is 7.2.6; the code only uses
+`arch_prctl` because of an old 5.10 workaround, and the `wrmsr`/signal
+path there may now be safe), or install the per-thread GS base via
+`CLONE_SETTLS` so the kernel tracks it. The current comment in
+`src/runtime.c` still claims wrgsbase "causes rip=0 crashes"; that
+claim needs re-testing on a modern kernel before the choice is made.
