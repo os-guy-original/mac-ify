@@ -1194,35 +1194,47 @@ long macify_sysconf(int name) {
  * individual flag bits, bash's readline ends up in a broken half-raw
  * mode where pressing ENTER echoes "^M" instead of submitting the line.
  *
- * Struct layout:
- *   macOS: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[20] c_ispeed(4) c_ospeed(4) = 60 bytes
- *   Linux: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[19] c_line(1) c_ispeed(4) c_ospeed(4) = 44 bytes
+ * Struct layout (verified vs xnu bsd/sys/termios.h and glibc
+ * bits/termios*.h):
+ *   macOS: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_cc[20]
+ *          c_ispeed(4) c_ospeed(4)                    = 44 bytes
+ *   Linux: c_iflag(4) c_oflag(4) c_cflag(4) c_lflag(4) c_line(1)
+ *          c_cc[32] c_ispeed(4) c_ospeed(4)           = 60 bytes
+ * (An older comment here claimed the reverse sizes — wrong. Sizes only
+ * matter for the caller's buffer, which is always macOS-shaped; the
+ * Linux struct is built locally, so this is cosmetic.)
  *
- * Flag bits — CRITICAL differences (sample):
- *   macOS ICANON=0x100, Linux ICANON=0x002      (canonical mode)
- *   macOS ISIG  =0x080, Linux ISIG  =0x001      (signal handling)
- *   macOS IXON  =0x200, Linux IXON  =0x400      (XON/XOFF flow control)
- *   macOS ECHOCTL=0x40, Linux ECHOCTL=0x200     (echo control chars as ^X)
+ * c_cc indices — Darwin (NCCS=20):
+ *   VEOF=0 VEOL=1 VEOL2=2 VERASE=3 VWERASE=4 VKILL=5 VREPRINT=6
+ *   [7 spare] VINTR=8 VQUIT=9 VSUSP=10 [11 spare] VSTART=12 VSTOP=13
+ *   VLNEXT=14 VDISCARD=15 VMIN=16 VTIME=17 VSTATUS=18 [19 spare]
+ * Linux (first 17 of NCCS=32):
+ *   VINTR=0 VQUIT=1 VERASE=2 VKILL=3 VEOF=4 VTIME=5 VMIN=6 VSWTC=7
+ *   VSTART=8 VSTOP=9 VSUSP=10 VEOL=11 VREPRINT=12 VDISCARD=13
+ *   VWERASE=14 VLNEXT=15 VEOL2=16
+ * An older table here started Darwin VINTR at 6 (forgetting VKILL=5 /
+ * VREPRINT=6), shifting every entry from VINTR down — Ctrl-C/Ctrl-Z
+ * swapped, VMIN/VTIME landing in VLNEXT/VDISCARD.
  *
- * c_cc indices — also totally different:
- *   macOS VINTR=6,  Linux VINTR=0
- *   macOS VQUIT=7,  Linux VQUIT=1
- *   macOS VERASE=3, Linux VERASE=2
- *   macOS VMIN=14,  Linux VMIN=6
- *   macOS VTIME=15, Linux VTIME=5
+ * Flag bits (sample):
+ *   macOS ICANON=0x100, Linux ICANON=0x002     (canonical mode)
+ *   macOS ISIG  =0x080, Linux ISIG  =0x001     (signal handling)
+ *   macOS IXON  =0x200, Linux IXON  =0x400     (output flow control)
+ *   macOS ONLCR =0x002, Linux ONLCR =0x004     (NL -> CR/NL on output)
+ *   macOS ECHOCTL=0x40, Linux ECHOCTL=0x200    (echo ctrl chars as ^X)
  *
- * If we don't translate these, bash's readline manipulates the wrong
- * bits and the terminal ends up in a broken state. */
+ * Speed constants: macOS encodes literal bit rates (B57600=57600,
+ * B115200=115200); Linux uses small codes above 38400 (B57600=0x1001,
+ * B115200=0x1002). Up to B38400 the numeric encodings coincide. */
 
 struct macos_termios {
     unsigned int  c_iflag;    /* 0  */
     unsigned int  c_oflag;    /* 4  */
     unsigned int  c_cflag;    /* 8  */
     unsigned int  c_lflag;    /* 12 */
-    unsigned char c_cc[20];   /* 16  — macOS NCCS=20 */
+    unsigned char c_cc[20];   /* 16 — macOS NCCS=20 */
     unsigned int  c_ispeed;   /* 36 */
     unsigned int  c_ospeed;   /* 40 */
-    /* padding to 60 bytes */
 };
 
 /* ── c_iflag bit translation ──
@@ -1245,33 +1257,34 @@ static unsigned int iflag_mac_to_linux(unsigned int mf) {
 }
 
 /* ── c_oflag bit translation ──
- * Bits 0x1 (OPOST) and 0x2 (ONLCR) match. Beyond that they diverge:
- *   macOS OXTABS=0x004 (no exact Linux equiv; Linux uses TABDLY=0x1800, TAB3=0x1800)
- *   macOS ONOEOT=0x008 (no Linux equiv)
- *   macOS OCRNL =0x010 ↔ Linux OCRNL =0x004
- *   macOS ONOCR =0x020 ↔ Linux ONOCR =0x008
- *   macOS ONLRET=0x040 ↔ Linux ONLRET=0x010
- *   macOS OFILL =0x080 ↔ Linux OFILL =0x040
- *   macOS OFDEL =0x100 ↔ Linux OFDEL =0x080
- * For output flags, mismatched bits mainly affect CR/NL handling on output.
- * We translate the well-known ones; OXTABS/ONOEOT are dropped (rarely used). */
+ * OPOST matches (0x1). Linux ONLCR is 0x4 on x86_64 — an older table
+ * assumed 0x2, which is actually OLCUC, so ONLCR was silently dropped
+ * and aliased with OLCUC in both directions. macOS values:
+ *   ONLCR=0x2 OCRNL=0x10 ONOCR=0x20 ONLRET=0x40 OFILL=0x80 OFDEL=0x20000
+ *   OXTABS=0x4 ONOEOT=0x8
+ * Linux x86_64 values:
+ *   ONLCR=0x4 OCRNL=0x8 ONOCR=0x10 ONLRET=0x20 OFILL=0x40 OFDEL=0x80
+ *   OLCUC=0x2 TABDLY=0xc00 (TAB3=0xc00 ≈ OXTABS) */
 static unsigned int oflag_linux_to_mac(unsigned int lf) {
-    unsigned int mf = lf & 0x3;  /* keep OPOST|ONLCR */
-    if (lf & 0x004) mf |= 0x010;  /* OCRNL */
-    if (lf & 0x008) mf |= 0x020;  /* ONOCR */
-    if (lf & 0x010) mf |= 0x040;  /* ONLRET */
+    unsigned int mf = lf & 0x1;  /* keep OPOST */
+    if (lf & 0x004) mf |= 0x002;  /* ONLCR */
+    if (lf & 0x008) mf |= 0x010;  /* OCRNL */
+    if (lf & 0x010) mf |= 0x020;  /* ONOCR */
+    if (lf & 0x020) mf |= 0x040;  /* ONLRET */
     if (lf & 0x040) mf |= 0x080;  /* OFILL */
-    if (lf & 0x080) mf |= 0x100;  /* OFDEL */
+    if (lf & 0x080) mf |= 0x20000; /* OFDEL (macOS 0x20000, xnu termios.h) */
     return mf;
 }
 static unsigned int oflag_mac_to_linux(unsigned int mf) {
-    unsigned int lf = mf & 0x3;  /* keep OPOST|ONLCR */
-    if (mf & 0x010) lf |= 0x004;  /* OCRNL */
-    if (mf & 0x020) lf |= 0x008;  /* ONOCR */
-    if (mf & 0x040) lf |= 0x010;  /* ONLRET */
+    unsigned int lf = mf & 0x1;  /* keep OPOST */
+    if (mf & 0x002) lf |= 0x004;  /* ONLCR */
+    if (mf & 0x010) lf |= 0x008;  /* OCRNL */
+    if (mf & 0x020) lf |= 0x010;  /* ONOCR */
+    if (mf & 0x040) lf |= 0x020;  /* ONLRET */
     if (mf & 0x080) lf |= 0x040;  /* OFILL */
-    if (mf & 0x100) lf |= 0x080;  /* OFDEL */
-    /* OXTABS (0x4) and ONOEOT (0x8) have no direct Linux equivalent — dropped */
+    if (mf & 0x20000) lf |= 0x080; /* OFDEL (macOS 0x20000 != Linux 0x80) */
+    /* macOS OXTABS (0x4) → Linux TABDLY|TAB3 (0xc00); ONOEOT dropped */
+    if (mf & 0x004) lf |= 0xc00;
     return lf;
 }
 
@@ -1383,90 +1396,151 @@ static unsigned int lflag_mac_to_linux(unsigned int mf) {
 /* ── c_cc index translation ──
  * Each control-character slot has a different index in the c_cc[] array.
  * We translate by *symbolic name*, not by raw index. Entries that exist
- * on only one side are silently dropped.
+ * on only one side are dropped.
  *
  *   macOS idx → Linux idx   Symbol
  *   0  → 4                  VEOF
  *   1  → 11                 VEOL
  *   2  → 16                 VEOL2
  *   3  → 2                  VERASE
- *   4  → 14                 VWERASE
- *   5  → 12                 VREPRINT
- *   6  → 0                  VINTR
- *   7  → 1                  VQUIT
- *   8  → 10                 VSUSP
- *   10 → 8                  VSTART
- *   11 → 9                  VSTOP
- *   12 → 15                 VLNEXT
- *   13 → 13                 VDISCARD  (same index)
- *   14 → 6                  VMIN
- *   15 → 5                  VTIME
- *   (9 VDSUSP, 16 VSTATUS, 17 VERASE2 — macOS only, dropped)
- */
-static void c_cc_linux_to_mac(const unsigned char lc[19], unsigned char mc[20]) {
+ *   4  → (none)             VERASE2 (macOS-only)
+ *   5  → 3                  VKILL
+ *   6  → 12                 VREPRINT
+ *   8  → 0                  VINTR
+ *   9  → 1                  VQUIT
+ *   10 → 10                 VSUSP   (same value, different slot)
+ *   12 → 8                  VSTART
+ *   13 → 9                  VSTOP
+ *   14 → 15                 VLNEXT
+ *   15 → 13                 VDISCARD
+ *   16 → 6                  VMIN
+ *   17 → 5                  VTIME
+ *   18 → (none)             VSTATUS (macOS-only)
+ *   (7 spare, 11 spare, 19 spare — unused on macOS)
+ * An older table omitted VKILL=5 and started VINTR at 6, shifting every
+ * entry from VINTR through VTIME: Ctrl-C fired SIGTSTP-ish behavior,
+ * VMIN/VTIME were written into VLNEXT/VDISCARD, and the kill character
+ * became ^R instead of ^U. */
+static void c_cc_linux_to_mac(const unsigned char *lc, unsigned char mc[20]) {
     memset(mc, 0, 20);
-    mc[0]  = lc[4];    /* VEOF   */
-    mc[1]  = lc[11];   /* VEOL   */
-    mc[2]  = lc[16];   /* VEOL2  */
-    mc[3]  = lc[2];    /* VERASE */
-    mc[4]  = lc[14];   /* VWERASE */
-    mc[5]  = lc[12];   /* VREPRINT */
-    mc[6]  = lc[0];    /* VINTR  */
-    mc[7]  = lc[1];    /* VQUIT  */
-    mc[8]  = lc[10];   /* VSUSP  */
-    mc[10] = lc[8];    /* VSTART */
-    mc[11] = lc[9];    /* VSTOP  */
-    mc[12] = lc[15];   /* VLNEXT */
-    mc[13] = lc[13];   /* VDISCARD */
-    mc[14] = lc[6];    /* VMIN   */
-    mc[15] = lc[5];    /* VTIME  */
-    /* mc[9] (VDSUSP), mc[16] (VSTATUS), mc[17] (VERASE2) — no Linux equiv, left 0 */
-    /* mc[18], mc[19] — reserved, left 0 */
+    mc[0]  = lc[4];    /* VEOF     */
+    mc[1]  = lc[11];   /* VEOL     */
+    mc[2]  = lc[16];   /* VEOL2    */
+    mc[3]  = lc[2];    /* VERASE   */
+    mc[4]  = 0;        /* VERASE2  (no Linux equiv) */
+    mc[5]  = lc[3];    /* VKILL    */
+    mc[6]  = lc[12];   /* VREPRINT */
+    mc[7]  = 0;        /* spare    */
+    mc[8]  = lc[0];    /* VINTR    */
+    mc[9]  = lc[1];    /* VQUIT    */
+    mc[10] = lc[10];   /* VSUSP    */
+    mc[11] = 0;        /* spare    */
+    mc[12] = lc[8];    /* VSTART   */
+    mc[13] = lc[9];    /* VSTOP    */
+    mc[14] = lc[15];   /* VLNEXT   */
+    mc[15] = lc[13];   /* VDISCARD */
+    mc[16] = lc[6];    /* VMIN     */
+    mc[17] = lc[5];    /* VTIME    */
+    mc[18] = 0;        /* VSTATUS  (no Linux equiv) */
+    mc[19] = 0;        /* spare    */
 }
-static void c_cc_mac_to_linux(const unsigned char mc[20], unsigned char lc[19]) {
-    memset(lc, 0, 19);
-    lc[4]  = mc[0];    /* VEOF   */
-    lc[11] = mc[1];    /* VEOL   */
-    lc[16] = mc[2];    /* VEOL2  */
-    lc[2]  = mc[3];    /* VERASE */
-    lc[14] = mc[4];    /* VWERASE */
-    lc[12] = mc[5];    /* VREPRINT */
-    lc[0]  = mc[6];    /* VINTR  */
-    lc[1]  = mc[7];    /* VQUIT  */
-    lc[10] = mc[8];    /* VSUSP  */
-    lc[8]  = mc[10];   /* VSTART */
-    lc[9]  = mc[11];   /* VSTOP  */
-    lc[15] = mc[12];   /* VLNEXT */
-    lc[13] = mc[13];   /* VDISCARD */
-    lc[6]  = mc[14];   /* VMIN   */
-    lc[5]  = mc[15];   /* VTIME  */
-    /* lc[3] (VKILL), lc[7] (VSWTC), lc[17] (VPOLL) — no macOS equiv, left 0 */
-    /* lc[18] — reserved, left 0 */
+static void c_cc_mac_to_linux(const unsigned char mc[20], unsigned char *lc) {
+    memset(lc, 0, 32); /* full NCCS so c_line-adjacent slots are clean */
+    lc[4]  = mc[0];    /* VEOF     */
+    lc[11] = mc[1];    /* VEOL     */
+    lc[16] = mc[2];    /* VEOL2    */
+    lc[2]  = mc[3];    /* VERASE   */
+    lc[3]  = mc[5];    /* VKILL    */
+    lc[12] = mc[6];    /* VREPRINT */
+    lc[0]  = mc[8];    /* VINTR    */
+    lc[1]  = mc[9];    /* VQUIT    */
+    lc[10] = mc[10];   /* VSUSP    */
+    lc[8]  = mc[12];   /* VSTART   */
+    lc[9]  = mc[13];   /* VSTOP    */
+    lc[15] = mc[14];   /* VLNEXT   */
+    lc[13] = mc[15];   /* VDISCARD */
+    lc[6]  = mc[16];   /* VMIN     */
+    lc[5]  = mc[17];   /* VTIME    */
+    /* lc[7] VSWTC, lc[14] VEOL2-dup slot, lc[17] VEOF2 — no macOS equiv */
 }
 
 /* ── speed_t translation ──
- * For the legacy speeds B0..B38400 (values 0..15), macOS and Linux use
- * identical numeric constants, so no translation is needed for them.
- * For the high speeds (B57600, B115200, etc.) the encodings differ:
- *   macOS B57600=16, Linux B57600=0x1001
- *   macOS B115200=18, Linux B115200=0x1002
- * We translate the common high speeds explicitly. */
+ * Verified against xnu bsd/sys/termios.h (macOS: literal bit rates,
+ * B57600=57600 … B230400=230400, nothing above) and the glibc 2.42+
+ * "sane speed_t" rework (termios/speed.c + sysdeps/unix/sysv/linux/
+ * speed.c, tcsetattr.c): glibc now stores literal bit rates in
+ * c_ispeed/c_ospeed and converts to/from the kernel CBAUD codes
+ * (B57600=0x1001 … B4000000=0x100f, per asm-generic/termbits.h)
+ * inside tcgetattr/tcsetattr via the termios2 ioctls.
+ * Pre-2.42 glibc instead used the kernel codes as the user-visible
+ * Bxxx constants (cfgetospeed returned c_cflag & CBAUD, and
+ * cfsetospeed copied its argument straight into the CBAUD field).
+ *
+ * We stay compatible with both:
+ *  - reading: decode kernel codes (<= 15 and 0x1001..0x100f) to rates,
+ *    pass literal rates through. Sub-50 values cannot be literal rates
+ *    on macOS (minimum non-zero Bxxx is B50), so the low range is
+ *    unambiguous.
+ *  - writing: store literal rates in c_ispeed/c_ospeed AND put the
+ *    kernel CBAUD code into c_cflag ourselves. Old glibc's tcsetattr
+ *    uses only the CBAUD field; new glibc recomputes CBAUD from the
+ *    literal speed (___termios2_canonicalize_speeds), overwriting what
+ *    we wrote. Calling cfsetispeed/cfsetospeed cannot work for both
+ *    generations because their argument conventions differ. */
+static const unsigned int macify_cbaud_code_to_rate[16] = {
+    0, 50, 75, 110, 134, 150, 200, 300, 600, 1200,
+    1800, 2400, 4800, 9600, 19200, 38400
+};
+
 static unsigned int speed_linux_to_mac(unsigned int ls) {
-    switch (ls) {
-        case 0x1001: return 16;   /* B57600   */
-        case 0x1002: return 18;   /* B115200  */
-        case 0x1003: return 19;   /* B230400  */
-        /* Less common high speeds — best-effort pass-through */
-        default: return ls & 0xFFFF;
+    if (ls <= 15)                       /* old-glibc kernel code B0..B38400 */
+        return macify_cbaud_code_to_rate[ls];
+    switch (ls) {                       /* old-glibc high codes */
+        case 0x1001: return 57600;
+        case 0x1002: return 115200;
+        case 0x1003: return 230400;
+        case 0x1004: return 460800;
+        case 0x1005: return 500000;
+        case 0x1006: return 576000;
+        case 0x1007: return 921600;
+        case 0x1008: return 1000000;
+        case 0x1009: return 1152000;
+        case 0x100a: return 1500000;
+        case 0x100b: return 2000000;
+        case 0x100c: return 2500000;
+        case 0x100d: return 3000000;
+        case 0x100e: return 3500000;
+        case 0x100f: return 4000000;
     }
+    return ls;                          /* glibc 2.42+ literal rate */
 }
+
 static unsigned int speed_mac_to_linux(unsigned int ms) {
-    switch (ms) {
-        case 16: return 0x1001;   /* B57600   */
-        case 17: return 0x1003;   /* B76800 — no exact Linux equiv, map to B230400 */
-        case 18: return 0x1002;   /* B115200  */
-        case 19: return 0x1003;   /* B230400  */
-        default: return ms & 0xFFFF;
+    /* macOS B76800 has no Linux kernel code — nearest standard 115200 */
+    return (ms == 76800) ? 115200 : ms;
+}
+
+/* Kernel CBAUD code (asm-generic/termbits.h CBAUD=0x100f) for a rate.
+ * Unknown rates fall back to B38400: pre-2.42 glibc has no BOTHER
+ * escape hatch, and BOTHER (0x1000) alone would make old glibc tcsetattr
+ * program an undefined line rate. */
+static unsigned int speed_to_cbaud_code(unsigned int rate) {
+    unsigned int i;
+    for (i = 0; i < 16; i++)
+        if (macify_cbaud_code_to_rate[i] == rate) return i;
+    switch (rate) {
+        case 57600:   return 0x1001;
+        case 115200:  return 0x1002;
+        case 230400:  return 0x1003;
+        case 460800:  return 0x1004;
+        case 500000:  return 0x1005;
+        case 576000:  return 0x1006;
+        case 921600:  return 0x1007;
+        case 1000000: return 0x1008;
+        case 1152000: return 0x1009;
+        case 1500000: return 0x100a;
+        case 2000000: return 0x100b;
+        default:      return 0xf;    /* B38400 fallback */
     }
 }
 
@@ -1506,6 +1580,7 @@ int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *t
     if (!real_tcsetattr || !termios_p) return -1;
     struct termios lt;
     memset(&lt, 0, sizeof(lt));
+    lt.c_line = 0;  /* N_TTY; guest structs have no c_line field */
     lt.c_iflag = iflag_mac_to_linux(termios_p->c_iflag);
     lt.c_oflag = oflag_mac_to_linux(termios_p->c_oflag);
     lt.c_cflag = cflag_mac_to_linux(termios_p->c_cflag);
@@ -1521,11 +1596,18 @@ int macify_tcsetattr(int fd, int optional_actions, const struct macos_termios *t
     if ((lt.c_lflag & 0x002) && !(lt.c_iflag & 0x100)) {
         lt.c_cc[11] = '\r';  /* VEOL = CR (safety net) */
     }
-    /* Translate speeds via cfsetispeed/cfsetospeed so the kernel sees
-     * the proper CBAUD bits in c_cflag as well as the c_ispeed/c_ospeed
-     * fields used by glibc. */
-    cfsetispeed(&lt, speed_mac_to_linux(termios_p->c_ispeed));
-    cfsetospeed(&lt, speed_mac_to_linux(termios_p->c_ospeed));
+    /* Speeds: store literal rates in c_ispeed/c_ospeed (glibc 2.42+
+     * convention) AND program the kernel CBAUD code into c_cflag
+     * (pre-2.42 convention, where tcsetattr derived the line rate from
+     * c_cflag and ignored c_ispeed/c_ospeed). New glibc recomputes CBAUD
+     * from the literal speeds inside tcsetattr, overwriting ours — the
+     * two conventions agree because both encode the same rate. Calling
+     * cfsetispeed/cfsetospeed cannot satisfy both generations since
+     * their argument conventions differ (literal rate vs kernel code). */
+    lt.c_ispeed = speed_mac_to_linux(termios_p->c_ispeed);
+    lt.c_ospeed = speed_mac_to_linux(termios_p->c_ospeed);
+    lt.c_cflag = (lt.c_cflag & ~0x100fu)
+               | speed_to_cbaud_code(lt.c_ospeed);
     /* Translate macOS optional_actions to Linux:
      *   TCSANOW=0, TCSADRAIN=1, TCSAFLUSH=2 (same on both) */
     if (getenv("MACIFY_TRACE_TERMIOS")) {
