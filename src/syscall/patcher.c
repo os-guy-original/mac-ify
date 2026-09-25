@@ -289,7 +289,11 @@ void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
          *   jmp to pop rbp;ret (5 bytes: E9 XX XX XX XX)
          * Total: 17 bytes */
         size_t t1_off = trampoline_off;
-        int32_t t1_jmp_to_pop = (int32_t)(pop_ret_off - (t1_off + 17 + 5));
+        /* rel32 target = end_of_jmp + rel. t1 stream: mov rax,[rbx] (3)
+         * + mov gs:0x30,rax (9) = 12, jmp at t1[12] ends at t1_off+17.
+         * (An older computation subtracted an extra 5, landing the jump
+         * 5 bytes BEFORE pop rbp;ret — mid-instruction.) */
+        int32_t t1_jmp_to_pop = (int32_t)(pop_ret_off - (t1_off + 17));
 
         uint8_t t1[22]; /* 17 bytes + padding */
         t1[0] = 0x48; t1[1] = 0x8b; t1[2] = 0x03;  /* mov rax, [rbx] (m.g0) */
