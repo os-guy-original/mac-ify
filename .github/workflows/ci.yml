@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3
+
+      # `make test` generates its own Mach-O fixtures via scripts/gen_macho.py,
+      # so this job needs nothing fetched and behaves identically on a clean
+      # checkout.
+      #
+      # `make test-real` is deliberately NOT run here. It exercises real macOS
+      # binaries from scripts/fetch_binaries.sh, which are third-party
+      # downloads (MacPorts, GitHub releases) and are not vendored into this
+      # repository. Without them the harness reports
+      #   real_regression: 0 passed, 0 failed, 23 skipped
+      # — a green exit code that verifies nothing — so gating on it would be
+      # worse than not gating at all. Run it locally after
+      # ./scripts/fetch_binaries.sh.
+      #
+      # The -Werror build is also not gated: it already fails on pre-existing
+      # warnings (e.g. an empty-body warning in syscall/flag_translation.c),
+      # so it would fail on arrival for reasons unrelated to any new change.
+      - name: Build and run unit tests
+        run: make test
