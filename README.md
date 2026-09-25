@@ -44,6 +44,19 @@ make test-smoke
 make test-functional
 ```
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs `make test` on every push and pull
+request. That target generates its own Mach-O fixtures via
+`scripts/gen_macho.py`, so it needs nothing downloaded and gives the same
+result on a fresh runner as it does locally.
+
+`make test-real` is not part of CI. It needs the real macOS binaries from
+`scripts/fetch_binaries.sh`, which are third-party downloads and are not
+vendored here; with none present it reports `0 passed, 0 failed, 23
+skipped` and still exits 0, so it would look like coverage while checking
+nothing. Run it locally after fetching the binaries.
+
 The dispatcher works from the source tree and after `make install`,
 and never needs `LD_LIBRARY_PATH` — the loader locates the shim next
 to itself via `/proc/self/exe`.
