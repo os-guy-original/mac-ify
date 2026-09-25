@@ -622,7 +622,58 @@ both `echo A` and `echo -n A`, so it is not the `nflag` it was assumed to
 be; identifying what actually sets it (and whether the loader leaves it
 wrong) is the next concrete step.
 
-Worth checking alongside: the same symptom should be tested against a
-*different* bash build. If a second bash shows it, the cause is in the
-loader; if not, it is this build's codegen and the fix belongs in the
-putc/stdio emulation rather than in the loader.
+### The actual executed path (traced, not inferred)
+
+Reached by breaking on the guest's own PLT stub and single-stepping, so
+this is the real instruction stream rather than a guess at the control
+flow. `echo A` runs:
+
+    0x10006976e  mov  r12b,0x1
+    0x100069771  jmp  0x10006977f
+    0x10006977f  cmp  DWORD [rbx],0x0     ; rbx = &_terminating_signal
+    0x100069782  je   0x10006978b          ; TAKEN — 0 in &  → skip
+    0x10006978b  lea  rax,[rip+0x4775a]   ; 0x1000b0eec
+    0x100069792  cmp  DWORD [rax],0x0
+    0x100069795  je   0x10006979c
+    0x10006979c  test r13d,r13d
+    0x10006979f  sete al                 ; al = (r13d == 0)
+    0x1000697a2  xor  r12b,0x1            ; r12 low byte -> 0
+    0x1000697a6  or   r12b,al             ; r12 low byte -> 1  (al was 1)
+    0x1000697a9  jne  0x1000697b3         ; TAKEN
+    0x1000697ab  mov  rdi,r15             ; SKIPPED
+    0x1000697ae  call <0x10008cfd4>        ; SKIPPED  <-- the emitter
+    0x1000697b3  cmp  DWORD [rbp-0x2c],0x0
+
+Observed register values at each step: `r12` goes `...01 -> ...00` at the
+`xor`, then back to `...01` at the `or` (because `al`=1), so the `jne` is
+always taken and the emit call is always skipped. That is the newline,
+gone.
+
+The two things that decide it, and both are wrong in a way worth naming:
+
+1. `&_terminating_signal` (`0x1000b0ef8`, a `__common` symbol) reads 0, so
+   the `je` at `0x100069782` is taken. On a real macOS run this is also 0
+   at boot, so either that comparison is not the guard we think it is, or
+   the register it wants (`rbx`) is not what we believe.
+2. `al` is 1, i.e. `r13d == 0`. `r13` is *not* the `nflag`: it reads 0 for
+   `echo A` **and** `echo -n A` alike, yet the two must differ somewhere,
+   because `-n` is honoured correctly. So `r13` is being loaded from the
+   wrong place, and whatever it is meant to carry is not reaching it.
+
+Both point at the same thing: a guest register is not holding the value
+the guest's own code put there. That is a *register-state* problem, not a
+stdio or symbol-binding problem — which is consistent with every symbol
+being correctly resolved (`378 resolved, 0 unresolved`), `__swbuf`/`putchar`
+/`fputc` all bound to the shim, and `echo -e`/`printf` (which do not use
+this path) working.
+
+### Next step
+
+Find who is clobbering `r13` (and `rbx`) between bash setting them and
+this code reading them. The putc patch and the stdio shims are the only
+things that rewrite guest register state, and the patch has been excluded
+by output comparison but **not** excluded as a register-value disturbance
+— a patch that is output-neutral can still corrupt a callee-saved
+register that a later branch depends on. The concrete experiment is to
+break at `0x1000696ba` (`test r13d,r13d`) and watch `r13` backwards to find
+the last instruction that wrote it.
