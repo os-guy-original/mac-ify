@@ -902,9 +902,44 @@ Fixed by translating the category in `macify_setlocale` before calling
 glibc. Verified: `setlocale(cat=2->0, ...)` in the locale trace, ruby
 reports UTF-8, and bash stderr stays at 0 bytes on top of fix 1.
 
-Note for anything that follows: `newlocale`/`uselocale`/`duplocale` are not
-interposed at all, and their `LC_*_MASK` bits carry the same renumbering, so
-a guest using them still gets the wrong categories.
+### 2b. The extended-locale API had a second, independent renumbering
+
+`setlocale` takes an LC_* *category*; `newlocale` takes an LC_*_MASK *bit*
+set, and the bits are numbered differently again — not the same order as the
+categories, on either platform:
+
+| | masks |
+|---|---|
+| macOS (MacOSX SDK `xlocale.h`) | COLLATE 1<<0, CTYPE 1<<1, MESSAGES 1<<2, MONETARY 1<<3, NUMERIC 1<<4, TIME 1<<5, ALL 0x3f |
+| glibc (`locale.h`) | CTYPE 1<<0, NUMERIC 1<<1, TIME 1<<2, COLLATE 1<<3, MONETARY 1<<4, MESSAGES 1<<5, ALL every bit |
+
+So a guest's `newlocale(LC_NUMERIC_MASK, ...)` was glibc's LC_MONETARY at the
+same bit 0x10 and left numeric on the base locale. `LC_ALL_MASK` is the one
+value that coincides (0x3f is also the OR of glibc's six), which is why code
+that only ever passed `LC_ALL_MASK` did not notice.
+
+The mask is now translated in `macify_newlocale`, and `uselocale`,
+`duplocale` and `freelocale` are interposed as well (they take and return the
+opaque `locale_t` that `newlocale` produced, so they only forward).
+`freelocale` is shaped to macOS's `int` return even though glibc's returns
+`void`.
+
+There was a routing bug underneath this too. A guest that binds these
+symbols two-level to libSystem does not reach the shim's plain exports;
+`src/segments.c` only honours a `MUST-INTERPOSE` list for ordinal binds. The
+five locale entry points were not on it, so even a correct `macify_newlocale`
+would have been bypassed. They are now listed there, which also routes
+`setlocale` through the shim for two-level-bound guests.
+
+Verified with a new `locale.bin` test binary (`make test`, 17/17): it calls
+`newlocale(0x10 /* macOS LC_NUMERIC_MASK */, "tr_TR.UTF-8", NULL)`,
+`uselocale`s the result, and checks `localeconv()->decimal_point[0]`:
+
+    translation on:   newlocale(mask=0x10->0x2, ...)  decimal_point ','  -> numeric-ok
+    translation off:  (mask 0x10 untranslated)        decimal_point '.'  -> numeric-FAIL
+
+The off run is the discriminating control, so the test cannot pass for the
+wrong reason.
 
 ### 3. The forced LC_NUMERIC=C is gone, and must not come back
 

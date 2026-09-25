@@ -1981,6 +1981,169 @@ def build_hello_errno():
     return result
 
 
+def build_locale_bin():
+    """Build a binary that calls newlocale with a macOS LC_NUMERIC_MASK.
+
+    This tests two things the platform difference makes easy to get wrong:
+      1. the shim's newlocale is reached at all (a two-level bind to
+         libSystem would otherwise go straight to glibc), and
+      2. the LC_*_MASK bit is translated before glibc sees it.
+
+    macOS numbers LC_NUMERIC_MASK as (1<<4)=0x10 (MacOSX SDK xlocale.h),
+    but glibc numbers LC_MONETARY at 1<<4 and LC_NUMERIC at 1<<1. An
+    untranslated 0x10 sets glibc's *monetary* category and leaves numeric
+    on the base ("C"), so localeconv_l(loc)->decimal_point stays ".". With
+    the translation it is "," for tr_TR.UTF-8.
+    """
+    locname  = b"tr_TR.UTF-8\x00"
+    ok_msg   = b"numeric-ok\n"
+    fail_msg = b"numeric-FAIL\n"
+    null_msg = b"newlocale-null\n"
+
+    text_vmaddr = 0x1000
+    data_vmaddr = 0x2000
+
+    pagezero = segment_command_64('__PAGEZERO', 0, 0x1000, 0, 0, VM_PROT_READ, 0)
+    dylib_cmd = load_dylib_command('libSystem.B.dylib')
+
+    ncmds = 6  # 3 segments + dylib + dyld_info + main
+    sizeofcmds = 72 * 3 + len(dylib_cmd) + 48 + 24
+    header_size = 32 + sizeofcmds
+    code_offset = align_up(header_size, 16)
+    code_vmaddr = text_vmaddr + code_offset
+
+    code = bytearray()
+    code += b'\x55'                              # push rbp
+    code += b'\x48\x89\xe5'                      # mov rbp, rsp
+    # loc = newlocale(0x10 /* macOS LC_NUMERIC_MASK */, "tr_TR.UTF-8", NULL)
+    code += b'\xbf\x10\x00\x00\x00'              # mov edi, 16
+    lea_loc_pos = len(code)
+    code += b'\x48\x8d\x35\x00\x00\x00\x00'      # lea rsi, [rip+locname]
+    code += b'\x31\xd2'                          # xor edx, edx (base = NULL)
+    call_newlocale_pos = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'          # call [rip+got_newlocale]
+    # if (!loc) goto null
+    code += b'\x48\x85\xc0'                      # test rax, rax
+    jz_null_pos = len(code)
+    code += b'\x0f\x84\x00\x00\x00\x00'          # jz null
+    # uselocale(loc) — install it as the thread locale
+    code += b'\x48\x89\xc7'                      # mov rdi, rax
+    call_uselocale_pos = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'          # call [rip+got_uselocale]
+    # lc = localeconv() — reflects the thread locale set above
+    call_lconv_pos = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'          # call [rip+got_lconv]
+    # decimal_point is the first field: rax = lc->decimal_point; test first byte
+    code += b'\x48\x8b\x00'                      # mov rax, [rax]
+    code += b'\x80\x38\x2c'                      # cmp byte [rax], ','
+    je_ok_pos = len(code)
+    code += b'\x0f\x84\x00\x00\x00\x00'          # je ok
+    # fail
+    code += b'\xbf\x01\x00\x00\x00'              # mov edi, 1
+    lea_fail_pos = len(code)
+    code += b'\x48\x8d\x35\x00\x00\x00\x00'      # lea rsi, [rip+fail_msg]
+    code += b'\xba' + struct.pack('<i', len(fail_msg))
+    call_w1 = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'
+    code += b'\xbf\x01\x00\x00\x00'              # mov edi, 1
+    call_e1 = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'
+    # ok
+    ok_offset = len(code)
+    code += b'\xbf\x01\x00\x00\x00'              # mov edi, 1
+    lea_ok_pos = len(code)
+    code += b'\x48\x8d\x35\x00\x00\x00\x00'      # lea rsi, [rip+ok_msg]
+    code += b'\xba' + struct.pack('<i', len(ok_msg))
+    call_w2 = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'
+    code += b'\x31\xff'                          # xor edi, edi
+    call_e2 = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'
+    # null
+    null_offset = len(code)
+    code += b'\xbf\x01\x00\x00\x00'              # mov edi, 1
+    lea_null_pos = len(code)
+    code += b'\x48\x8d\x35\x00\x00\x00\x00'      # lea rsi, [rip+null_msg]
+    code += b'\xba' + struct.pack('<i', len(null_msg))
+    call_w3 = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'
+    code += b'\xbf\x02\x00\x00\x00'              # mov edi, 2
+    call_e3 = len(code)
+    code += b'\xff\x15\x00\x00\x00\x00'
+    # data
+    locname_off = len(code); code += locname
+    ok_off      = len(code); code += ok_msg
+    fail_off    = len(code); code += fail_msg
+    null_off    = len(code); code += null_msg
+
+    # __DATA: 4 GOT entries
+    got_newlocale_off = 0
+    got_uselocale_off = 8
+    got_lconv_off     = 16
+    got_write_off     = 24
+    got_exit_off      = 32
+    data_filesize = 40
+    data_fileoff = align_up(code_offset + len(code), 8)
+
+    bind_bc = bytearray()
+    for sym, off in ((b'_newlocale', got_newlocale_off),
+                     (b'_uselocale', got_uselocale_off),
+                     (b'_localeconv', got_lconv_off),
+                     (b'_write', got_write_off),
+                     (b'_exit', got_exit_off)):
+        bind_bc += bytes([BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1,
+                          BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | 0]) + sym + b'\x00' + bytes([
+            BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER,
+            BIND_OPCODE_SET_SEGMENT_RELATIVE_OFFSET_ULEB | 2]) + uleb128(off) + bytes([BIND_OPCODE_DO_BIND])
+    bind_bc += bytes([BIND_OPCODE_DONE])
+
+    bind_fileoff = data_fileoff + data_filesize
+    total_size = bind_fileoff + len(bind_bc)
+
+    text_seg = segment_command_64('__TEXT', text_vmaddr, align_up(total_size, 0x1000),
+        0, code_offset + len(code),
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+        VM_PROT_READ | VM_PROT_EXECUTE)
+    data_seg = segment_command_64('__DATA', data_vmaddr, 0x1000,
+        data_fileoff, data_filesize,
+        VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE)
+
+    dyld_info = dyld_info_command(bind_off=bind_fileoff, bind_size=len(bind_bc))
+    main_cmd = main_command(entryoff=code_offset)
+
+    header = mach_header(ncmds=ncmds, sizeofcmds=sizeofcmds, flags=0)
+    result = header + pagezero + text_seg + data_seg + dylib_cmd + dyld_info + main_cmd
+    if len(result) < code_offset:
+        result += b'\x90' * (code_offset - len(result))
+    result += code
+    if len(result) < data_fileoff:
+        result += b'\x00' * (data_fileoff - len(result))
+    result += struct.pack('<QQQQQ', 0, 0, 0, 0, 0)
+    result += bind_bc
+
+    code = bytearray(result[code_offset:code_offset + len(code)])
+    def patch_lea(pos, target):
+        struct.pack_into('<i', code, pos + 3, target - (pos + 7))
+    def patch_call_indirect(pos, target_vmaddr):
+        struct.pack_into('<i', code, pos + 2, target_vmaddr - (code_vmaddr + pos + 6))
+
+    patch_lea(lea_loc_pos, locname_off)
+    patch_lea(lea_ok_pos, ok_off)
+    patch_lea(lea_fail_pos, fail_off)
+    patch_lea(lea_null_pos, null_off)
+    for p, o in ((call_newlocale_pos, got_newlocale_off),
+                 (call_uselocale_pos, got_uselocale_off),
+                 (call_lconv_pos, got_lconv_off),
+                 (call_w1, got_write_off), (call_w2, got_write_off), (call_w3, got_write_off),
+                 (call_e1, got_exit_off), (call_e2, got_exit_off), (call_e3, got_exit_off)):
+        patch_call_indirect(p, data_vmaddr + o)
+    struct.pack_into('<i', code, jz_null_pos + 2, null_offset - (jz_null_pos + 6))
+    struct.pack_into('<i', code, je_ok_pos + 2, ok_offset - (je_ok_pos + 6))
+
+    result = result[:code_offset] + bytes(code) + result[code_offset + len(code):]
+    return result
+
+
 def build_hello_tlv():
     """Build a binary that uses TLV (Thread-Local Variables).
 
@@ -2273,6 +2436,14 @@ def main():
     os.chmod(path, 0o755)
     print(f"  {'hello_errno.bin':16s}  mach-o={len(macho):4d}B  -> {path}")
 
+    # locale uses newlocale/uselocale: macOS LC_*_MASK translation
+    macho = build_locale_bin()
+    path = os.path.join(out_dir, 'locale.bin')
+    with open(path, 'wb') as f:
+        f.write(macho)
+    os.chmod(path, 0o755)
+    print(f"  {'locale.bin':16s}  mach-o={len(macho):4d}B  -> {path}")
+
     # hello_tlv uses TLV (Thread-Local Variables) with __thread_vars/__thread_data sections
     macho = build_hello_tlv()
     path = os.path.join(out_dir, 'hello_tlv.bin')
@@ -2281,7 +2452,7 @@ def main():
     os.chmod(path, 0o755)
     print(f"  {'hello_tlv.bin':16s}  mach-o={len(macho):4d}B  -> {path}")
 
-    print(f"\nGenerated {len(TEST_BINARIES) + 7} test binaries in {out_dir}")
+    print(f"\nGenerated {len(TEST_BINARIES) + 8} test binaries in {out_dir}")
 
 
 if __name__ == '__main__':

@@ -210,6 +210,12 @@ TESTS = [
         'expect_exit': 0,
     },
     {
+        'name': 'locale — newlocale mask translation: macOS LC_NUMERIC_MASK(0x10) → glibc LC_NUMERIC(1<<1)',
+        'binary': 'locale.bin',
+        'expect_stdout': 'numeric-ok\n',
+        'expect_exit': 0,
+    },
+    {
         'name': 'hello_tlv — TLV (Thread-Local Variables): __thread_vars + __thread_data + _tlv_bootstrap',
         'binary': 'hello_tlv.bin',
         'expect_stdout': 'tlv-ok\n',

@@ -254,6 +254,105 @@ char *macify_setlocale(int category, const char *locale) {
     return r;
 }
 
+/* newlocale/uselocale/duplocale/freelocale — the extended-locale API.
+ *
+ * `setlocale` above translates the LC_* CATEGORY. These take a CATEGORY MASK
+ * instead, and the mask bits are numbered differently on each platform — in
+ * yet another order from the category constants:
+ *
+ *   macOS (MacOSX SDK xlocale.h):
+ *     COLLATE 1<<0, CTYPE 1<<1, MESSAGES 1<<2,
+ *     MONETARY 1<<3, NUMERIC 1<<4, TIME 1<<5, ALL 0x3f
+ *
+ *   glibc (locale.h / bits/locale.h):
+ *     CTYPE 1<<0, NUMERIC 1<<1, TIME 1<<2,
+ *     COLLATE 1<<3, MONETARY 1<<4, MESSAGES 1<<5, ALL = every bit set
+ *
+ * Passing a macOS mask straight through selects the wrong categories: a
+ * guest calling newlocale(LC_NUMERIC_MASK, ...) set glibc's LC_MONETARY
+ * (0x10) and left numeric on the base locale. LC_ALL_MASK is the one value
+ * that coincides (0x3f is also the OR of glibc's six), so code that only
+ * used LC_ALL_MASK never noticed. Translate before calling glibc. */
+#define MACIFY_OSX_LC_COLLATE_MASK  (1 << 0)
+#define MACIFY_OSX_LC_CTYPE_MASK    (1 << 1)
+#define MACIFY_OSX_LC_MESSAGES_MASK (1 << 2)
+#define MACIFY_OSX_LC_MONETARY_MASK (1 << 3)
+#define MACIFY_OSX_LC_NUMERIC_MASK  (1 << 4)
+#define MACIFY_OSX_LC_TIME_MASK     (1 << 5)
+#define MACIFY_OSX_LC_ALL_MASK      (MACIFY_OSX_LC_COLLATE_MASK  \
+                                     | MACIFY_OSX_LC_CTYPE_MASK    \
+                                     | MACIFY_OSX_LC_MESSAGES_MASK \
+                                     | MACIFY_OSX_LC_MONETARY_MASK \
+                                     | MACIFY_OSX_LC_NUMERIC_MASK  \
+                                     | MACIFY_OSX_LC_TIME_MASK)
+
+static int macos_to_linux_mask(int mask) {
+    if ((mask & MACIFY_OSX_LC_ALL_MASK) == MACIFY_OSX_LC_ALL_MASK)
+        return LC_ALL_MASK;
+    int out = 0;
+    if (mask & MACIFY_OSX_LC_COLLATE_MASK)  out |= LC_COLLATE_MASK;
+    if (mask & MACIFY_OSX_LC_CTYPE_MASK)    out |= LC_CTYPE_MASK;
+    if (mask & MACIFY_OSX_LC_MESSAGES_MASK) out |= LC_MESSAGES_MASK;
+    if (mask & MACIFY_OSX_LC_MONETARY_MASK) out |= LC_MONETARY_MASK;
+    if (mask & MACIFY_OSX_LC_NUMERIC_MASK)  out |= LC_NUMERIC_MASK;
+    if (mask & MACIFY_OSX_LC_TIME_MASK)     out |= LC_TIME_MASK;
+    return out;
+}
+
+locale_t macify_newlocale(int mask, const char *locale, locale_t base) __asm__("newlocale");
+locale_t macify_newlocale(int mask, const char *locale, locale_t base) {
+    static locale_t (*real_newlocale)(int, const char *, locale_t) = NULL;
+    if (!real_newlocale) real_newlocale = macify_elf_lookup("newlocale");
+    /* Only translate for the macOS guest; glibc's own internal callers use
+     * glibc mask values already. */
+    int m = mask;
+    if (macify_caller_is_macos_text(__builtin_return_address(0)))
+        m = macos_to_linux_mask(mask);
+    locale_t r = real_newlocale ? real_newlocale(m, locale, base) : (locale_t)0;
+    if (getenv("MACIFY_TRACE_LOCALE")) {
+        char b[256];
+        int n = snprintf(b, sizeof(b),
+            "macify: newlocale(mask=%#x->%#x, locale=%s, base=%p) = %p\n",
+            mask, m, locale ? locale : "(null)", (void *)base, (void *)r);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+/* uselocale/duplocale take and return an opaque locale_t that came from our
+ * newlocale, i.e. a glibc locale_t, so they forward unchanged. They are
+ * interposed so every extended-locale entry point goes through the shim and
+ * a future mask-bearing caller cannot slip past it. */
+locale_t macify_uselocale(locale_t loc) __asm__("uselocale");
+locale_t macify_uselocale(locale_t loc) {
+    static locale_t (*real_uselocale)(locale_t) = NULL;
+    if (!real_uselocale) real_uselocale = macify_elf_lookup("uselocale");
+    locale_t r = real_uselocale ? real_uselocale(loc) : (locale_t)0;
+    if (getenv("MACIFY_TRACE_LOCALE")) {
+        char b[128];
+        int n = snprintf(b, sizeof(b),
+            "macify: uselocale(%p) = %p\n", (void *)loc, (void *)r);
+        (void)write(2, b, n);
+    }
+    return r;
+}
+
+locale_t macify_duplocale(locale_t loc) __asm__("duplocale");
+locale_t macify_duplocale(locale_t loc) {
+    static locale_t (*real_duplocale)(locale_t) = NULL;
+    if (!real_duplocale) real_duplocale = macify_elf_lookup("duplocale");
+    return real_duplocale ? real_duplocale(loc) : (locale_t)0;
+}
+
+/* macOS freelocale returns int; glibc's returns void. */
+int macify_freelocale(locale_t loc) __asm__("freelocale");
+int macify_freelocale(locale_t loc) {
+    static void (*real_freelocale)(locale_t) = NULL;
+    if (!real_freelocale) real_freelocale = macify_elf_lookup("freelocale");
+    if (real_freelocale) real_freelocale(loc);
+    return 0;
+}
+
 /* nl_langinfo - macOS function to query locale information.
  * tree uses nl_langinfo(CODESET) to check if the terminal supports UTF-8.
  * If it returns "ANSI_X3.4-1968" (ASCII), tree escapes non-ASCII filenames

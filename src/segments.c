@@ -264,6 +264,14 @@ void *resolve_symbol(int ordinal_idx, const char *sym) {
             "posix_spawn", "posix_spawnp",
             "system", "popen",
             "regcomp", "regexec", "regfree", "regerror",
+            /* Locale entry points. macOS and glibc number both the LC_*
+             * categories and the LC_*_MASK bits differently, so these must
+             * reach the shim's translation even when the guest binds them
+             * two-level to libSystem (which skips the shim's plain exports).
+             * Without this, setlocale/newlocale from a two-level-bound guest
+             * silently picked the wrong category and guests stayed on the C
+             * locale. */
+            "setlocale", "newlocale", "uselocale", "duplocale", "freelocale",
             "realpath$DARWIN_EXTSN",
             "stat$INODE64", "lstat$INODE64", "fstat$INODE64",
             "fstatat$INODE64", "opendir$INODE64",
