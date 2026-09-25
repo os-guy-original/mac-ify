@@ -642,7 +642,10 @@ point of the test, so that branch is skipped.
 - **Not buffering / line-buffering.** Same result on tty, pipe and file.
 - **Not locale.** Fails identically under `LC_ALL=C`, and with
   `LC_ALL`/`LANG`/`LC_CTYPE` unset. (The `setlocale` warning about
-  `en_US.UTF-8` is present but is not the cause — `printf` is unaffected.)
+  `en_US.UTF-8` was present but is not the cause — `printf` is unaffected.
+  That warning turned out to be its own defect, fixed separately: see
+  *Guest locales* at the end of this file. Guests really did have no
+  locale but `C` at the time this section was written.)
 - **Not argv.** `printf "<%s>\n" "$@"` round-trips arguments correctly.
 
 ### Where to look next (superseded — this was the dead end)
@@ -787,3 +790,85 @@ against it. Note also that the earlier decision to *not* trust
 file-offset arithmetic was correct and should stay: the patcher works on
 the loaded `__TEXT,__text` section obtained from `find_section`, never on
 computed file offsets.
+
+## Guest locales — FIXED (86f2826, then the category swap below)
+
+Two independent defects, both on every guest start. The symptom that led
+here was one line of stderr, but the damage was functional: guests had no
+locale at all except the built-in `C`.
+
+### 1. The jail had no locale data (86f2826)
+
+`scripts/macify` execs `macify-jail` unless `MACIFY_NO_JAIL` is set, and
+the jail ends in `chroot(".")` into the prefix, after which "there is no
+host left to reach". The guest runs on the *host's* glibc, so its locale
+archive and charset converters are host files at `/usr/lib/locale` and
+`/usr/lib/gconv`. Past the chroot those paths resolved inside the prefix,
+which holds no locale data, so `setlocale()` failed for every locale but
+`C` and bash warned on each start:
+
+    LC_ALL=en_US.UTF-8 macify bash -c true
+      -> bash: warning: setlocale: LC_ALL: cannot change locale
+         (en_US.UTF-8): No such file or directory
+
+Measured, in this order (each step ruled the next theory in or out):
+
+- host bash with the same environment is silent, so it is not the
+  environment or the locale names: the guest's own glibc resolves
+  `en_US.UTF-8` fine outside the jail.
+- `strace` shows the archive open *succeeding* early in the guest and then
+  returning ENOENT later in the same PID — a path that cannot both exist
+  and not exist, which is what pointed at the chroot rather than at path
+  translation or a missing file.
+- `/usr/share/locale/locale.alias` opens successfully in the guest even
+  though translation should have sent it to the prefix, which is how the
+  glibc-internal opens were separated from the shim's `open` interposer.
+
+Fixed by bind-mounting both directories into the prefix before the chroot,
+read-only. Verified: stderr 119 -> 0 bytes, `setlocale(LC_ALL,
+"en_US.UTF-8")` returns `en_US.UTF-8` rather than NULL, `locale-archive`
+and `C.utf8` visible in the jail, and a write attempt gets `Read-only file
+system`.
+
+Ruled out along the way, so it is not retried: the archive is reachable and
+maps to its exact length (`mmap(..., 5887328, ...)`), so the data was never
+the problem; and a matching exemption added to `macify_translate_path` in
+`src/prefix.c` was **inert** — reverting it changed nothing in either jailed
+or non-jailed mode, because in jail mode translation is identity anyway. It
+was dropped rather than committed.
+
+### 2. macOS and glibc number the locale categories differently
+
+Both platforms number the categories 0..6, so passing a guest's number
+straight to glibc silently selects a different one:
+
+| platform | category numbering |
+|---|---|
+| macOS (docs/darwin-libc/locale.h:45-51) | ALL 0, COLLATE 1, **CTYPE 2**, MONETARY 3, NUMERIC 4, TIME 5, MESSAGES 6 |
+| glibc | **CTYPE 0**, NUMERIC 1, **TIME 2**, COLLATE 3, MONETARY 4, MESSAGES 5, ALL 6 |
+
+So a guest calling `setlocale(LC_CTYPE, ...)` set glibc's `LC_TIME`, and
+glibc's `LC_CTYPE` stayed on `C`. Every category a guest set landed on the
+wrong one. Observed with ruby:
+
+    before:  Encoding.default_external = US-ASCII
+             Encoding.locale_charmap   = ANSI_X3.4-1968
+             a UTF-8 literal in -e      = SyntaxError: invalid multibyte
+                                          character 0xC3
+    after:   Encoding.default_external = UTF-8
+             Encoding.locale_charmap   = UTF-8
+             "ü".bytesize/length        = 2 / 1
+
+The `setlocale(LC_CTYPE, "")` call had returned `en_US.UTF-8` the whole
+time, which is what made this look like an `nl_langinfo` bug. A canary
+string substituted for the hardcoded `"ANSI_X3.4-1968"` fallback in the
+shim's `nl_langinfo` never appeared, proving the ASCII came from glibc
+itself and the item translation was fine — the category was the problem.
+
+Fixed by translating the category in `macify_setlocale` before calling
+glibc. Verified: `setlocale(cat=2->0, ...)` in the locale trace, ruby
+reports UTF-8, and bash stderr stays at 0 bytes on top of fix 1.
+
+Note for anything that follows: `newlocale`/`uselocale`/`duplocale` are not
+interposed at all, and their `LC_*_MASK` bits carry the same renumbering, so
+a guest using them still gets the wrong categories.
