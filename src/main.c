@@ -1,6 +1,123 @@
 #include "macify.h"
 #include <string.h>
 
+/* ── Entry-path resolution ──────────────────────────────────────────
+ * Guests name their binaries with GUEST paths (/usr/local/bin/brew).
+ * The loader opens files on the HOST, so it needs the translated path
+ * (<prefix>/usr/local/bin/brew). Mirrors the shim's exec layer:
+ *   1. try the path as given (host-style / test binaries)
+ *   2. fall back to the prefix translation (guest style)
+ *   3. resolve "#!" shebangs, preferring GUEST interpreters so scripts
+ *      stay inside the prefix instead of leaking to host /bin/bash */
+static int macify_entry_is_macho(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    uint32_t magic = 0;
+    ssize_t n = pread(fd, &magic, sizeof(magic), 0);
+    close(fd);
+    if (n != (ssize_t)sizeof(magic)) return 0;
+    return magic == 0xFEEDFACF || magic == 0xBEBAFECA;
+}
+
+#define MACIFY_ENTRY_ARGV_MAX 1024
+
+static int macify_entry_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+/* Parse a "#!" line. Returns 1 and fills `interp` with the RAW
+ * interpreter token (guest spelling, as written in the script). */
+static int macify_entry_parse_shebang(const char *path, char *interp,
+                                      size_t isz) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    char line[512];
+    ssize_t n = pread(fd, line, sizeof(line) - 1, 0);
+    close(fd);
+    if (n <= 2) return 0;
+    line[n] = '\0';
+    if (line[0] != '#' || line[1] != '!') return 0;
+    char *nl = strpbrk(line, "\r\n");
+    if (nl) *nl = '\0';
+    char *p = line + 2;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) return 0;
+    char *sp = strchr(p, ' ');
+    if (sp) *sp = '\0';   /* shebang args are not supported (matches kernel) */
+    snprintf(interp, isz, "%s", p);
+    return 1;
+}
+
+/* Resolve the entry target to a HOST-readable path, following "#!"
+ * chains. Guest interpreters are preferred: the translated prefix path
+ * is tried first, then the token verbatim (host) — mirroring the
+ * shim's exec layer so scripts stay inside the prefix when possible.
+ *
+ * On success fills *out_argc/*out_argv with kernel-style exec argv:
+ *   interpN, scriptN-1, ..., script1(entry), then the original args
+ * using GUEST spellings; when no hop occurs, the original argv passes
+ * through unchanged. */
+static const char *macify_resolve_entry(const char *path, int argc_in,
+                                        char **argv_in,
+                                        int *out_argc, char ***out_argv) {
+    static char rawtok[5][4096];     /* guest spelling per hop */
+    static char hostp[5][4096];      /* host spelling per hop */
+    static char trans0[4096];        /* hop-0 host translation */
+    static char *av[MACIFY_ENTRY_ARGV_MAX];
+
+    /* Hop 0: the entry itself. Host path first, then prefix fallback. */
+    const char *eff = path;
+    char translated[4096];
+    if (!macify_entry_exists(path) &&
+        macify_translate_path(path, translated, sizeof(translated)) == 0 &&
+        macify_entry_exists(translated)) {
+        snprintf(trans0, sizeof(trans0), "%s", translated);
+        eff = trans0;
+    }
+
+    int hops = 0;
+    while (hops < 5) {
+        if (macify_entry_is_macho(eff)) break;
+        char raw[4096];
+        if (!macify_entry_parse_shebang(eff, raw, sizeof(raw)))
+            break;  /* not a script — let load_file report the error */
+        snprintf(rawtok[hops], sizeof(rawtok[0]), "%s", raw);
+        /* Guest interpreter first so scripts stay inside the prefix;
+         * fall back to the token verbatim (host) if the prefix lacks it. */
+        const char *host = raw;
+        if (macify_translate_path(raw, translated, sizeof(translated)) == 0 &&
+            macify_entry_exists(translated)) {
+            host = translated;
+        }
+        snprintf(hostp[hops], sizeof(hostp[0]), "%s", host);
+        eff = hostp[hops];
+        hops++;
+    }
+    if (hops == 0) {
+        *out_argc = argc_in;
+        *out_argv = argv_in;
+        return eff;
+    }
+    if (hops >= 5 && !macify_entry_is_macho(eff)) {
+        fprintf(stderr, "macify: shebang chain too deep at %s\n", path);
+        /* fall through: load_file will fail with a clear error */
+    }
+
+    /* Kernel exec semantics: argv = [interp, script, ...rest], with
+     * nested shebang chains expanding front-to-back. */
+    int nav = 0;
+    av[nav++] = rawtok[hops - 1];
+    for (int h = hops - 1; h >= 0; h--)
+        av[nav++] = (h == 0) ? (char *)path : rawtok[h - 1];
+    for (int i = 1; i < argc_in && nav < MACIFY_ENTRY_ARGV_MAX - 1; i++)
+        av[nav++] = argv_in[i];
+    av[nav] = NULL;
+    *out_argc = nav;
+    *out_argv = av;
+    return eff;
+}
+
 
 /* Find the shim library path — try /proc/self/exe directory first,
  * then fall back to LD_LIBRARY_PATH search. */
@@ -186,9 +303,21 @@ int main(int argc, char **argv, char **envp) {
     }
     if (argi >= argc) { usage(argv[0]); return 1; }
 
-    const char *path = argv[argi];
-    int app_argc = argc - argi;
-    char **app_argv = argv + argi;
+    const char *user_path = argv[argi];
+    int user_argc = argc - argi;
+    char **user_argv = argv + argi;
+
+    /* Entry resolution: guest paths, "#!" scripts. Falls through
+     * untouched for host-style direct binary invocation. */
+    int app_argc = user_argc;
+    char **app_argv = user_argv;
+    const char *path = macify_resolve_entry(user_path, user_argc, user_argv,
+                                            &app_argc, &app_argv);
+    if (g_verbose && app_argv != user_argv) {
+        fprintf(stderr, "macify: entry %s -> %s, argv[0]=%s argv[1]=%s\n",
+                user_path, path, app_argv[0],
+                app_argc > 1 ? app_argv[1] : "(none)");
+    }
 
     size_t file_size = 0;
     uint8_t *file_data = load_file(path, &file_size);
