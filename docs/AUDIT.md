@@ -997,3 +997,76 @@ specific to the messages category with that locale. It is not the category
 translation: the same hang occurs with the translation disabled. Before the
 locale data was mounted this path was unreachable, because `setlocale`
 failed for every locale but `C`.
+
+## Guest curl — FIXED (da315ae, 4d90598, 6022289, 84a9fad)
+
+curl in the jail could neither resolve a name nor complete an HTTPS
+request: `curl http://example.com` exited 6 ("Could not resolve host"),
+`curl https://example.com` exited 27 ("Out of memory", OpenSSL verify
+result 14). Three independent defects, each general.
+
+### 1. `linux_to_macos_sockaddr` shifted the payload (da315ae)
+
+The translator built a macOS sockaddr from the Linux one by moving the
+whole payload one byte right, to make room for `sa_len`:
+
+    memmove(p + 1, p, addrlen - 1);
+
+But the Linux 2-byte `sa_family` occupies the same two bytes as macOS's
+`sa_len` + `sa_family`, so `sin_port`, `sin_addr` and the IPv6 fields
+already sit at the same offsets and nothing should move. The shift turned
+`sin_port` 0x0035 into 0x0000 and 127.0.0.1 into 53.127.0.0 on every
+`recvfrom`/`getsockname`/`getpeername`/`accept` result. c-ares validates a
+DNS reply's source against the server it queried, so it discarded every
+reply and retried until it gave up.
+
+`strace` showed a valid NODATA HTTPS-RR reply arriving on the socket, so
+the failure was above the syscall layer. `curl --trace-config all` showed
+the query queued (`[DNS] queueing query [0/1] A example.com:80`) and then
+`resolved IPv4: (none)`. Fixed by rewriting only bytes 0 and 1.
+
+### 2. The guest's getaddrinfo bound to glibc (4d90598)
+
+`shim.map` keeps `getaddrinfo`/`freeaddrinfo` local, because exporting
+them globally interposes glibc's own calls process-wide and makes the
+shim's own `dlopen` fail (`undefined symbol: g_macos_text_lo`). The
+consequence was that the guest's imports of those names resolved to
+glibc's, not the shim's `macify_*` wrappers, so the macOS-layout rebuild
+never ran and curl read glibc's `struct addrinfo`.
+
+macOS and glibc order the two pointer fields oppositely
+(`docs/darwin-libc/netdb.h:147`): macOS puts `ai_canonname` at offset 24
+and `ai_addr` at 32, glibc the reverse. `socklen_t` is 4 bytes on both, so
+only those two fields swap. A macOS binary reading `ai_addr` from offset
+32 reads glibc's `ai_canonname`, usually NULL. Fixed in `resolve_symbol`
+by routing those two imports to `dlsym(shim, "macify_getaddrinfo")` /
+`macify_freeaddrinfo`, with `macify_freeaddrinfo` forwarding non-macOS
+callers back to glibc so Linux libraries free their own lists.
+
+### 3. No TLS trust store in the prefix (6022289)
+
+A guest's `/etc/ssl/cert.pem` resolves into the prefix, and curl uses that
+path as its default CAfile. Nothing created it, so OpenSSL found no trust
+anchors and every HTTPS verification failed with verify result 14. Fixed
+in `macify_init_prefix`: copy the first existing host CA bundle to
+`<prefix>/etc/ssl/cert.pem`, refreshing when the host bundle is newer.
+`MACIFY_TRACE_OPEN` had shown `fopen("/etc/ssl/cert.pem", "r") = (nil)
+errno=2` before the fix.
+
+A/B that isolates it: with `<prefix>/etc/ssl` made a regular file so
+provisioning cannot write, HTTPS exits 27; with it writable the same
+command exits 0 and returns the page.
+
+### Ruled out, so it is not retried
+
+- A DNS-reply source rewrite (`unredirect_dns_source`, presenting the real
+  resolver's reply as coming from 127.0.0.1:53) was written, then removed.
+  With the sockaddr fix in place, HTTP and HTTPS both pass without it, so
+  it was not load-bearing.
+- A prefix `/etc/hosts` entry for example.com was used as a scaffold
+  during diagnosis and removed. The host `/etc/hosts` has no such entry,
+  so the passing runs resolve through the resolver, not the hosts file.
+- The `dns_configuration_copy()` NULL return (c-ares then falls back to
+  127.0.0.1:53, which `macify_connect` redirects) is a real quirk but not
+  the cause: the redirect works once the reply's sockaddr is not
+  corrupted.
