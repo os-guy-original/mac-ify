@@ -1248,107 +1248,146 @@ int main(int argc, char **argv, char **envp) {
 
     /* Patch inlined putc macros to always call __swbuf.
      *
-     * macOS's putc macro: --_w >= 0 ? (*_p++ = ch) : __swbuf(ch, fp)
-     * When using glibc's FILE, _w (offset 0x0c) overlaps with _IO_read_ptr's
-     * upper bytes, and _p (offset 0) is _flags (0xfbad2084). Characters
-     * written via the fast path (*_p++ = ch) go to the safety page and
-     * are lost.
+     * Darwin's putc expands inline (`__sputc`,
+     * docs/darwin-libc/_stdio.h:415-432), and its fast path stores the
+     * character through `_p` (FILE offset 0), which on a glibc FILE is
+     * `_flags` (0xfbad2a86). That store lands in the 0xfbad2000 guard
+     * page mapped by shim/signal/init.c, so the character disappears
+     * with no libc call and no write(2) at all. Every site has to take
+     * the __swbuf slow path instead, which reaches the shim's fputc.
      *
-     * We patch the `jg` (if _w > 0, write directly) to `jmp` (always call
-     * __swbuf). This routes ALL characters through our __swbuf override,
-     * which calls glibc's real fputc for correct buffering.
+     * gcc emits three shapes for the same macro, depending on how much
+     * it knows about the character:
      *
-     * Pattern (x86_64):
-     *   8b 8X 0c 00 00 00   mov ecx, [rX+0x0c]    (read _w)
-     *   8d 5X ff            lea edx, [rcx-1]       (_w-1)
-     *   89 9X 0c 00 00 00   mov [rX+0x0c], edx     (write _w)
-     *   85 c9               test ecx, ecx
-     *   7f XX               jg XX                  (if _w > 0, write directly)
-     *   3c 0a               cmp al, 0xa            (if char == '\n')
-     *   74 YY               je ZZ                  (call __swbuf for newline)
+     *   A  runtime char:
+     *        test _w ; jg fast ; cmp al,0xa ; je slow ;
+     *        cmp _lbfsize ; jle slow
+     *   B  char is '\n', so the newline check folds away:
+     *        test _w ; jle slow
+     *   C  char is a known non-newline, so the newline check folds away
+     *      but the line-buffer check stays:
+     *        test _w ; jg fast ; cmp _lbfsize ; jle slow
      *
-     * Change 7f XX → eb (4+YY) to always jump to the __swbuf path.
-     */
+     * All three share the same prologue, which is what this matches;
+     * the shape only decides which branch reaches the slow label. bash
+     * 5.3.15 has 30 such sites, and matching shape A alone caught 7 of
+     * them. The two echo uses, `putchar(' ')` and `putchar('\n')`, are
+     * shapes C and B, so they kept the fast path and echo lost its
+     * separator and newline while printf (vfprintf, no inline macro)
+     * stayed correct.
+     *
+     * Prologue (register numbers are whatever gcc picked):
+     *   8b /r  mod=01 disp=0x0c   mov  r1, [rX+0x0c]    read _w
+     *   8d /r  mod=01 disp=0xff   lea  r2, [r1-1]        _w-1
+     *   89 /r  mod=01 disp=0x0c   mov  [rX+0x0c], r2     write _w
+     *   85 /r  mod=11 reg=rm=r1   test r1, r1
+     *   7f XX | 7e XX             the fast-path decision
+     *
+     * The patch NOPs the _w store, because _w is the high half of
+     * glibc's _IO_read_ptr and leaving it in place walks read_ptr down
+     * 4 GiB at a time, and rewrites the decision to an unconditional
+     * jmp to that site's own slow label. A site whose label is out of
+     * rel8 reach, or whose label does not load the character argument
+     * for __swbuf, is left alone and counted. */
     {
         loaded_section *text_sec = find_section("__TEXT", "__text");
         if (text_sec) {
             uint8_t *text = (uint8_t *)(uintptr_t)text_sec->addr;
             size_t size = text_sec->size;
-            int patched = 0;
-            for (size_t i = 0; i + 16 < size; i++) {
-                /* Pattern (3-byte instructions):
-                 *   8b 4X 0c            mov ecx, [rX+0x0c]    (read _w)
-                 *   8d 51 ff            lea edx, [rcx-1]       (_w-1)
-                 *   89 5X 0c            mov [rX+0x0c], edx     (write _w)
-                 *   85 c9               test ecx, ecx
-                 *   7f XX               jg XX                  (if _w > 0, write directly)
-                 *   3c 0a               cmp al, 0xa            (if char == '\n')
-                 *   74 YY               je ZZ                  (call __swbuf for newline)
-                 */
-                /* Check for: mov ecx, [rX+0x0c] (3 bytes) */
+            int patched = 0, seen = 0, unresolved = 0;
+            for (size_t i = 0; i + 20 < size; i++) {
+                /* mov r1, [rX+0x0c] */
                 if (text[i] != 0x8b) continue;
                 uint8_t modrm1 = text[i+1];
                 if ((modrm1 & 0xC0) != 0x40) continue;  /* mod=01 (8-bit disp) */
-                if ((modrm1 & 0x38) != 0x08) continue;  /* reg=ecx */
-                int reg = modrm1 & 0x07;
+                if ((modrm1 & 0x07) == 0x04) continue;  /* rm=100 is SIB */
                 if (text[i+2] != 0x0c) continue;
+                int r1 = (modrm1 >> 3) & 0x07;
+                int base = modrm1 & 0x07;
 
-                /* Check for: lea edx, [rcx-1] (3 bytes) */
+                /* lea r2, [r1-1] */
                 if (text[i+3] != 0x8d) continue;
-                if (text[i+4] != 0x51) continue;
-                if (text[i+5] != 0xff) continue;
-
-                /* Check for: mov [rX+0x0c], edx (3 bytes) */
-                if (text[i+6] != 0x89) continue;
-                uint8_t modrm2 = text[i+7];
+                uint8_t modrm2 = text[i+4];
                 if ((modrm2 & 0xC0) != 0x40) continue;
-                if ((modrm2 & 0x38) != 0x10) continue;  /* reg=edx */
-                if ((modrm2 & 0x07) != reg) continue;    /* same base reg */
-                if (text[i+8] != 0x0c) continue;
+                if ((modrm2 & 0x07) != r1 || text[i+5] != 0xff) continue;
+                int r2 = (modrm2 >> 3) & 0x07;
 
-                /* Check for: test ecx, ecx (2 bytes) */
+                /* mov [rX+0x0c], r2 */
+                if (text[i+6] != 0x89) continue;
+                uint8_t modrm3 = text[i+7];
+                if ((modrm3 & 0xC0) != 0x40) continue;
+                if (((modrm3 >> 3) & 0x07) != r2) continue;
+                if ((modrm3 & 0x07) != base || text[i+8] != 0x0c) continue;
+
+                /* test r1, r1 */
                 if (text[i+9] != 0x85) continue;
-                if (text[i+10] != 0xc9) continue;
+                uint8_t modrm4 = text[i+10];
+                if ((modrm4 & 0xC0) != 0xC0) continue;
+                if (((modrm4 >> 3) & 0x07) != r1) continue;
+                if ((modrm4 & 0x07) != r1) continue;
 
-                /* Check for: jg XX (2 bytes) */
-                if (text[i+11] != 0x7f) continue;
+                uint8_t branch = text[i+11];
+                if (branch != 0x7f && branch != 0x7e) continue;
+                seen++;
 
-                /* Check for: cmp al, 0xa (2 bytes) */
-                if (text[i+13] != 0x3c) continue;
-                if (text[i+14] != 0x0a) continue;
+                /* Find this site's __swbuf slow label. Shape B branches to
+                 * it on its own; shapes A and C branch past it to the fast
+                 * path, so it is the target of the check that follows. */
+                uint8_t *slow = NULL;
+                if (branch == 0x7e) {
+                    slow = text + i + 13 + (int8_t)text[i+12];
+                } else {
+                    uint8_t *p = text + i + 13;
+                    if (p[0] == 0x74)                                  /* je slow */
+                        slow = p + 2 + (int8_t)p[1];
+                    else if (p[0] == 0x3c && p[1] == 0x0a && p[2] == 0x74)  /* cmp al,0xa ; je slow */
+                        slow = p + 4 + (int8_t)p[3];
+                    else if (p[0] == 0x3b && p[3] == 0x7e)              /* cmp [rX+0x28], r1 ; jle slow */
+                        slow = p + 5 + (int8_t)p[4];
+                    else if (p[0] == 0x3d && p[5] == 0x7e)              /* cmp r1, imm32 ; jle slow */
+                        slow = p + 7 + (int8_t)p[6];
+                }
+                if (slow == NULL) continue;
+                if (slow < text || slow + 2 > text + size) { unresolved++; continue; }
 
-                /* Check for: je YY (2 bytes) */
-                if (text[i+15] != 0x74) continue;
-                uint8_t je_offset = text[i+16];
+                /* The jmp has to reach it in rel8, and the label has to be
+                 * the character load for __swbuf (mov edi,imm32 or
+                 * movsbl al,edi). Anything else is not the putc macro. */
+                int8_t rel = (int8_t)(slow - (text + i + 13));
+                if (slow != text + i + 13 + rel) { unresolved++; continue; }
+                if (!(slow[0] == 0xbf || (slow[0] == 0x0f && slow[1] == 0xbe))) {
+                    unresolved++;
+                    continue;
+                }
 
-                /* Patch: change jg to jmp to the __swbuf path.
-                 * jg is at i+11, je is at i+15.
-                 * je target = (i+15) + 2 + je_offset = i + 17 + je_offset
-                 * jmp offset = je_target - (jg + 2) = (i + 17 + je_offset) - (i + 13) = 4 + je_offset
-                 */
                 uintptr_t page = (uintptr_t)(text + i) & ~0xfffUL;
                 if (mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
                     fprintf(stderr, "macify: mprotect RWX FAILED for putc patch at %p: %s\n", (void*)(text+i), strerror(errno));
                     continue;
                 }
-                /* NOP the write to [rX+0x0c] (3 bytes at i+6) to prevent
-                 * _IO_read_ptr corruption */
+                /* NOP the write to [rX+0x0c] (3 bytes at i+6) so inlined putc
+                 * cannot drag glibc's _IO_read_ptr down 4 GiB at a time. */
                 text[i+6] = 0x90; text[i+7] = 0x90; text[i+8] = 0x90;
-                /* Change jg to jmp to always call __swbuf */
+                /* Always call __swbuf instead of deciding. */
                 text[i+11] = 0xeb;  /* jmp short */
-                text[i+12] = 4 + je_offset;
+                text[i+12] = (uint8_t)rel;
                 mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
                 /* Verify the patch was applied */
                 if (text[i+11] != 0xeb || text[i+6] != 0x90) {
                     fprintf(stderr, "macify: putc patch VERIFY FAILED at %p (got %02x %02x)\n",
                             (void*)(text+i+11), text[i+11], text[i+6]);
                 } else if (g_verbose) {
-                    fprintf(stderr, "macify: putc patch OK at %p (NOP+jmp %d)\n", (void*)(text+i+11), 4+je_offset);
+                    fprintf(stderr, "macify: putc patch OK at %p (shape %s, jmp %d)\n",
+                            (void*)(text+i+11),
+                            branch == 0x7e ? "newline-folded"
+                                           : (text[i+13] == 0x3c ? "runtime-char" : "non-newline"),
+                            (int)rel);
                 }
                 patched++;
             }
             if (g_verbose && patched > 0)
-                fprintf(stderr, "macify: patched %d putc macro(s) to call __swbuf\n", patched);
+                fprintf(stderr, "macify: patched %d putc macro(s) to call __swbuf"
+                        " (%d sites matched, %d unreachable)\n", patched, seen, unresolved);
 
             /* If NO putc macros were patched, the binary calls fputc/fgetc
              * as functions (not inlined). In that case, skip the _r=-1/_w=-1
