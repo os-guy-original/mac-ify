@@ -533,3 +533,83 @@ pointer, so it is 8-aligned and 4 bytes of padding follow `_file`. This
 resolves the open AUDIT note that called the 0x14/0x1c claim wrong. The
 struct is currently unreachable (`macify_use_macos_stdio` has no callers),
 so this is correctness-only, not a behaviour change.
+
+## bash `echo` loses its trailing newline — OPEN, mechanism narrowed
+
+Not fixed. Everything below was measured this session; nothing is inferred
+from a single run.
+
+### Scope (all verified)
+
+    WORKS   bash printf "A\n"          -> A\n
+    WORKS   bash printf "%b" "A\n"     -> A\n
+    WORKS   bash echo -e "A\n"         -> A\n
+    WORKS   macOS /bin/echo            -> A\n
+    WORKS   awk / cut / sed            -> correct
+    BROKEN  bash echo A                -> A      (no \n)
+    BROKEN  bash echo A B              -> AB     (separator AND newline gone)
+    BROKEN  bash echo; echo            -> (nothing at all)
+    OK      bash echo -n A             -> A      (-n itself is honoured)
+
+Independent of stdout being a tty, a pipe, or a regular file — verified
+all three, including under a pty via `script`.
+
+So this is **not** the T0002 sparse hole (already fixed) and **not** a
+general stdio problem: it is specific to the `echo` builtin of *this* bash
+build, and it costs only the characters `echo` emits outside `printf("%s")`.
+
+### What the guest actually does (from disassembly of bash 5.3.15)
+
+The builtin is around `0x10006969d`. Per argument it calls the imported
+`printf` with the format `"%s"` — confirmed by tracing the shim: two
+`printf("%s")` calls for `echo A B`, one per argument. The bytes for the
+arguments arrive correctly.
+
+The separator and the trailing newline are emitted separately, and that is
+where the output stops:
+
+    0x100069813:  mov  edi,0x20            ; ' '
+    0x100069818:  call <PLT __swbuf>       ; emit separator
+
+    0x10006977f:  cmp  DWORD [rbx],0x0    ; rbx = &_terminating_signal
+    0x100069782:  je   <skip>             ; NULL -> skip
+    0x100069784:  mov  edi,[rbx]
+    0x100069786:  call 0x10004d44a        ; emit
+
+`&_terminating_signal` is `0x1000b0ef8`, a `__common` symbol (correctly
+zero-initialised; the loader is not at fault — it reads 0 in the file's
+terms too, and `__bss`/`__common` are meant to be zero). It is 0 at the
+point of the test, so that branch is skipped.
+
+### What has been RULED OUT (so it is not re-chased)
+
+- **Not the putc patch.** A/B with the patch disabled: identical (`AB`).
+- **Not `__swbuf`/`putchar`/`fputc` binding.** Breakpoints on all three
+  (via `dlsym` in the target) record **zero** hits for plain `echo`, while
+  the GOT entry for the `__swbuf` stub is confirmed to point at our shim
+  and the loader reports `378 resolved, 0 unresolved`.
+- **Not a lost libc call.** `strace` shows the `write(1, "A", 1)` and
+  `write(1, "C", 1)` and *no* `write` for the newline at all — the byte
+  is dropped before the syscall.
+- **Not buffering / line-buffering.** Same result on tty, pipe and file.
+- **Not locale.** Fails identically under `LC_ALL=C`, and with
+  `LC_ALL`/`LANG`/`LC_CTYPE` unset. (The `setlocale` warning about
+  `en_US.UTF-8` is present but is not the cause — `printf` is unaffected.)
+- **Not argv.** `printf "<%s>\n" "$@"` round-trips arguments correctly.
+
+### Where to look next
+
+The remaining suspect is the loader's **`patch_go_systemstack`-style
+bytecode rewriting applied to bash's inlined `putc`**: the patch NOPs the
+`_w` store and turns the `jg` fast path into an unconditional `jmp`
+(`src/main.c`, the `mov ecx,[rX+0x0c]` pattern). After that patch the
+`cmp al,0x0a / je __swbuf` newline test inside the macro is dead, because
+control never falls through to it. That would explain all three symptoms
+at once: the newline, the argument separator, and why neither reaches
+`__swbuf`. It is consistent with the patch being counted as 7 sites while
+bash contains 8 matching `putc` sequences, and with `-e`/`printf` working
+(they do not use the inlined macro).
+
+This is a hypothesis, not a result — the A/B above disabled the whole
+patch rather than testing the newline branch in isolation, which is the
+experiment to run first.
