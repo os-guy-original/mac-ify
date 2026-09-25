@@ -1,5 +1,6 @@
 #include "macify.h"
 #include <sys/utsname.h>
+#include <sys/resource.h>
 #include <stdlib.h>
 #include <locale.h>
 
@@ -9,18 +10,43 @@
  */
 
 uint64_t setup_stack(int argc, char **argv, char **envp, void **out_stack_base, size_t *out_stack_size) {
-    /* Stack size: 8MB is enough for most binaries. Go binaries need more
-     * because Go's runtime sets g0's stack to (rsp - 0x10000) and uses
-     * deep recursion during init. We try 64MB first, then fall back. */
-    size_t stack_size = 64 * 1024 * 1024;
+    /* Stack sizing — semantics must match a REAL kernel stack:
+     *
+     *  1. Guests introspect RLIMIT_STACK to bound recursion (ruby's
+     *     SystemStackError, python, bash). The host soft limit is often
+     *     8MB while our mapping is bigger — a lying pair. Raise the soft
+     *     limit (up to hard) so guests see the resource they truly have.
+     *  2. MAP_GROWSDOWN makes the mapping grow on guard-page faults like
+     *     a real stack instead of exposing adjacent PROT_NONE memory;
+     *     growth stops at RLIMIT_STACK (now honest). Deep C-level
+     *     recursion (nested ruby iseq compile → rbconfig → tzset) hit
+     *     adjacent mappings before, producing SEGV_ACCERR walks and a
+     *     silent exit(0) (observed T0003: rubygems boot death).
+     *  3. The shim's pthread_get_stack*_np returns these numbers via
+     *     __macify_set_stack_info, so Darwin-side introspection matches. */
+    struct rlimit rl;
+    size_t want = 16 * 1024 * 1024;   /* initial mapping; grows on demand */
+    size_t cap = 64 * 1024 * 1024;    /* recursion ceiling we advertise */
+    if (getrlimit(RLIMIT_STACK, &rl) == 0) {
+        rlim_t new_cur = (rlim_t)cap;
+        if (rl.rlim_max != RLIM_INFINITY && new_cur > rl.rlim_max)
+            new_cur = rl.rlim_max;
+        if (rl.rlim_cur < new_cur) {
+            rl.rlim_cur = new_cur;
+            setrlimit(RLIMIT_STACK, &rl);   /* best effort */
+        }
+    }
+    size_t stack_size = want;
     void *stack = mmap(NULL, stack_size,
                        PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN,
+                       -1, 0);
     if (stack == MAP_FAILED) {
         stack_size = 8 * 1024 * 1024;
         stack = mmap(NULL, stack_size,
                      PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_GROWSDOWN,
+                     -1, 0);
     }
     if (stack == MAP_FAILED) { perror("mmap stack"); exit(1); }
 
