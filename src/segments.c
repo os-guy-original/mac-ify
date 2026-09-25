@@ -77,6 +77,27 @@ void register_extra_handle(void *handle) {
 /* Look up a symbol from a dylib, trying shim → libc → libm → extra → $-suffix strip.
  * Returns the symbol address or NULL. */
 void *resolve_symbol(int ordinal_idx, const char *sym) {
+    /* getaddrinfo/freeaddrinfo — macOS and glibc lay out `struct addrinfo`
+     * differently: after ai_addrlen (offset 16, 4 bytes on both) macOS puts
+     * ai_canonname at offset 24 and ai_addr at 32, while glibc puts ai_addr
+     * first. The shim implements macify_getaddrinfo/macify_freeaddrinfo to
+     * translate to/from the macOS layout, but it cannot export them as
+     * `getaddrinfo`/`freeaddrinfo`: those names would then interpose glibc's
+     * own calls process-wide, which makes dlopen() of the shim itself fail.
+     * So route the guest's imports to the shim's wrappers by name here. The
+     * wrappers forward any non-macOS caller to glibc, so Linux libraries are
+     * unaffected. */
+    if (g_ndylibs > 0 && g_dylibs[0].handle) {
+        if (strcmp(sym, "getaddrinfo") == 0) {
+            void *a = dlsym(g_dylibs[0].handle, "macify_getaddrinfo");
+            if (a) return a;
+        }
+        else if (strcmp(sym, "freeaddrinfo") == 0) {
+            void *a = dlsym(g_dylibs[0].handle, "macify_freeaddrinfo");
+            if (a) return a;
+        }
+    }
+
     /* ordinal -1 = flat namespace: search all loaded libraries.
      * IMPORTANT: check shim FIRST, then libc/libm, then RTLD_DEFAULT.
      * This ensures our overrides (mmap, open, connect, etc.) take

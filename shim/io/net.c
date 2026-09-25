@@ -306,8 +306,15 @@ int macify_getaddrinfo(const char *node, const char *service,
     return r;
 }
 
-void macify_freeaddrinfo(void *ai) ;
 void macify_freeaddrinfo(void *ai) {
+    /* Non-macOS callers received glibc's own list from the pass-through
+     * branch of macify_getaddrinfo, so hand it back to glibc. Only macOS
+     * callers get the macOS-layout list that we allocated ourselves. */
+    if (!macify_caller_is_macos_text(__builtin_return_address(0))) {
+        static void (*real_freeaddrinfo)(void *) = NULL;
+        if (!real_freeaddrinfo) real_freeaddrinfo = macify_elf_lookup("freeaddrinfo");
+        if (real_freeaddrinfo) { real_freeaddrinfo(ai); return; }
+    }
     /* Free the macOS-layout addrinfo list that we allocated in
      * macify_getaddrinfo. We must NOT call glibc's freeaddrinfo because the
      * node layout is different (ai_canonname/ai_addr swapped) — glibc would

@@ -159,6 +159,10 @@ void *macify_get_shim_symbol(const char *symbol) {
         extern int macify_getaddrinfo(const char *, const char *, const void *, void **);
         return (void *)macify_getaddrinfo;
     }
+    if (strcmp(symbol, "freeaddrinfo") == 0) {
+        extern void macify_freeaddrinfo(void *);
+        return (void *)macify_freeaddrinfo;
+    }
 
     return NULL;
 }
