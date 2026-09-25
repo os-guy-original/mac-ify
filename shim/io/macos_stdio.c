@@ -65,50 +65,67 @@ typedef int (*macos_write_fn)(void *, const char *, int);
 typedef long long (*macos_seek_fn)(void *, long long, int);
 typedef int (*macos_close_fn)(void *);
 
-/* macOS FILE struct with dual-layout compatibility */
+/* macOS FILE struct with dual-layout compatibility.
+ *
+ * Field offsets are the REAL Darwin ones (docs/darwin-libc/_stdio.h,
+ * typedef struct __sFILE), not a convenient packing. That matters because
+ * this struct is overlaid on glibc's _IO_FILE and the guest inlines
+ * macOS's putc/getc macros against these offsets:
+ *
+ *   _p 0x00 | _r 0x08 | _w 0x0c | _flags 0x10 | _file 0x12
+ *   _bf 0x18  { _base 0x18 ; _size 0x20 }     <-- 8-aligned, NOT 0x14/0x1c
+ *   _lbfsize 0x28 | _cookie 0x30
+ *
+ * __sbuf holds a pointer, so it is 8-aligned: _flags+_file end at 0x14 and
+ * 4 bytes of padding follow before _bf._base at 0x18. An earlier version of
+ * this file claimed 0x14/0x1c, which put _bf._base on top of the padding
+ * and _bf._size on top of _lbfsize — every guest compiled against real
+ * Darwin then read the wrong words. */
 struct macos_sFILE {
     unsigned char *_p;          /* 0x00: current position in buffer */
     int _r;                     /* 0x08: read space left */
     int _w;                     /* 0x0c: write space left */
     short _flags;               /* 0x10: flags */
     short _file;                /* 0x12: file descriptor */
+    /* 0x14: 4 bytes padding (aligns __sbuf to 8) */
     struct {
-        unsigned char *_base;   /* 0x14: buffer start */
-        int _size;              /* 0x1c: buffer size */
+        unsigned char *_base;   /* 0x18: buffer start */
+        int _size;              /* 0x20: buffer size */
+        int _pad;               /* 0x24: tail padding to 8-align _lbfsize */
     } _bf;
-    /* 0x20: macOS _lbfsize (int) + macOS _cookie low (int)
+    /* 0x28: macOS _lbfsize (int) + 4 pad
      *       = glibc _IO_write_base (char*) — set to buffer start */
     union {
-        struct { int _lbfsize; int _cookie_lo; } macos;
+        struct { int _lbfsize; int _pad0; } macos;
         unsigned char *_glibc_write_base;
-    } u20;
-    /* 0x28: macOS _cookie high (int) + macOS _read low (int)
+    } u28;
+    /* 0x30: macOS _cookie (void*)
      *       = glibc _IO_write_ptr (char*) — set to _p (current pos) */
     union {
-        struct { int _cookie_hi; int _read_lo; } macos;
+        void *_cookie;
         unsigned char *_glibc_write_ptr;
-    } u28;
-    /* 0x30: macOS _read high (int) + macOS _write low (int)
-     *       = glibc _IO_write_end (char*) — set to buffer end */
-    union {
-        struct { int _read_hi; int _write_lo; } macos;
-        unsigned char *_glibc_write_end;
     } u30;
-    /* 0x38: macOS _write high (int) + macOS _seek low (int)
-     *       = glibc _IO_buf_base (char*) — set to buffer start */
+    /* 0x38: macOS _close (fn ptr) = glibc _IO_write_end — buffer end */
     union {
-        struct { int _write_hi; int _seek_lo; } macos;
-        unsigned char *_glibc_buf_base;
+        void *_close;
+        unsigned char *_glibc_write_end;
     } u38;
-    /* 0x40: macOS _seek high (int) + macOS _close low (int)
-     *       = glibc _IO_buf_end (char*) — set to buffer end */
+    /* 0x40: macOS _read (fn ptr) = glibc _IO_buf_base — buffer start */
     union {
-        struct { int _seek_hi; int _close_lo; } macos;
-        unsigned char *_glibc_buf_end;
+        void *_read;
+        unsigned char *_glibc_buf_base;
     } u40;
-    /* 0x48: macOS _close high (int) + padding */
-    int _close_hi;              /* 0x48 */
-    char _pad[96];              /* 0x4c: pad to ~152 bytes */
+    /* 0x48: macOS _seek (fn ptr) = glibc _IO_buf_end — buffer end */
+    union {
+        void *_seek;
+        unsigned char *_glibc_buf_end;
+    } u48;
+    /* 0x50: macOS _write (fn ptr) — unused by the inlined macros */
+    union {
+        void *_write;
+        void *_unused50;
+    } u50;
+    char _pad[96];              /* 0x58: pad out the rest of the struct */
 };
 
 #define MACOS_BUFSIZ 4096
@@ -142,23 +159,16 @@ static void init_macos_file(struct macos_sFILE *f, unsigned char *buf, int bufsi
     f->_file = fd;
     f->_bf._base = buf;
     f->_bf._size = bufsiz;
-    /* glibc _IO_write_base (0x20) = buffer start */
-    f->u20._glibc_write_base = buf;
-    /* glibc _IO_write_ptr (0x28) = buffer start (no data yet) */
-    f->u28._glibc_write_ptr = buf;
-    /* glibc _IO_write_end (0x30) = buffer end */
-    f->u30._glibc_write_end = buf + bufsiz;
-    /* glibc _IO_buf_base (0x38) = buffer start */
-    f->u38._glibc_buf_base = buf;
-    /* glibc _IO_buf_end (0x40) = buffer end */
-    f->u40._glibc_buf_end = buf + bufsiz;
-    /* NOTE: macOS FILE has function pointers at 0x2c, 0x34, 0x3c, 0x44
-     * but these overlap with glibc's _IO_write_ptr/_IO_write_end/
-     * _IO_buf_base/_IO_buf_end. We do NOT set function pointers because
-     * the putc macro only uses _p, _w, and __swbuf — it never calls
-     * _read/_write/_seek/_close directly. Those are only used by macOS's
-     * internal __sfvwrite/__sflush, which bash doesn't call (it uses
-     * fwrite/fputs which go through our shims). */
+    /* Keep the overlaid glibc pointers coherent with the macOS view.
+     * glibc reaches these through fflush -> _IO_file_sync even when the
+     * guest only ever used the inlined putc macro, and a divergent pair
+     * makes _IO_file_sync seek by the difference (observed: lseek(1,
+     * 2^32, SEEK_CUR), turning a 2-byte stdout into a 4 GiB sparse file). */
+    f->u28._glibc_write_base = buf;              /* _IO_write_base */
+    f->u30._glibc_write_ptr  = buf;              /* _IO_write_ptr  */
+    f->u38._glibc_write_end  = buf + bufsiz;     /* _IO_write_end  */
+    f->u40._glibc_buf_base   = buf;              /* _IO_buf_base   */
+    f->u48._glibc_buf_end    = buf + bufsiz;     /* _IO_buf_end    */
 }
 
 static struct macos_sFILE macos_stdout;
@@ -209,7 +219,7 @@ static int macos_flush(struct macos_sFILE *fp) {
     fp->_p = fp->_bf._base;
     fp->_w = fp->_bf._size - 1;
     /* Keep glibc _IO_write_ptr in sync */
-    fp->u28._glibc_write_ptr = fp->_p;
+    fp->u30._glibc_write_ptr = fp->_p;
     return 0;
 }
 
@@ -250,7 +260,7 @@ int macify_fputc_macos(int c, void *fp) {
         *f->_p++ = (unsigned char)c;
     }
     /* Keep glibc _IO_write_ptr in sync */
-    f->u28._glibc_write_ptr = f->_p;
+    f->u30._glibc_write_ptr = f->_p;
     /* Line-buffered: flush on newline */
     if ((f->_flags & MACOS___SLBF) && c == '\n') {
         macos_flush(f);
