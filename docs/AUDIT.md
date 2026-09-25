@@ -455,3 +455,81 @@ path there may now be safe), or install the per-thread GS base via
 `CLONE_SETTLS` so the kernel tracks it. The current comment in
 `src/runtime.c` still claims wrgsbase "causes rip=0 crashes"; that
 claim needs re-testing on a modern kernel before the choice is made.
+
+## stdout NUL-flood (T0002) — FIXED: was never the regex layer
+
+The task described this as "second successful regexec" emitting a
+`{0,-len}` pair. That framing is wrong, and following it would have sent
+the next session after the regex wrapper again. Measured facts:
+
+- Trigger is **any second `echo`**, with no regex at all:
+  `macify bash -c 'echo A; echo C'` reproduces identically.
+- Only when stdout is a **regular file**. Through a pipe the bytes are
+  just *lost* (1 byte out instead of 2) — no 4 GiB hole.
+- The flood is exactly `A` + `0x100000000` NUL bytes + `C`
+  (4294967298 total). Not a {0,-len} pair: a clean 2^32.
+
+### Mechanism (b242ca3)
+
+`strace` showed only two 1-byte writes plus:
+
+    lseek(1, -4294967296, SEEK_CUR)   = -1 EINVAL
+    lseek(1, -4294967296, SEEK_CUR)   = -1 EINVAL
+    lseek(1,  4294967296, SEEK_CUR)   = 4294967297
+
+so the "giant zeroed write" is really a **4 GiB sparse hole**: the guest
+seeks 2^32 past the start and writes `C` there. Backtrace of the seek:
+`lseek64 -> _IO_file_sync -> fflush`, i.e. glibc repairing a file offset.
+
+Why the offset was wrong — dumped the guest's stdout at flush time:
+
+    flags=0xfbad2a86  rp=0x7fda8161f603  re=rb=wp=we=bb=be=0x7fdb8161f603
+
+Every pointer agrees except `_IO_read_ptr` (offset 0x08), which is exactly
+`0x100000000` low. The low 32 bits are byte-identical to the healthy
+value; only the **high** half differs, by one.
+
+That is the whole bug. A macOS binary's putc/getc macros are inlined and
+store 32-bit `_r`/`_w` at FILE offsets **0x08/0x10**... precisely, `_w` is
+stored at **0x0c**, and glibc's `_IO_read_ptr` occupies 0x08..0x10. So the
+guest's `_w` store lands on the **high half** of glibc's read pointer and
+decrements it once per character. After enough characters it is 4 GiB
+below `_IO_read_base`, and `_IO_file_sync` dutifully seeks by the gap.
+
+The stores are inline in guest text, so they cannot be intercepted. The
+fix clamps the read pointers back into range in `macify_fflush`: a stream
+with nothing buffered for reading has `read_ptr == read_base`, which is
+what `_IO_file_sync` expects. Only the out-of-range direction is touched,
+so real reads are unaffected.
+
+Verified:
+
+    bash -c 'echo A; echo C' > f     4294967298 -> 2 bytes
+    sed 's/a/X/' < in                0 -> 6 bytes (output was lost entirely)
+
+The second line is the more important one: the same skew was silently
+eating all output of any guest whose stdout was a pipe, which no test
+had been asserting on.
+
+### Still open: newlines from the `echo` builtin
+
+`echo A; echo C` now yields `AC` — correct bytes, missing `\n`. This is a
+**separate defect**, not the flood:
+
+    bash -c 'printf "A\nC\n"'   ->  41 0a 43 0a   (correct)
+    bash -c 'echo A; echo C'     ->  41 43         (newlines lost)
+
+`printf` is right, so the guest's escaping and the write path are fine;
+bash's `echo` builtin takes a different route (its own buffering, or
+`__swbuf` on the newline) and drops the 0x0a. Not pursued under T0002 —
+acceptance criterion 1 (`A\nB\nC\n` exactly) is therefore **not met**;
+the flood half of it is fixed and the newline half is a fresh bug.
+
+### Also corrected: macos_sFILE offsets (76a5e25)
+
+`shim/io/macos_stdio.c` declared `_bf` at 0x14/0x1c. Real Darwin
+(`docs/darwin-libc/_stdio.h`) puts `__sbuf` at **0x18** — it holds a
+pointer, so it is 8-aligned and 4 bytes of padding follow `_file`. This
+resolves the open AUDIT note that called the 0x14/0x1c claim wrong. The
+struct is currently unreachable (`macify_use_macos_stdio` has no callers),
+so this is correctness-only, not a behaviour change.
