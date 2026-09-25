@@ -175,6 +175,11 @@ ssize_t macify_read(int fd, void *buf, size_t count) {
     }
 
     ssize_t r = real_read(fd, buf, count);
+    /* A non-blocking read on a pipe returns Linux EAGAIN (11), which a
+     * Darwin guest reads as EDEADLK. ruby's IO#read on a popen pipe hits
+     * exactly that and raises instead of waiting for readability, which
+     * breaks backticks, IO.popen and open3. Same boundary as write(). */
+    TRANSLATE_ERRNO(r);
 
     if (is_tty) {
         pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
@@ -206,7 +211,9 @@ ssize_t macify_readv(int fd, const struct iovec *iov, int iovcnt) __asm__("readv
 ssize_t macify_readv(int fd, const struct iovec *iov, int iovcnt) {
     static ssize_t (*real_readv)(int, const struct iovec *, int) = NULL;
     if (!real_readv) real_readv = macify_elf_lookup("readv");
-    return real_readv(fd, iov, iovcnt);
+    ssize_t r = real_readv(fd, iov, iovcnt);
+    TRANSLATE_ERRNO(r);
+    return r;
 }
 
 /* ── _IO_read_ptr save/restore (forward declarations) ──────────
