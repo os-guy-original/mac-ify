@@ -49,11 +49,22 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
      * Also block SIGALRM when MACIFY_NO_FORK is set — we use it for
      * the timeout that kills binaries like sort that hang in cleanup. */
     {
-        /* Block macOS code from replacing our handlers */
+        /* Block macOS code from replacing our handlers.
+         * EXCEPTION: Go binaries must be allowed to install their SIGSEGV
+         * handler — the Go runtime turns SIGSEGV at a low address into a
+         * nil-dereference panic and recovers; swallowing the install here
+         * made guest nil derefs reach OUR crash handler and _exit(139)
+         * (intermittent, timing-dependent). The fallthrough path wraps the
+         * guest handler with macify_go_signal_wrapper, so our machinery
+         * still sits in front of it. SIGABRT/SIGALRM keep the hard block. */
         if (signum == 11 /* SIGSEGV */ || signum == 6 /* SIGABRT */ ||
             (signum == 14 /* SIGALRM */)) {
             if (act) {
-                return 0;
+                extern uint64_t g_tls_g_addr;
+                if (!(signum == 11 && g_tls_g_addr)) {
+                    return 0;
+                }
+                /* Go binary + SIGSEGV: proceed to the wrapped install */
             }
         }
         /* For SIGCHLD (macOS 20 → Linux 17): install a WRAPPER that defers
@@ -149,9 +160,31 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
          * Note: at this point, signum is already translated to Linux numbers.
          * Linux SIGSEGV=11, SIGBUS=7, SIGILL=4. */
         if (signum == 11 /*SIGSEGV*/ || signum == 7 /*SIGBUS*/) {
-            /* For macOS callers: install our crash handler.
-             * For non-macOS callers (macify itself): pass through. */
-            if (macify_caller_is_macos_text(__builtin_return_address(0))) {
+            /* Go binaries MUST own SIGSEGV/SIGBUS: the Go runtime turns
+             * SIGSEGV at a low address into a nil-dereference panic and
+             * recovers. Hijacking it (our old behavior) made any guest Go
+             * nil deref _exit(139) from our crash handler instead — an
+             * intermittent, runtime-timing-dependent failure. Discriminator:
+             * g_tls_g_addr is set by the loader ONLY for Go binaries, the
+             * same check the rest of this file uses. Route the guest's
+             * handler through macify_go_signal_wrapper (GS-base restore +
+             * deferral until m.gsignal exists) — general for all Go
+             * binaries; no per-binary knowledge. */
+            extern uint64_t g_tls_g_addr;
+            if (g_tls_g_addr && macify_caller_is_macos_text(__builtin_return_address(0))) {
+                extern void macify_go_signal_wrapper(int, siginfo_t *, void *);
+                extern void *macify_saved_go_handlers[];
+                linux_act.sa_sigaction = macify_go_signal_wrapper;
+                linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+                /* Save the guest handler under the LINUX signal number this
+                 * loop is handling (11/7) — the wrapper dispatches on it. */
+                macify_saved_go_handlers[signum] = macos_act->handler;
+                if (macify_sa_restorer) {
+                    linux_act.sa_flags |= 0x04000000;  /* SA_RESTORER */
+                    linux_act.sa_restorer = macify_sa_restorer;
+                }
+                p_linux_act = &linux_act;
+            } else if (macify_caller_is_macos_text(__builtin_return_address(0))) {
                 linux_act.sa_sigaction = macify_crash_handler;
                 linux_act.sa_flags = SA_SIGINFO | SA_ONSTACK;
                 /* Add SA_RESTORER — required on modern Linux kernels */
@@ -159,8 +192,9 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
                     linux_act.sa_flags |= 0x04000000;  /* SA_RESTORER */
                     linux_act.sa_restorer = macify_sa_restorer;
                 }
+                p_linux_act = &linux_act;
             }
-            p_linux_act = &linux_act;
+            /* non-macOS callers (macify itself): pass through untouched */
         } else if (signum == SIGILL) {
             /* Only block SIGILL installation from macOS binary callers.
              * macify's own sigaction(SIGILL, sigill_handler, ...) must go

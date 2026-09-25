@@ -228,9 +228,27 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
          * Translate signal number from macOS to Linux (they differ!).
          */
         if (a1 == 4 /*SIGILL*/ || a1 == 11 /*SIGSEGV*/ || a1 == 10 /*SIGBUS*/) {
-            /* NEVER let the macOS binary replace our SIGILL/SIGSEGV/SIGBUS
-             * handlers. SIGILL is critical for syscall translation.
-             * SIGSEGV/SIGBUS are our crash handlers. */
+            /* NEVER let the macOS binary replace our SIGILL handler — it
+             * is critical for syscall translation.
+             *
+             * SIGSEGV/SIGBUS: keep our crash handler for ordinary binaries
+             * (FILE*-layout recovery), BUT let Go binaries install their
+             * own handlers through the deferral wrapper. The Go runtime
+             * depends on SIGSEGV delivery (nil-deref → panic conversion);
+             * hijacking it made guest nil derefs exit 139 from our handler
+             * instead of recovering — intermittent across runs. Discriminator
+             * is g_tls_g_addr (loader sets it only for Go binaries) —
+             * general for every Go binary, no per-binary knowledge. */
+            if (a1 != 4) {
+                extern uint64_t g_tls_g_addr;
+                if (g_tls_g_addr) {
+                    /* Go binary: translate signum, then fall through to the
+                     * normal sigaction translation below so the guest handler
+                     * is wrapped (macify_go_signal_wrapper) and installed. */
+                    a1 = (long)translate_kill_signal((int)a1);
+                    goto translate_sigaction;
+                }
+            }
             if (g_verbose) {
                 fprintf(stderr, "macify:   sigaction(%ld) - skipped, keeping our handler\n", a1);
             }
@@ -238,6 +256,7 @@ void sigill_handler(int sig, siginfo_t *info, void *uctx) {
             regs[REG_RIP] += 2;  /* skip UD2 */
             return;
         }
+translate_sigaction:;
         if (a2) {
             static struct {
                 void *handler;
