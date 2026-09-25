@@ -1059,6 +1059,29 @@ int macify_fflush(FILE *stream) __asm__("fflush");
 int macify_fflush(FILE *stream) {
     static int (*real_fflush)(FILE *) = NULL;
     if (!real_fflush) real_fflush = macify_elf_lookup("fflush");
+    /* Our own macOS FILE structs must never reach glibc's fflush.
+     *
+     * macos_sFILE overlays macOS's __sFILE on glibc's _IO_FILE, so the two
+     * disagree about what the words at 0x08..0x48 mean. glibc's flush runs
+     * _IO_file_sync, which computes a sync offset by subtracting two of
+     * those overlapped pointers and then lseek()s by the difference. With
+     * the macOS view in place that difference is 2^32, so a two-byte
+     * "A\nC\n" turned into a 4 GiB sparse file (the write of "C" landed at
+     * offset 0x100000000). Observed exactly:
+     *     lseek(1, -4294967296, SEEK_CUR) = -1 EINVAL
+     *     lseek(1, -4294967296, SEEK_CUR) = -1 EINVAL
+     *     lseek(1,  4294967296, SEEK_CUR) = 4294967297
+     * The buffer contents were never wrong — only the flush path was.
+     *
+     * fclose already routed macOS FILEs to macify_fflush_macos; fflush
+     * did not. Route it too. */
+    {
+        extern int macify_is_macos_file(void *);
+        if (macify_is_macos_file(stream)) {
+            extern int macify_fflush_macos(void *);
+            return macify_fflush_macos(stream);
+        }
+    }
     /* When stream is NULL (flush all streams), glibc iterates ALL open
      * FILE* structures. macOS binaries corrupt some FILE* by writing to
      * offset 0x10 (thinking it's macOS _flags, but glibc has _IO_read_end
@@ -1080,6 +1103,31 @@ int macify_fflush(FILE *stream) {
             }
         }
         return 0;
+    }
+    /* Repair a read pointer dragged out of range by an inlined stdio macro.
+     *
+     * A macOS binary's putc/getc macros are compiled inline and store 32-bit
+     * _r/_w at FILE offsets 0x08/0x0c. glibc's _IO_FILE keeps _IO_read_ptr
+     * at 0x08, so those stores land on the LOW and HIGH halves of that
+     * pointer. Each inlined character decrements it, and it walks 4 GiB
+     * below _IO_read_base. glibc's _IO_file_sync then repairs the offset
+     * with
+     *     lseek(fd, read_base - read_ptr, SEEK_CUR)   -> -4294967296
+     *     lseek(fd, read_end  - read_ptr, SEEK_CUR)   -> +4294967296
+     * so a two-byte "A\nC\n" became a 4 GiB sparse file with "C" written
+     * at offset 0x100000000. The bytes were never wrong; only the seek.
+     *
+     * The stores are inline in guest text and cannot be intercepted, so
+     * undo them here. A stream with nothing buffered for reading has
+     * read_ptr == read_base, which is the state _IO_file_sync expects, so
+     * clamp only the out-of-range direction and leave real reads alone. */
+    {
+        char *fp = (char *)stream;
+        void **read_base = (void **)(fp + 0x18);
+        void **read_end  = (void **)(fp + 0x10);
+        void **read_ptr  = (void **)(fp + 0x08);
+        if (*read_ptr < *read_base) *read_ptr = *read_base;
+        if (*read_end  < *read_base) *read_end  = *read_base;
     }
     return real_fflush ? real_fflush(stream) : 0;
 }
