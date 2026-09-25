@@ -176,4 +176,30 @@ struct sc_obj {
         errno = macify_linux_to_macos_errno(saved); \
 } while (0)
 
+/* ── Lazy publication of a group of real_* function pointers ─────────
+ *
+ * Several translation units resolve a GROUP of glibc functions on first
+ * use (sync.c, attr.c, flags.c, the termcap stubs). The wrappers must
+ * never observe a partially-filled group: a wrapper that gates on one
+ * member while calling another could call a pointer a concurrent
+ * first-caller has not stored yet, and jump to NULL.
+ *
+ * Fix: publish through a dedicated `ready` flag that the init function
+ * stores LAST, with release ordering, after every pointer in the group
+ * is written. Wrappers gate through MACIFY_LAZY_INIT(), whose acquire
+ * load orders the table reads after the flag. No lock is used, and none
+ * can be: these wrappers ARE the pthread primitives a lock would be
+ * built from.
+ *
+ * Concurrent first-callers may each run the init. Every writer stores
+ * the same value (the lookups are deterministic), so the duplication is
+ * benign — the only invariant that matters is that no pointer is READ
+ * before it has been WRITTEN, which the flag guarantees.
+ */
+#define MACIFY_LAZY_READY(name)          __atomic_load_n(&(name), __ATOMIC_ACQUIRE)
+#define MACIFY_PUBLISH_LAZY_READY(name)  __atomic_store_n(&(name), 1, __ATOMIC_RELEASE)
+#define MACIFY_LAZY_INIT(ready, init_fn) do { \
+    if (!MACIFY_LAZY_READY(ready)) init_fn(); \
+} while (0)
+
 #endif /* MACIFY_SHIM_H */

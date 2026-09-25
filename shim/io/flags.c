@@ -65,6 +65,10 @@ int    (*real_fcntl)(int, int, ...);
 int    (*real_mprotect)(void *, size_t, int);
 long   (*real_sysconf)(int);
 
+/* Publication flag for the real_io_* table. Stored LAST by
+ * init_real_io_funcs; wrappers gate on it. See shim.h, MACIFY_LAZY_INIT. */
+volatile int real_io_ready = 0;
+
 void init_real_io_funcs(void) {
     real_mmap     = macify_elf_lookup("mmap");
     real_open     = macify_elf_lookup("open");
@@ -72,6 +76,7 @@ void init_real_io_funcs(void) {
     real_fcntl    = macify_elf_lookup("fcntl");
     real_mprotect = macify_elf_lookup("mprotect");
     real_sysconf  = macify_elf_lookup("sysconf");
+    MACIFY_PUBLISH_LAZY_READY(real_io_ready);
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {

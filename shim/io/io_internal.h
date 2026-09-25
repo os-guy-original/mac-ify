@@ -73,9 +73,11 @@ extern long   (*real_sysconf)(int);
 
 void init_real_io_funcs(void);
 
-#define LAZY_INIT_IO() do { \
-    if (!real_mmap) init_real_io_funcs(); \
-} while (0)
+/* Publication flag for the real_io_* table. Stored LAST by
+ * init_real_io_funcs; wrappers gate on it. See shim.h, MACIFY_LAZY_INIT. */
+extern volatile int real_io_ready;
+
+#define LAZY_INIT_IO() MACIFY_LAZY_INIT(real_io_ready, init_real_io_funcs)
 
 /* ── Sockaddr translation ────────────────────────────────────── */
 

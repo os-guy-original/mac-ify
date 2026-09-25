@@ -43,6 +43,13 @@ int   (*real_rwlock_unlock)(pthread_rwlock_t *);
 int   (*real_rwlock_init)(pthread_rwlock_t *, const pthread_rwlockattr_t *);
 int   (*real_rwlock_destroy)(pthread_rwlock_t *);
 
+/* Publication flag for the real_* table below. Stored LAST, with release
+ * ordering, by init_real_pthread_funcs; wrappers gate on it through
+ * LAZY_INIT. Gating on a table MEMBER (the old `!real_mutex_lock`) let a
+ * concurrent first-caller see the gate set while the entry it actually
+ * called was still NULL, jumping to address 0 — the Go boot flake. */
+static volatile int real_pthread_ready = 0;
+
 void init_real_pthread_funcs(void) {
     real_mutex_lock     = macify_elf_lookup("pthread_mutex_lock");
     real_mutex_trylock  = macify_elf_lookup("pthread_mutex_trylock");
@@ -60,6 +67,7 @@ void init_real_pthread_funcs(void) {
     real_rwlock_unlock  = macify_elf_lookup("pthread_rwlock_unlock");
     real_rwlock_init    = macify_elf_lookup("pthread_rwlock_init");
     real_rwlock_destroy = macify_elf_lookup("pthread_rwlock_destroy");
+    MACIFY_PUBLISH_LAZY_READY(real_pthread_ready);
 }
 
 /* Convert a macOS-format mutex to glibc format in-place. The macOS mutex
@@ -110,9 +118,7 @@ void convert_macos_rwlock(pthread_rwlock_t *rw) {
     }
 }
 
-#define LAZY_INIT() do { \
-    if (!real_mutex_lock) init_real_pthread_funcs(); \
-} while (0)
+#define LAZY_INIT() MACIFY_LAZY_INIT(real_pthread_ready, init_real_pthread_funcs)
 
 int pthread_mutex_lock(pthread_mutex_t *m) {
     LAZY_INIT();

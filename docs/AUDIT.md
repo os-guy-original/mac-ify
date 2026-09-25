@@ -371,7 +371,7 @@ every call to find which struct gets the {0,-len} pair the second time.
 Rule going forward: every fix must cite a fetched upstream source and
 must generalize — no per-binary patches, ever.
 
-## Go boot flake (T0001) — real rate, three defects fixed, NOT closed
+## Go boot flake (T0001) — CLOSED: the shim published its pthread table out of order
 
 Measured rate at a52ed93 is **~30% of runs** (12/40, 9/40 after this
 session's commits), not the ~40% the task assumed, and it is far lower
@@ -427,36 +427,67 @@ platform with no GS, which macify has already satisfied, so the
 conditional skip is rewritten to an unconditional one (`je`→`jmp`, same
 length, no relocation).
 
-### Still open — the flake is reduced, not fixed
+### [CLOSED] Root cause: the shim published its pthread real_* table out of order
 
-Root cause chain established but **not** closed. Verified facts:
+The `rip=0` fault is the shim's own pthread wrappers calling a glibc
+pointer that was still NULL. It was **not** a GS/signal problem.
 
-- GS base is correct immediately before the guest thread routine runs
-  (`PRE-CALL GSbase=0x7f..2000`) and reads **0** at SIGSEGV delivery on
-  that same tid. The kernel snapshots GS when building the signal frame;
-  for a base installed with `arch_prctl(ARCH_SET_GS)` on a non-main
-  thread the snapshot is not the value we set, so `sigreturn` restores 0
-  and `gs:0x30` reads whatever linear address `0x30` maps to (observed
-  `gs:0x30` values differ per run: 0x23ba…, 0x2995…, 0x3acd…).
-- Re-asserting GS from the handler (both the Go wrapper and the crash
-  handler) did **not** measurably help: 7/25 vs 8/25 baseline over
-  repeated trials. Not the trigger.
-- `patch_go_systemstack` is **not** the cause (A/B: 7/25 with, 8/25
-  without) despite the AUDIT note above flagging its t1 rel32.
-- Letting Go's handler run unwrapped is no better (3 trials: direct
-  5,5,7 /20 vs deferred 6,4,7 /20).
-- Sharing one GS base across threads **hangs** — threads then share a
-  single g. So per-thread GS is required, and the fix must live there.
-- stdout is empty on the crashing runs (0 bytes vs 156 on success), so
-  the fault is during boot, not post-main.
+`shim/pthread/sync.c` resolved its 16 `real_*` pointers lazily on first
+use, gating on a table *member*:
 
-Next step: fix the GS/signal interaction at the source — either
-`wrgsbase` on kernels ≥ 5.15 (this host is 7.2.6; the code only uses
-`arch_prctl` because of an old 5.10 workaround, and the `wrmsr`/signal
-path there may now be safe), or install the per-thread GS base via
-`CLONE_SETTLS` so the kernel tracks it. The current comment in
-`src/runtime.c` still claims wrgsbase "causes rip=0 crashes"; that
-claim needs re-testing on a modern kernel before the choice is made.
+    #define LAZY_INIT() do { if (!real_mutex_lock) init_real_pthread_funcs(); } while (0)
+
+but `init_real_pthread_funcs` stored `real_mutex_lock` **first** and the
+entries the wrappers actually call (`real_cond_init`, `real_mutex_init`)
+later. A thread entering during that window saw the gate already set,
+skipped the init, and called the entry it needed — still NULL — jumping
+to 0. The window is wide because each `macify_elf_lookup` linear-scans
+~65k libc symbols.
+
+Ground truth from a crash dump (`sig=11 adr=0 code=1 rip=0`):
+
+- the stack top is the guest return address after the `__stubs` call to
+  `_pthread_cond_init` (every hop after that call is a tail jump, so no
+  shim frame is pushed), and
+- `rax = shim_base + 0x8b340`, and `nm build/libmacify_shim.so` puts
+  `real_mutex_init` at **0x8b340** (`real_cond_init` at 0x8b310; both in
+  `.bss`, zero-initialised).
+
+So `rax` is `&real_mutex_init` and `*(rax) == 0`: the wrapper's
+`call *real_mutex_init` is the fault. The `__got` slot the loader filled
+(`__DATA_CONST,__got[109]` → shim `pthread_cond_init`) was correct, so
+the loader was not at fault.
+
+Proof, A/B on `tests/real/rclone_macos version`:
+
+    unmodified shim                       15/20 crash
+    unmodified shim + 100ms init window   20/20 crash
+    fixed shim                            20/20 pass
+    fixed shim + same 100ms init window   20/20 pass
+
+The injected window makes the race deterministic; the fix removes it
+even with the window forced open.
+
+The fix publishes each group through a dedicated flag stored **last**
+with release ordering and read with acquire ordering
+(`shim/shim.h`: `MACIFY_PUBLISH_LAZY_READY` / `MACIFY_LAZY_INIT`), so no
+wrapper can read a pointer before it has been written. Applied to the
+three groups whose wrappers call a member with no NULL check:
+`shim/pthread/sync.c`, `shim/pthread/attr.c`, `shim/io/flags.c`.
+`shim/pthread/tls.c` gates each function on the very pointer it uses,
+and the termcap stubs (`shim/shim_core.c`) NULL-check every member, so
+neither could NULL-call.
+
+### Superseded: the per-thread GS base survives signal delivery
+
+The earlier note here claimed `gs:0x30` "reads 0 at SIGSEGV delivery"
+and pointed at `arch_prctl(ARCH_SET_GS)` vs `wrgsbase`. That is wrong.
+A standalone reproducer (set GS base via `arch_prctl` and `wrgsbase`, on
+the main and a spawned thread, then deliver SIGSEGV and `raise(SIGUSR1)`,
+with and without `SA_ONSTACK`) survives 6/6 cases, and 9/9 macify crash
+dumps show `gs:0x30` valid and equal to `g` and `m.g0`. The kernel
+snapshots and restores the per-thread GS base correctly; no
+`wrgsbase`/`CLONE_SETTLS` change is needed.
 
 ## stdout NUL-flood (T0002) — FIXED: was never the regex layer
 

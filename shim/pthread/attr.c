@@ -13,6 +13,10 @@ int (*real_attr_setscope)(pthread_attr_t *, int);
 int (*real_attr_getscope)(const pthread_attr_t *, int *);
 int (*real_attr_setstack)(pthread_attr_t *, void *, size_t);
 
+/* Publication flag for the real_attr_* table. Stored LAST by
+ * init_real_attr_funcs; wrappers gate on it. See shim.h, MACIFY_LAZY_INIT. */
+static volatile int real_attr_ready = 0;
+
 void init_real_attr_funcs(void) {
     real_attr_init              = macify_elf_lookup("pthread_attr_init");
     real_attr_destroy           = macify_elf_lookup("pthread_attr_destroy");
@@ -26,11 +30,10 @@ void init_real_attr_funcs(void) {
     real_attr_setscope          = macify_elf_lookup("pthread_attr_setscope");
     real_attr_getscope          = macify_elf_lookup("pthread_attr_getscope");
     real_attr_setstack          = macify_elf_lookup("pthread_attr_setstack");
+    MACIFY_PUBLISH_LAZY_READY(real_attr_ready);
 }
 
-#define LAZY_INIT_ATTR() do { \
-    if (!real_attr_init) init_real_attr_funcs(); \
-} while (0)
+#define LAZY_INIT_ATTR() MACIFY_LAZY_INIT(real_attr_ready, init_real_attr_funcs)
 
 /* Get the glibc attr from a macOS attr. If the macOS attr doesn't have
  * our signature, allocate a new glibc attr. */
