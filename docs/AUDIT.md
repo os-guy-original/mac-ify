@@ -703,11 +703,35 @@ sequence, not in `r13`. Traced: `r12` is `0x...f10` at `0x6976e` and
 upper bits of `r12` (`0x65fadf00`) are loop-carried garbage, but the
 branch only reads the low byte, so that is not it either.
 
-**Where this leaves the investigation.** The control flow is fully
-mapped and the skipped call is identified, but the *reason* the flag
-ends up set is not yet explained by anything in the loader — no symbol is
-misbound, no shim function is entered, and the guest executes a
-self-consistent instruction stream. The remaining suspects are all in
-"how the guest's own data got into this state before echo ran", and the
-next step is to compare against a real macOS run of the same binary (or a
-second bash build) rather than to keep reading disassembly.
+### A caution about the disassembly offsets
+
+The traced addresses above (`0x697xx`) are real — they come from single-
+stepping, not from reading the file. But the *static* offsets computed by
+adding a guessed file offset to `0x100000000` are not reliable: a loader
+hook added late to NOP `and WORD [rax+0x10],0xff9f` at the guessed static
+address matched **zero** times, i.e. that byte sequence is not at the
+offset the arithmetic implies. Treat file-offset arithmetic on this binary
+as unverified; only the single-stepped values should be trusted.
+
+### What this leaves
+
+Two further hypotheses were raised and then **disproven by experiment**,
+recorded here so they are not retried:
+
+- *"`r13` is clobbered between being set and being read."* No. `r13` is
+  the *escape* flag; `mov r13d,1` at `0x100069617` lives inside the `-e`
+  handler and is correctly skipped for a plain `echo`. `r13d == 0` for
+  both `echo A` and `echo -n A`, and that is right.
+- *"bash's `and WORD [stdout+0x10],0xff9f` corrupts glibc's
+  `_IO_read_end`."* Plausible on paper — macOS has `_flags` at 0x10 where
+  glibc has a pointer — but the NOP experiment changed nothing, and the
+  pattern did not even occur where predicted.
+
+The control flow is mapped and the skipped emit call is identified, but
+the reason the flag is set is still unexplained, and no loader-side
+mechanism has been shown to cause it. Every symbol resolves, no shim
+function is entered, and the guest runs a self-consistent instruction
+stream. Continuing to read disassembly has stopped paying: the next step
+should be a differential test — run the same binary under a real macOS
+`echo`, or compare against a second bash build — rather than more static
+analysis of this one.
