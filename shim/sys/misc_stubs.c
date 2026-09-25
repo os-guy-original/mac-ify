@@ -209,11 +209,39 @@ char *libintl_setlocale(int category, const char *locale) {
  * forcing LC_CTYPE=C (inlined getc in sort -n) is now handled by the
  * 0xfbad2000 page mapping and __SEOF/__SERR patcher, so we no longer
  * need to override LC_CTYPE. */
+/* The category constants themselves differ too. Both platforms number
+ * them 0..6, so passing a guest category straight through silently picks
+ * the wrong one: macOS LC_CTYPE is 2, which glibc reads as LC_TIME. A
+ * guest that set the ctype locale therefore left glibc's LC_CTYPE on "C",
+ * and every nl_langinfo(CODESET) call reported "ANSI_X3.4-1968": ruby's
+ * Encoding.default_external came out US-ASCII even though setlocale had
+ * returned success. Translate before calling glibc.
+ *
+ *   macOS: LC_ALL 0, LC_COLLATE 1, LC_CTYPE 2, LC_MONETARY 3,
+ *          LC_NUMERIC 4, LC_TIME 5, LC_MESSAGES 6
+ *          (docs/darwin-libc/locale.h:45-51)
+ *   glibc: LC_CTYPE 0, LC_NUMERIC 1, LC_TIME 2, LC_COLLATE 3,
+ *          LC_MONETARY 4, LC_MESSAGES 5, LC_ALL 6 */
+static int macos_to_linux_category(int category) {
+    switch (category) {
+        case 0:  return LC_ALL;      /* macOS LC_ALL      -> glibc 6 */
+        case 1:  return LC_COLLATE;  /* macOS LC_COLLATE  -> glibc 3 */
+        case 2:  return LC_CTYPE;    /* macOS LC_CTYPE    -> glibc 0 */
+        case 3:  return LC_MONETARY; /* macOS LC_MONETARY -> glibc 4 */
+        case 4:  return LC_NUMERIC;  /* macOS LC_NUMERIC  -> glibc 1 */
+        case 5:  return LC_TIME;     /* macOS LC_TIME     -> glibc 2 */
+        case 6:  return LC_MESSAGES; /* macOS LC_MESSAGES -> glibc 5 */
+        default: return -1;
+    }
+}
+
 char *macify_setlocale(int category, const char *locale) __asm__("setlocale");
 char *macify_setlocale(int category, const char *locale) {
     static char *(*real_setlocale)(int, const char *) = NULL;
     if (!real_setlocale) real_setlocale = macify_elf_lookup("setlocale");
-    char *r = real_setlocale ? real_setlocale(category, locale) : NULL;
+    int cat = macos_to_linux_category(category);
+    if (cat < 0) cat = category;  /* unknown category: behave as before */
+    char *r = real_setlocale ? real_setlocale(cat, locale) : NULL;
     if (r && real_setlocale) {
         /* Force LC_NUMERIC=C only — prevents strtold loops with "," decimal
          * point in locales that use ",". */
@@ -222,8 +250,8 @@ char *macify_setlocale(int category, const char *locale) {
     if (getenv("MACIFY_TRACE_LOCALE")) {
         char b[256];
         int n = snprintf(b, sizeof(b),
-            "macify: setlocale(cat=%d, locale=%s) = %s, LC_NUMERIC forced to C\n",
-            category, locale ? locale : "(null)", r ? r : "(null)");
+            "macify: setlocale(cat=%d->%d, locale=%s) = %s, LC_NUMERIC forced to C\n",
+            category, cat, locale ? locale : "(null)", r ? r : "(null)");
         (void)write(2, b, n);
     }
     return r;
