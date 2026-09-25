@@ -196,19 +196,22 @@ char *libintl_setlocale(int category, const char *locale) {
     return macify_setlocale(category, locale);
 }
 
-/* setlocale - intercept and force LC_NUMERIC to "C" after any setlocale
- * call. macOS binaries call setlocale(LC_ALL, "") which sets all locale
- * categories based on environment. If LC_NUMERIC is set to a locale with
- * "," as decimal point, glibc's strtold loops infinitely (sort -n).
- * By forcing LC_NUMERIC=C, we ensure "." is always the decimal point.
+/* setlocale - translate the macOS category, then delegate to glibc.
  *
- * NOTE: LC_CTYPE is NOT forced — sed, paste, and other tools that read
- * multibyte input need LC_CTYPE to match the actual encoding (e.g.,
- * UTF-8). Forcing LC_CTYPE=C breaks sed's mbrtowc-based input reader
- * and paste's column reading. The crash that originally motivated
- * forcing LC_CTYPE=C (inlined getc in sort -n) is now handled by the
- * 0xfbad2000 page mapping and __SEOF/__SERR patcher, so we no longer
- * need to override LC_CTYPE. */
+ * This used to also force LC_NUMERIC="C" after every call, to stop strtold
+ * looping on a comma decimal point. That force is gone. With the categories
+ * mapped correctly it is not needed, and sort proves it: under
+ * LC_NUMERIC=tr_TR.UTF-8, `2,9`/`2,5` sort to 2,5 2,9 and 1,5/10/2 to
+ * 1,5 2 10, which is the real numeric order rather than the truncate-at-
+ * comma order the force produced. Removing it also fixes a bug it caused:
+ * the second glibc call overwrote the buffer glibc had just returned, so
+ * the guest got a dangling pointer back from setlocale() instead of the
+ * locale name.
+ *
+ * LC_CTYPE is deliberately not forced either: sed, paste and anything else
+ * reading multibyte input need LC_CTYPE to match the actual encoding. The
+ * crash that once motivated forcing it (inlined getc in sort -n) is handled
+ * by the 0xfbad2000 page mapping and the __SEOF/__SERR patcher. */
 /* The category constants themselves differ too. Both platforms number
  * them 0..6, so passing a guest category straight through silently picks
  * the wrong one: macOS LC_CTYPE is 2, which glibc reads as LC_TIME. A
@@ -242,15 +245,10 @@ char *macify_setlocale(int category, const char *locale) {
     int cat = macos_to_linux_category(category);
     if (cat < 0) cat = category;  /* unknown category: behave as before */
     char *r = real_setlocale ? real_setlocale(cat, locale) : NULL;
-    if (r && real_setlocale) {
-        /* Force LC_NUMERIC=C only — prevents strtold loops with "," decimal
-         * point in locales that use ",". */
-        real_setlocale(LC_NUMERIC, "C");
-    }
     if (getenv("MACIFY_TRACE_LOCALE")) {
         char b[256];
         int n = snprintf(b, sizeof(b),
-            "macify: setlocale(cat=%d->%d, locale=%s) = %s, LC_NUMERIC forced to C\n",
+            "macify: setlocale(cat=%d->%d, locale=%s) = %s\n",
             category, cat, locale ? locale : "(null)", r ? r : "(null)");
         (void)write(2, b, n);
     }

@@ -872,3 +872,40 @@ reports UTF-8, and bash stderr stays at 0 bytes on top of fix 1.
 Note for anything that follows: `newlocale`/`uselocale`/`duplocale` are not
 interposed at all, and their `LC_*_MASK` bits carry the same renumbering, so
 a guest using them still gets the wrong categories.
+
+### 3. The forced LC_NUMERIC=C is gone, and must not come back
+
+`macify_setlocale` used to call glibc a second time to force
+`LC_NUMERIC="C"`, to stop `strtold` looping on a comma decimal point. That
+is unnecessary now that the category mapping is correct. Under
+`LC_NUMERIC=tr_TR.UTF-8`, `sort -n` orders `2,9`/`2,5` as `2,5 2,9` — the
+real numeric order, not the truncate-at-comma order the force produced —
+and it does not loop. Mixed input (`1,5`, `10`, `2`) gives `1,5 2 10`.
+
+It was also actively broken: the second glibc call overwrote the buffer
+glibc had just returned from the first, so the locale name read back as
+garbage. Visible in the locale trace as
+`setlocale(cat=4->1, ...) = <binary junk>`; after removing the force the same
+line returns `tr_TR.UTF-8`. Restoring the force would reintroduce that.
+
+Still armed, and suspect for the same reason: `src/runtime.c` calls
+`unsetenv("LC_CTYPE")` before entering the guest, with a comment claiming
+the shim re-forces `LC_CTYPE=C` afterwards. It does not, and the crash that
+motivated the unset is handled elsewhere, so this now only discards a
+user's `LC_CTYPE` for no benefit. Not yet tested either way.
+
+### 4. Newly reachable and NOT fixed: a guest hangs when LC_MESSAGES is tr_TR
+
+Mounting the locale data made locales load that previously could not, and
+that exposed a hang. With `LANG` and `LC_ALL` unset,
+`LC_MESSAGES=tr_TR.UTF-8` hangs the guest on the simplest command:
+
+    env -u LANG -u LC_ALL LC_MESSAGES=tr_TR.UTF-8 macify bash -c 'echo hi'
+      -> hangs (no output, killed by timeout)
+
+`LC_CTYPE`, `LC_NUMERIC`, `LC_COLLATE` and `LC_TIME` set to the same locale
+are each fine, and `LC_MESSAGES=en_US.UTF-8` is fine, so the failure is
+specific to the messages category with that locale. It is not the category
+translation: the same hang occurs with the translation disabled. Before the
+locale data was mounted this path was unreachable, because `setlocale`
+failed for every locale but `C`.
