@@ -115,27 +115,9 @@ int macify_vm_region_recurse_64(int t, int *fl, void *i, int *c, unsigned long *
     (void)t;(void)fl;(void)i;(void)c;(void)a; return 1;
 }
 
-/* ── Filesystem attribute list stubs ─────────────────────────── */
-
-int macify_getattrlist(const char *p, void *a, void *b, size_t s, unsigned long o) __asm__("getattrlist");
-int macify_getattrlist(const char *p, void *a, void *b, size_t s, unsigned long o) {
-    (void)p;(void)a;(void)b;(void)s;(void)o; errno = ENOTSUP; return -1;
-}
-
-int macify_fgetattrlist(int fd, void *a, void *b, size_t s, unsigned long o) __asm__("fgetattrlist");
-int macify_fgetattrlist(int fd, void *a, void *b, size_t s, unsigned long o) {
-    (void)fd;(void)a;(void)b;(void)s;(void)o; errno = ENOTSUP; return -1;
-}
-
-int macify_setattrlist(const char *p, void *a, void *b, size_t s, unsigned long o) __asm__("setattrlist");
-int macify_setattrlist(const char *p, void *a, void *b, size_t s, unsigned long o) {
-    (void)p;(void)a;(void)b;(void)s;(void)o; errno = ENOTSUP; return -1;
-}
-
-int macify_fsetattrlist(int fd, void *a, void *b, size_t s, unsigned long o) __asm__("fsetattrlist");
-int macify_fsetattrlist(int fd, void *a, void *b, size_t s, unsigned long o) {
-    (void)fd;(void)a;(void)b;(void)s;(void)o; errno = ENOTSUP; return -1;
-}
+/* Filesystem attribute list API moved to io/attrlist.c (T0007):
+ * getattrlist/fgetattrlist are implemented for real (ruby glob,
+ * case probes); setattrlist/fsetattrlist live there too. */
 
 /* ── System stubs ────────────────────────────────────────────── */
 
