@@ -876,17 +876,29 @@ a guest using them still gets the wrong categories.
 ### 3. The forced LC_NUMERIC=C is gone, and must not come back
 
 `macify_setlocale` used to call glibc a second time to force
-`LC_NUMERIC="C"`, to stop `strtold` looping on a comma decimal point. That
-is unnecessary now that the category mapping is correct. Under
-`LC_NUMERIC=tr_TR.UTF-8`, `sort -n` orders `2,9`/`2,5` as `2,5 2,9` — the
-real numeric order, not the truncate-at-comma order the force produced —
-and it does not loop. Mixed input (`1,5`, `10`, `2`) gives `1,5 2 10`.
+`LC_NUMERIC="C"`, to stop `strtold` looping on a comma decimal point. It was
+removed, and its stated purpose could not be reproduced in either direction:
 
-It was also actively broken: the second glibc call overwrote the buffer
-glibc had just returned from the first, so the locale name read back as
-garbage. Visible in the locale trace as
-`setlocale(cat=4->1, ...) = <binary junk>`; after removing the force the same
-line returns `tr_TR.UTF-8`. Restoring the force would reintroduce that.
+    LC_NUMERIC=tr_TR.UTF-8, sort -n on "2,9"/"2,5"
+      with the force:     2,5 2,9
+      without the force:  2,5 2,9
+
+Both are the real numeric order, so the force was not what made sort handle
+comma decimals, and no loop appeared once it was gone. Mixed input (`1,5`,
+`10`, `2`) sorts to `1,5 2 10`. Every other case measured (ASCII and
+multibyte input under `C`, `en_US.UTF-8` and `tr_TR`) is identical with and
+without it, as are `make test` 16/16 and `make test-real` 23/23.
+
+What the force did do was break `setlocale`'s return value: the second glibc
+call overwrote the buffer glibc had just returned from the first, so the
+locale name read back as garbage. Visible in the locale trace as
+`setlocale(cat=4->1, ...) = <binary junk>`; without the force the same line
+returns `tr_TR.UTF-8`.
+
+Correction worth keeping: an earlier commit message on this change said the
+force produced a "truncate-at-comma" sort order. It did not. The two runs
+above are identical, so the guard should be recorded as removed for the
+dangling-pointer bug, not as fixing a reproduced sort or strtold fault.
 
 Still armed, and suspect for the same reason: `src/runtime.c` calls
 `unsetenv("LC_CTYPE")` before entering the guest, with a comment claiming

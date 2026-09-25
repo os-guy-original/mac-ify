@@ -199,13 +199,12 @@ char *libintl_setlocale(int category, const char *locale) {
 /* setlocale - translate the macOS category, then delegate to glibc.
  *
  * This used to also force LC_NUMERIC="C" after every call, to stop strtold
- * looping on a comma decimal point. That force is gone. With the categories
- * mapped correctly it is not needed, and sort proves it: under
- * LC_NUMERIC=tr_TR.UTF-8, `2,9`/`2,5` sort to 2,5 2,9 and 1,5/10/2 to
- * 1,5 2 10, which is the real numeric order rather than the truncate-at-
- * comma order the force produced. Removing it also fixes a bug it caused:
- * the second glibc call overwrote the buffer glibc had just returned, so
- * the guest got a dangling pointer back from setlocale() instead of the
+ * looping on a comma decimal point. That force is gone. Measured both ways
+ * under LC_NUMERIC=tr_TR.UTF-8: `sort -n` on "2,9"/"2,5" gives 2,5 2,9 with
+ * the force and 2,5 2,9 without it, so the force was never what made comma
+ * decimals sort correctly, and no loop appears without it. What it did do
+ * was break setlocale: the second glibc call overwrote the buffer glibc had
+ * just returned, so the guest got a dangling pointer back instead of the
  * locale name.
  *
  * LC_CTYPE is deliberately not forced either: sed, paste and anything else
