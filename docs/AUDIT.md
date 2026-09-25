@@ -465,8 +465,10 @@ Proof, A/B on `tests/real/rclone_macos version`:
     fixed shim                            20/20 pass
     fixed shim + same 100ms init window   20/20 pass
 
-The injected window makes the race deterministic; the fix removes it
-even with the window forced open.
+Measured again in a clean worktree (`git worktree add`, so no other
+agent's in-flight edits are in the build): parent `0956388` is 20/20
+crash, the fix is 20/20 pass. The injected window makes the race
+deterministic; the fix removes it even with the window forced open.
 
 The fix publishes each group through a dedicated flag stored **last**
 with release ordering and read with acquire ordering
