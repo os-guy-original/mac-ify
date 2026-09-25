@@ -511,19 +511,19 @@ The second line is the more important one: the same skew was silently
 eating all output of any guest whose stdout was a pipe, which no test
 had been asserting on.
 
-### Still open: newlines from the `echo` builtin
+### Newlines from the `echo` builtin — fixed separately (26c6dd7)
 
-`echo A; echo C` now yields `AC` — correct bytes, missing `\n`. This is a
-**separate defect**, not the flood:
+At the time the flood was closed, `echo A; echo C` yielded `AC` — correct
+bytes, missing `\n`. That was a **separate defect**, not the flood:
 
     bash -c 'printf "A\nC\n"'   ->  41 0a 43 0a   (correct)
     bash -c 'echo A; echo C'     ->  41 43         (newlines lost)
 
-`printf` is right, so the guest's escaping and the write path are fine;
-bash's `echo` builtin takes a different route (its own buffering, or
-`__swbuf` on the newline) and drops the 0x0a. Not pursued under T0002 —
-acceptance criterion 1 (`A\nB\nC\n` exactly) is therefore **not met**;
-the flood half of it is fixed and the newline half is a fresh bug.
+`printf` was right, so the guest's escaping and the write path were fine.
+It is now fixed, and the cause was the loader's inlined-putc patcher, not
+the `echo` builtin: see *bash `echo` loses its trailing newline — RESOLVED*
+below for the mechanism. T0002 acceptance criterion 1 (`A\nB\nC\n`
+exactly) is **met**.
 
 ### Also corrected: macos_sFILE offsets (76a5e25)
 
@@ -534,10 +534,52 @@ resolves the open AUDIT note that called the 0x14/0x1c claim wrong. The
 struct is currently unreachable (`macify_use_macos_stdio` has no callers),
 so this is correctness-only, not a behaviour change.
 
-## bash `echo` loses its trailing newline — OPEN, mechanism narrowed
+## bash `echo` loses its trailing newline — RESOLVED (26c6dd7)
 
-Not fixed. Everything below was measured this session; nothing is inferred
-from a single run.
+Fixed. The cause was the loader's inlined-putc patcher, which the
+investigation below had ruled out on the strength of three *configuration*
+experiments rather than on whether the patch matched the code that was
+actually running.
+
+Darwin's `putc` expands inline (`__sputc`, docs/darwin-libc/_stdio.h:415)
+and its fast path stores the character through `_p` (line 417). `_p` is the
+first member of `struct __sFILE` (docs/darwin-libc/_stdio.h:133), so it is
+FILE offset 0, and on a glibc FILE that is `_flags` (0xfbad2a86). The
+shim's own 0xfbad2000 guard-page mapping catches the store, so the byte is
+discarded with no libc call and no `write(2)`. That
+is precisely the observation this section could not explain: zero hits on
+`__swbuf`/`putchar`/`fputc`, correct argument bytes, and no syscall for
+the separator or the newline.
+
+gcc emits three shapes of the macro, all from the single expression at
+docs/darwin-libc/_stdio.h:416: the `_c != '\n'` term folds away when the
+character is a known constant, and each folding leaves a different branch
+sequence behind. The patcher only recognised the runtime-char one (`test
+_w; jg fast; cmp al,0xa; je slow`), which covered 7 of bash 5.3.15's 30
+sites. `echo`'s separator and trailing newline are `putchar(' ')` and
+`putchar('\n')` (docs/bash/echo.def:194,199) — the two shapes where the
+newline check folds away — so they kept the fast path. `printf` goes through `vfprintf`
+and never inlines `putc`, which is why it was always correct.
+
+The three-configuration test below looked like exoneration because every
+one of those configurations still left 23 of the 30 sites on the broken
+fast path; it only ever toggled the one shape that was already handled.
+The fix matches the shared prologue without pinning registers, finds each
+site's own slow label, and skips sites whose label is out of rel8 reach or
+is not the `__swbuf` character load.
+
+Measured after the fix:
+
+    bash -c 'echo A'             ->  41 0a
+    bash -c 'echo A; echo C'     ->  41 0a 43 0a
+    bash -c 'echo A B'           ->  41 20 42 0a
+    bash -c 'echo -n A'          ->  41
+
+The trace and the ruled-out list below are kept as the record of how the
+bug was narrowed — the register trace is what killed the escape/nflag
+theories and left the inlined putc macro as the last candidate standing.
+
+### Superseded analysis
 
 ### Scope (all verified)
 
@@ -601,11 +643,12 @@ point of the test, so that branch is skipped.
   `en_US.UTF-8` is present but is not the cause — `printf` is unaffected.)
 - **Not argv.** `printf "<%s>\n" "$@"` round-trips arguments correctly.
 
-### Where to look next
+### Where to look next (superseded — this was the dead end)
 
-The putc patch was the obvious suspect and is now excluded by experiment
-(three configurations, above). What remains unexplained is the central
-observation:
+The putc patch was the obvious suspect and was thought to be excluded by
+experiment (three configurations, above). It was not, and the reason is
+recorded at the top of this section. What remains to be explained is the
+central observation:
 
 > Breakpoints on `__swbuf`, `putchar` and `fputc` record **zero** hits
 > for plain `echo`, yet the argument bytes come out correctly and the
@@ -713,10 +756,11 @@ address matched **zero** times, i.e. that byte sequence is not at the
 offset the arithmetic implies. Treat file-offset arithmetic on this binary
 as unverified; only the single-stepped values should be trusted.
 
-### What this leaves
+### What this leaves (superseded)
 
 Two further hypotheses were raised and then **disproven by experiment**,
-recorded here so they are not retried:
+recorded here so they are not retried. Both were true negatives; the real
+cause was the half-patched putc macro, not any of these:
 
 - *"`r13` is clobbered between being set and being read."* No. `r13` is
   the *escape* flag; `mov r13d,1` at `0x100069617` lives inside the `-e`
@@ -727,11 +771,17 @@ recorded here so they are not retried:
   glibc has a pointer — but the NOP experiment changed nothing, and the
   pattern did not even occur where predicted.
 
-The control flow is mapped and the skipped emit call is identified, but
-the reason the flag is set is still unexplained, and no loader-side
-mechanism has been shown to cause it. Every symbol resolves, no shim
-function is entered, and the guest runs a self-consistent instruction
-stream. Continuing to read disassembly has stopped paying: the next step
-should be a differential test — run the same binary under a real macOS
-`echo`, or compare against a second bash build — rather than more static
-analysis of this one.
+The control flow is mapped and the skipped emit call identified, but the
+reason the flag was set looked unexplained, and no loader-side mechanism
+had been shown to cause it — every symbol resolved, no shim function was
+entered, and the guest appeared to run a self-consistent instruction
+stream.
+
+The lesson worth keeping from this section: "no shim function is entered"
+is not evidence that the shim is not involved. An inlined macro that
+stores through `_p` never calls the interposed `__swbuf` at all, so the
+absence of a hit was the signature of the bug rather than a defence
+against it. Note also that the earlier decision to *not* trust
+file-offset arithmetic was correct and should stay: the patcher works on
+the loaded `__TEXT,__text` section obtained from `find_section`, never on
+computed file offsets.
