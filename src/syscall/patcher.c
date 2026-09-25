@@ -105,6 +105,7 @@ int patch_syscalls_in_range(loaded_segment *seg, uint8_t *base,
 
 /* Forward declaration */
 void patch_go_systemstack(loaded_segment *seg, uint8_t *base);
+static void patch_go_gs_probe(loaded_segment *seg, uint8_t *base);
 
 int patch_syscalls_in_segment(loaded_segment *seg) {
     if (!(seg->prot & PROT_EXEC)) return 0;
@@ -150,6 +151,9 @@ int patch_syscalls_in_segment(loaded_segment *seg) {
     /* Patch Go's systemstack to handle NULL m.curg.
      * This is safe for non-Go binaries — the pattern won't match. */
     patch_go_systemstack(seg, base);
+
+    /* Patch Go's per-goroutine GS assertion (see patch_go_gs_probe). */
+    patch_go_gs_probe(seg, base);
 
     /* Downgrade to target protection. */
     if (mprotect((void *)(uintptr_t)seg->vmaddr, seg->vmsize,
@@ -227,6 +231,70 @@ int patch_syscalls_in_segment(loaded_segment *seg) {
  * Instead, set m.curg = m.g0 BEFORE calling the Go entry point,
  * but do it AFTER rt0_go has set up g0 and m0. We can do this
  * in setup_gs_base after finding tls_g (which is near m0 in BSS). */
+/* Go re-validates GS on every stack growth (runtime.call1024/call8192/...,
+ * the morestack prologue), not just at boot:
+ *
+ *     65 48 c7 04 25 30 00 00 00 23 01 00 00   mov gs:0x30, 0x123
+ *     48 8b 05 <disp32>                         mov rax, [tls_g]   (global)
+ *     48 3d 23 01 00 00                         cmp rax, 0x123
+ *     74 05                                    je  <ok>
+ *     e8 <rel32>                                 call <abort>
+ *
+ * It passes only when gs:0x30 *aliases the global tls_g*, i.e. when the GS
+ * base is exactly (tls_g - 0x30). macify gives each thread its own GS base
+ * (shim/pthread/create.c) so that concurrent Ms do not share one g pointer;
+ * on such a thread gs:0x30 is a per-thread slot, the global never changes,
+ * the compare fails, and Go takes the abort path — which lands in
+ * sigtrampgo with m.curg still NULL and faults at address 0.
+ *
+ * That is the whole rc=139 Go boot flake: a worker thread grows a stack
+ * early, trips this assertion, and dies in the signal path.
+ *
+ * We cannot make gs:0x30 alias the global without giving every thread the
+ * same g, which is the bug the per-thread base exists to prevent. So
+ * neutralise the assertion instead: turn the conditional skip into an
+ * unconditional one. The assertion's only job is to detect a platform
+ * where GS is not wired up, and macify has wired it up — per thread. The
+ * rest of the prologue (stack split, morestack call) is untouched.
+ *
+ * General, not per-binary: the pattern is Go's own GS self-test, present
+ * in every Go binary, and it is rewritten in place (same length, so no
+ * relocation or layout change). Non-Go code cannot match the 21-byte
+ * sequence. */
+static void patch_go_gs_probe(loaded_segment *seg, uint8_t *base) {
+    /* Two fixed runs around a variable disp32:
+     *   [0..12]  mov gs:0x30,0x123
+     *   [13..15] mov rax,[rip+d32]      (d32 at [16..19], not matched)
+     *   [20..26] cmp rax,0x123
+     *   [27]     je rel8                (rel8 at [28], call at [29])  */
+    static const uint8_t head[] = {
+        0x65, 0x48, 0xc7, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0x23, 0x01, 0x00, 0x00,
+        0x48, 0x8b, 0x05,
+    };
+    static const uint8_t tail[] = {
+        0x48, 0x3d, 0x23, 0x01, 0x00, 0x00,
+        0x74,
+    };
+    const size_t je_off = sizeof(head) + 4 + sizeof(tail) - 1;  /* == 27 */
+
+    for (size_t i = 0; i + je_off + 2 < seg->vmsize; i++) {
+        if (memcmp(base + i, head, sizeof(head)) != 0) continue;
+        if (memcmp(base + i + sizeof(head) + 4, tail, sizeof(tail)) != 0) continue;
+        /* Only rewrite a short forward skip over a call — anything else is
+         * a different je and we leave it alone. */
+        int8_t rel = (int8_t)base[i + je_off + 1];
+        if (rel <= 0 || rel > 16) continue;
+        if (base[i + je_off + 2] != 0xe8) continue;  /* must skip a call */
+        base[i + je_off] = 0xeb;                     /* je -> jmp (same len) */
+        if (g_verbose) {
+            fprintf(stderr, "macify: patched Go GS probe at 0x%lx "
+                            "(je -> jmp; per-thread GS base cannot alias tls_g)\n",
+                    (unsigned long)(seg->vmaddr + i));
+        }
+        return;
+    }
+}
+
 void patch_go_systemstack(loaded_segment *seg, uint8_t *base) {
     /* Patch systemstack's "switch back to m.curg" code.
      *
