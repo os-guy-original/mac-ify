@@ -1136,7 +1136,29 @@ int macify_fflush(FILE *stream) {
         if (*read_ptr < *read_base) *read_ptr = *read_base;
         if (*read_end  < *read_base) *read_end  = *read_base;
     }
-    return real_fflush ? real_fflush(stream) : 0;
+    int rr = real_fflush ? real_fflush(stream) : 0;
+    /* glibc's fflush on a readable stream runs _IO_file_sync, which seeks
+     * by the difference between the read pointers. The inlined getc macros
+     * above can leave _IO_read_end a little past _IO_read_ptr, so the sync
+     * seeks below the start of the file, fails with EINVAL, and leaves the
+     * stream marked "close failed: -: Invalid argument" by macOS callers
+     * (observed under a multibyte LC_CTYPE reading a small regular file).
+     *
+     * Only on that failure: collapse the read buffer so the sync delta is
+     * zero and retry. The pointers are already known-inconsistent here, so
+     * this cannot discard a legitimate buffered read that glibc would have
+     * kept — the first flush already reported the stream as failed. */
+    if (rr != 0 && errno == EINVAL) {
+        char *fp = (char *)stream;
+        char **read_ptr = (char **)(fp + 0x08);
+        char **read_end = (char **)(fp + 0x10);
+        if (*read_end >= *read_ptr && (size_t)(*read_end - *read_ptr) < 65536) {
+            *read_ptr = *read_end;
+            errno = 0;
+            rr = real_fflush ? real_fflush(stream) : 0;
+        }
+    }
+    return rr;
 }
 
 /* ── exec family wrappers ─────────────────────────────────────
