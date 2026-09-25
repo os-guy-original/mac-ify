@@ -38,6 +38,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
@@ -73,6 +74,32 @@ static void ensure_dir(const char *path) {
     if (stat(path, &st) != 0) {
         mkdir(path, 0755);
     }
+}
+
+/* Copy src to dst, creating/truncating dst. Returns 0 on success, -1 on
+ * failure (dst is removed on failure so a partial file is never left). */
+static int copy_file(const char *src, const char *dst) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) { close(in); return -1; }
+    char buf[65536];
+    ssize_t n;
+    int rc = 0;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w <= 0) { rc = -1; break; }
+            off += w;
+        }
+        if (rc) break;
+    }
+    if (n < 0) rc = -1;
+    close(in);
+    close(out);
+    if (rc) unlink(dst);
+    return rc;
 }
 /* Initialize the prefix directory structure.
  * Called from main() before the macOS binary's main().
@@ -275,6 +302,43 @@ void macify_init_prefix(void) {
     if (f) {
         fprintf(f, "/bin/bash\n/bin/sh\n/bin/zsh\n/usr/bin/bash\n/usr/bin/sh\n/usr/bin/zsh\n");
         fclose(f);
+    }
+
+    /* ── etc/ssl — TLS trust store ─────────────────────────
+     * macOS ships a system trust bundle at /etc/ssl/cert.pem, which curl
+     * and other TLS clients use as their default CAfile. Because the
+     * prefix IS the root filesystem for macOS binaries, their
+     * /etc/ssl/cert.pem resolves to <prefix>/etc/ssl/cert.pem, so without
+     * this HTTPS verification finds no trust anchors and fails. Populate
+     * it from the host's CA bundle and refresh it when the host bundle is
+     * newer, so ca-certificates updates keep working. */
+    snprintf(path, sizeof(path), "%s/etc/ssl", prefix);
+    ensure_dir(path);
+    snprintf(path, sizeof(path), "%s/etc/ssl/certs", prefix);
+    ensure_dir(path);
+    {
+        static const char *host_ca[] = {
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/ssl/cert.pem",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+            NULL
+        };
+        char dst[PATH_MAX];
+        snprintf(dst, sizeof(dst), "%s/etc/ssl/cert.pem", prefix);
+        struct stat sd;
+        int have_dst = (stat(dst, &sd) == 0);
+        for (int i = 0; host_ca[i]; i++) {
+            struct stat ss;
+            if (stat(host_ca[i], &ss) != 0 || ss.st_size <= 0) continue;
+            if (!have_dst || sd.st_mtime < ss.st_mtime) {
+                if (copy_file(host_ca[i], dst) == 0 &&
+                    getenv("MACIFY_PREFIX_DEBUG"))
+                    fprintf(stderr, "macify: installed CA bundle from %s\n",
+                            host_ca[i]);
+            }
+            break;  /* only the first existing candidate is used */
+        }
     }
 
     /* ── var/ ────────────────────────────────────────────── */
