@@ -304,3 +304,67 @@ socket crash, and long-term the macos_sFILE facade (~25 stdio exports;
 note macos_stdio.c's layout comments claim _bf@0x14/0x1c but real
 Darwin __sFILE has _bf{base@0x18,size@0x20} — fix before enabling).
 
+
+## Ground-truth sources landed (kills the "guess to fix" stage)
+
+Fetched upstream sources now live in-tree; every future shim/translation
+change must cite one of these, not memory:
+
+- `docs/xnu/headers/` — xnu `bsd/sys/{termios,signal,errno,stat,dirent,
+  fcntl,mman,socket,un,ttycom,ioctl,resource,time,event}.h` +
+  `i386/signal.h` (main branch).
+- `docs/darwin-libc/` — libpthread `pthread_impl.h` (mutex/cond/rwlock/
+  once sigs: ABA7/ABA2/ABA1/ABA3, 3CB0B1BB, 2DA8B3B4, 30B1BCBA — shim
+  constants verified equal) and Libc `include/_stdio.h` (real __sFILE
+  layout: _bf{base@0x18,size@0x20} on LP64 — confirms AUDIT note that
+  macos_stdio.c's 0x14/0x1c claim is wrong).
+- `docs/dyld/` — dyld `include/mach-o/fixup-chains.h` (PTR_64=2,
+  PTR_64_OFFSET=6, ordinal=24b/addend=8b, rebase target=36b/high8=8b)
+  and cctools `include/mach-o/loader.h`; `dyld_images.h`.
+- `docs/glibc/` — installed 2.44 headers (termios bit/cc/struct/baud
+  files, NCCS=32), kernel `asm-generic/termbits.h` (CBAUD=0x100f,
+  BOTHER=0x1000, B57600=0x1001…B4000000=0x100f), plus glibc master
+  `termios/speed.c`, `sysdeps/unix/sysv/linux/{speed,tcsetattr,
+  tcgetattr,cfsetspeed}.c`, `termios_internals.h`, `k_termios.h`.
+
+### Speeds (glibc 2.42 "sane speed_t" rework) — FIXED in shim/io/file.c
+
+glibc ≥2.42: `cfget*` return literal rates; `tcsetattr` walks
+c_ispeed/c_ospeed → CBAUD itself (termios2 ioctl). Pre-2.42: user-space
+Bxxx = kernel codes (0x1001=B57600 …), cfset* wrote raw CBAUD, tcsetattr
+sent TCSETS. Any single-convention table is wrong for one side. Fix:
+- read path: decode codes 0..15 + 0x1001..0x100f to rates; pass literal
+  rates through (≤15 can't be literal macOS rates — min is B50).
+- write path: literal rates into c_ispeed/c_ospeed AND kernel CBAUD
+  code into c_cflag (speed_to_cbaud_code); old glibc takes the CBAUD,
+  new glibc recomputes CBAUD from literals (___termios2_canonicalize_speeds)
+  and overwrites ours — both generations then program the same rate.
+- c_line=0 explicitly; macOS OFDEL is 0x20000 (xnu), not 0x100 — the
+  oflag table mapped Linux OFDEL (0x80) round-trip into 0x100 (VTDLY!).
+
+### NEW blocker: stdout NUL-flood after SECOND successful regexec (pre-existing)
+
+Repro (deterministic, verified identical at HEAD and with termios changes):
+```
+macify ~/.macify/bin/bash -c 'echo A; [[ "abc" =~ b ]]; echo B; [[ "xyz" =~ y ]]; echo C'
+→ stdout = "A\n" + \0-flood; writes then fail with EAGAIN on a pipe
+```
+xtrace shows ALL commands execute to completion (rc=0 everywhere) — the
+guest is fine; the shim's stdio write path is not. One buffered echo
+goes out as a giant write of a zeroed buffer. This is the {0,-len}
+adjacent-int32-pair signature from the [[ =~ ]] fix (9518f7c), resurfacing
+on a LATER call than the one that fix covers — i.e. a second struct with
+the same pair layout (candidates: the regex wrapper's own shim-side
+buffer state, or another 2-int field pair adjacent to a size the guest
+trusts). The first-match-after-regcomp path is clean; corruption first
+appears on a subsequent successful match in the same process.
+
+Classification: GENERAL (POSIX-regex layer, every macOS binary doing
+multi-match regex), NOT bash-specific. Next step unchanged from the
+[[ =~ ]] session: debug build of Homebrew bash 5.3 + break on the
+memset-with-(0,-len<<32) call site; instrument macify_regexec to dump
+its caller's pmatch buffer AND the wrapper's own allocator state on
+every call to find which struct gets the {0,-len} pair the second time.
+
+Rule going forward: every fix must cite a fetched upstream source and
+must generalize — no per-binary patches, ever.

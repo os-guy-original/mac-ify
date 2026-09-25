@@ -152,8 +152,15 @@ Translation happens in `shim/io/file.c` (`translate_stat`).
 
 ## 5. struct termios
 
-macOS has 20 c_cc entries + speed fields (60 bytes).
-Linux has 19 c_cc entries + c_line (36 bytes).
+macOS: 4×u32 flags + c_cc[20] + c_ispeed + c_ospeed = 44 bytes.
+Linux: 4×u32 flags + c_line + c_cc[32] + c_ispeed + c_ospeed = 60 bytes.
+(An older version of this doc claimed the reverse sizes — wrong.)
+
+Layouts and every flag bit / c_cc index / speed constant are verified
+against in-tree sources: `docs/xnu/headers/sys_termios.h` (macOS) and
+`docs/glibc/` (Linux 2.44 + kernel termbits). Speeds need dual-convention
+handling because glibc 2.42 changed user-space Bxxx from kernel codes to
+literal rates — see `docs/glibc/README.md`.
 
 Translation happens in `shim/io/file.c` (`tcgetattr`/`tcsetattr`).
 
