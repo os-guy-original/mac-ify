@@ -111,7 +111,7 @@ int macify_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
  *   offset 32: ai_canonname  (char *)
  *   offset 40: ai_next       (struct addrinfo *)
  *
- * macOS addrinfo layout (from <netdb.h>):
+ * macOS addrinfo layout (docs/darwin-libc/netdb.h:147):
  *   offset 0:  ai_flags      (int)
  *   offset 4:  ai_family     (int)
  *   offset 8:  ai_socktype   (int)
@@ -162,8 +162,10 @@ int macify_getaddrinfo(const char *node, const char *service,
     /* Translate macOS hints → Linux hints.
      * The first 16 bytes (flags/family/socktype/protocol) are at the same
      * offsets, but the flag BIT VALUES differ between macOS and Linux.
-     * Also, macOS socklen_t is 4 bytes vs Linux's 8, so ai_addrlen is at
-     * a different effective width. We rebuild a clean Linux addrinfo. */
+     * After ai_addrlen (offset 16, 4 bytes on both) the two layouts swap
+     * ai_addr and ai_canonname — macOS puts ai_canonname at offset 24 and
+     * ai_addr at 32, glibc the reverse — so we rebuild a clean Linux
+     * addrinfo rather than reuse the guest's. */
     struct addrinfo linux_hints;
     memset(&linux_hints, 0, sizeof(linux_hints));
     if (hints) {
