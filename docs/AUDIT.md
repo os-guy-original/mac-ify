@@ -131,8 +131,10 @@
   zone (fine for the single default zone we emulate).
 - [OK] getentropy uses getrandom(2) with /dev/urandom fallback.
 - [KNOWN-LIMIT] kqueue/kevent are stubs: changes "succeed", reads return
-  0 events. Noisy logging on every call (rclone/bash spam). Future work:
-  real kqueue over epoll; at minimum gate logs behind MACIFY_TRACE_KQUEUE.
+  0 events. The unconditional logging this section asked for is now gated
+  behind MACIFY_TRACE_KQUEUE (docs/Development.md lists it). Measured:
+  `ruby -e 'puts 1'` went from 30,579 trace lines on stderr to 0, and still
+  emits them with the gate set. Still future work: real kqueue over epoll.
 
 ## shim/misc/* (skim)
 - [OK] sysctl bounded copies; rune table matches _CTYPE bits; CF stubs

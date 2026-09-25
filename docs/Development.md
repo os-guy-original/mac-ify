@@ -85,6 +85,7 @@ Set these environment variables to enable tracing:
 |-----------------------|-----------------------------------------|
 | MACIFY_TRACE_OPEN     | open, stat, opendir, isatty calls       |
 | MACIFY_TRACE_READ     | fread, fgetc, fgets calls               |
+| MACIFY_TRACE_KQUEUE   | kqueue, kevent calls                    |
 | MACIFY_TRACE_FORK     | fork, vfork, waitpid, wait4 calls       |
 | MACIFY_TRACE_SPAWN    | posix_spawn, execve, execvp calls       |
 | MACIFY_TRACE_SIGNAL   | sigaction, sigprocmask calls            |
