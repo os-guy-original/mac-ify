@@ -583,7 +583,11 @@ point of the test, so that branch is skipped.
 
 ### What has been RULED OUT (so it is not re-chased)
 
-- **Not the putc patch.** A/B with the patch disabled: identical (`AB`).
+- **Not the putc patch.** Tested in three configurations, all identical
+  (`AC`): patch as-is; keep the original `jg` instead of forcing `jmp`;
+  and keep the `_w` store instead of NOPing it. The last of these
+  disables the patch's effect entirely and still loses the newline, so the
+  patch is fully exonerated.
 - **Not `__swbuf`/`putchar`/`fputc` binding.** Breakpoints on all three
   (via `dlsym` in the target) record **zero** hits for plain `echo`, while
   the GOT entry for the `__swbuf` stub is confirmed to point at our shim
@@ -599,17 +603,26 @@ point of the test, so that branch is skipped.
 
 ### Where to look next
 
-The remaining suspect is the loader's **`patch_go_systemstack`-style
-bytecode rewriting applied to bash's inlined `putc`**: the patch NOPs the
-`_w` store and turns the `jg` fast path into an unconditional `jmp`
-(`src/main.c`, the `mov ecx,[rX+0x0c]` pattern). After that patch the
-`cmp al,0x0a / je __swbuf` newline test inside the macro is dead, because
-control never falls through to it. That would explain all three symptoms
-at once: the newline, the argument separator, and why neither reaches
-`__swbuf`. It is consistent with the patch being counted as 7 sites while
-bash contains 8 matching `putc` sequences, and with `-e`/`printf` working
-(they do not use the inlined macro).
+The putc patch was the obvious suspect and is now excluded by experiment
+(three configurations, above). What remains unexplained is the central
+observation:
 
-This is a hypothesis, not a result — the A/B above disabled the whole
-patch rather than testing the newline branch in isolation, which is the
-experiment to run first.
+> Breakpoints on `__swbuf`, `putchar` and `fputc` record **zero** hits
+> for plain `echo`, yet the argument bytes come out correctly and the
+> separator/newline bytes do not — and `strace` shows no `write` for them
+> at all.
+
+So the characters are discarded somewhere that is not a libc call we
+interpose and not a `write(2)`. The unexamined space is bash's own
+inlined code between the two `printf("%s")` calls and the `__swbuf` call
+sites — specifically the branch at `0x1000696b7` (`test r13d,r13d /
+je 0x100069758`), which is taken on the normal path and skips straight to
+the single-`printf` sequence. `r13` reads 0 at the `printf` breakpoint in
+both `echo A` and `echo -n A`, so it is not the `nflag` it was assumed to
+be; identifying what actually sets it (and whether the loader leaves it
+wrong) is the next concrete step.
+
+Worth checking alongside: the same symptom should be tested against a
+*different* bash build. If a second bash shows it, the cause is in the
+loader; if not, it is this build's codegen and the fix belongs in the
+putc/stdio emulation rather than in the loader.
