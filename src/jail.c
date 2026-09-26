@@ -9,6 +9,10 @@
  *
  * Requires unprivileged user namespaces (kernel.unprivileged_userns_clone).
  * On failure, exits nonzero so callers can fall back to direct execution.
+ *
+ * A guest binary named by host path is mirrored in as one read-only file
+ * at the same absolute path (see mirror_host_file), so the documented
+ * `macify <binary>` form works; nothing else from the host comes along.
  */
 
 #define _GNU_SOURCE
@@ -79,6 +83,93 @@ static int exists_in(const char *root, const char *rel) {
     char p[4096];
     snprintf(p, sizeof(p), "%s/%s", root, rel);
     return access(p, X_OK) == 0;
+}
+
+/* The loader's option prefix is value-less flags (src/main.c:341), so the
+ * guest path is the first argument that is not one of them. Returns its
+ * argv index, or -1 when nothing follows the flags. */
+static int guest_path_index(int argc, char **argv) {
+    int i = 2;
+    while (i < argc && argv[i][0] == '-') {
+        if (!strcmp(argv[i], "--")) { i++; break; }
+        if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose") ||
+            !strcmp(argv[i], "-q") || !strcmp(argv[i], "--quiet") ||
+            !strcmp(argv[i], "--no-fast-path") ||
+            !strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            i++;
+            continue;
+        }
+        return -1;  /* unknown option: the loader reports it */
+    }
+    return i < argc ? i : -1;
+}
+
+/* mkdir -p for the parent directories of an absolute path, following no
+ * symlinks: a prefix component that is one (tmp -> /tmp) would otherwise
+ * resolve against the host, since this runs before the chroot. */
+static int mkdir_parents(const char *path) {
+    char buf[8192];
+    snprintf(buf, sizeof(buf), "%s", path);
+    char *slash = strrchr(buf, '/');
+    if (!slash || slash == buf) return 0;
+    *slash = '\0';
+    struct stat st;
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (lstat(buf, &st) == 0) {
+            if (S_ISLNK(st.st_mode)) { errno = ELOOP; return -1; }
+        } else if (mkdir(buf, 0755) != 0) {
+            return -1;
+        }
+        *p = '/';
+    }
+    if (lstat(buf, &st) == 0) {
+        if (S_ISLNK(st.st_mode)) { errno = ELOOP; return -1; }
+    } else if (mkdir(buf, 0755) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* lstat root+guest without following any symlink component. Returns 0
+ * and fills st only when the path exists that way; a symlink component
+ * (tmp -> /tmp) says the path is not one the loader could open inside
+ * the jail, so it counts as absent. */
+static int prefix_lstat(const char *root, const char *guest, struct stat *st) {
+    char buf[8192];
+    snprintf(buf, sizeof(buf), "%s%s", root, guest);
+    struct stat s;
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (lstat(buf, &s) != 0 || S_ISLNK(s.st_mode)) return -1;
+        *p = '/';
+    }
+    return lstat(buf, st);
+}
+
+/* Bind-mount one host file read-only at dst, the same shape as the
+ * locale mounts below. dst must exist for the mount to attach; the
+ * zero-length placeholder is what the host sees under the prefix when
+ * no jailed run is in progress (a later run remounts over it). */
+static int mirror_host_file(const char *host, const char *dst) {
+    if (mkdir_parents(dst) != 0) return -1;
+    int fd = open(dst, O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+    close(fd);
+    if (mount(host, dst, NULL, MS_BIND, NULL) != 0) return -1;
+    if (mount(NULL, dst, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) != 0)
+        fprintf(stderr,
+            "macify-jail: remount %s read-only failed (%s) — continuing\n",
+            dst, strerror(errno));
+    return 0;
 }
 
 /* Refresh host runtime dependencies inside the jail. Idempotent; cheap
@@ -196,6 +287,47 @@ int main(int argc, char **argv) {
     if (stat(root, &rs) != 0 || !S_ISDIR(rs.st_mode))
         die("MACIFY_JAIL_ROOT not a directory");
 
+    /* Canonicalize so the prefix test and the mirror target agree. */
+    static char root_real[4096];
+    if (realpath(root, root_real)) root = root_real;
+
+    /* Resolve the guest binary before the chroot hides the host. A path
+     * inside the prefix is already visible; a host path is mirrored in
+     * when the mounts happen below. A stale mirror placeholder is a
+     * zero-length regular file, and a real prefix file at the same path
+     * wins over the host's. */
+    static char guest_host[4096];
+    const char *guest_mirror = NULL;
+    int guest_argi = guest_path_index(argc, argv);
+    if (guest_argi >= 0 && realpath(argv[guest_argi], guest_host)) {
+        size_t rl = strlen(root);
+        int inside = strncmp(guest_host, root, rl) == 0 &&
+                     (rl == 1 || guest_host[rl] == '/');
+        if (!inside) {
+            struct stat ds;
+            /* A real prefix file at the same path wins over the host's;
+             * a previous mirror's zero-length placeholder does not, and
+             * neither does a symlink component (see prefix_lstat). */
+            int present = prefix_lstat(root, guest_host, &ds) == 0 &&
+                          (S_ISREG(ds.st_mode) || S_ISLNK(ds.st_mode));
+            int stale = present && S_ISREG(ds.st_mode) && ds.st_size == 0;
+            if (!present || stale) {
+                struct stat hs;
+                if (stat(guest_host, &hs) == 0 && S_ISREG(hs.st_mode)) {
+                    guest_mirror = guest_host;
+                } else {
+                    fprintf(stderr,
+                        "macify-jail: %s is not a regular file, so it cannot\n"
+                        "  run inside the jail (a chroot of %s).\n"
+                        "  MACIFY_NO_JAIL=1 runs host paths unprotected, or\n"
+                        "  copy it into the prefix and name that path.\n",
+                        argv[guest_argi], root);
+                    return 126;
+                }
+            }
+        }
+    }
+
     prepare_jail(root);
 
     /* The prefix historically shipped dev as a symlink to the host
@@ -295,6 +427,24 @@ int main(int argc, char **argv) {
                     "macify-jail: remount %s read-only failed (%s) — continuing\n",
                     dst, strerror(errno));
         }
+    }
+
+    /* The host-path guest binary resolved above. One file, read-only, at
+     * the absolute path the caller typed; nothing else from the host
+     * comes with it, so everything the guest can name is still either
+     * the prefix or this one file. */
+    if (guest_mirror) {
+        char mpath[8192];
+        snprintf(mpath, sizeof(mpath), "%s%s", root, guest_mirror);
+        if (mirror_host_file(guest_mirror, mpath) != 0) {
+            fprintf(stderr,
+                "macify-jail: cannot mirror %s into the jail: %s\n"
+                "  MACIFY_NO_JAIL=1 runs host paths unprotected, or copy\n"
+                "  the binary into the prefix and name that path.\n",
+                guest_mirror, strerror(errno));
+            return 126;
+        }
+        argv[guest_argi] = guest_host;
     }
 
     /* Self-referential alias: macOS binaries bake their install prefix
