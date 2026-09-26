@@ -277,6 +277,66 @@ static int macify_auto_install_homebrew(const char *pkg) {
     return -1;
 }
 
+/* ── Minimal x86-64 decoder for the Darwin getc macro ────────────────
+ *
+ * The macro is `--(p)->_r < 0 ? __srget(p) : (int)(*(p)->_p++)` and
+ * gcc/clang expand it to a fixed instruction cluster:
+ *
+ *     mov  rL, [rB+8]      ; load _r
+ *     lea  rD, [rL-1]      ; the "--_r"
+ *     mov  [rB+8], rD      ; store _r
+ *     test rL, rL
+ *     jle  <slow>          ; or the inverted `jg <fast>`
+ *
+ * rB, rL and rD are whatever registers the allocator picked, and any of
+ * them may need a REX prefix or a SIB byte (e.g. base r12). Matching
+ * only the one encoding gcc happened to pick for `cut` (lea ecx,[rax-1]
+ * + jle) misses the macro in `sed` (`jg` instead of `jle`) and in
+ * `strings` (base r12, dest edx), leaving the corrupting `--_r` store
+ * in place.
+ *
+ * dec_getc_op() decodes one `[rex] op modrm [sib] disp8` (mod=01) or
+ * `[rex] op modrm` (mod=11) instruction, returning its length and
+ * filling reg/base/disp, or 0 if the bytes are not that shape.
+ */
+typedef struct {
+    int reg;      /* modrm.reg (+REX.R) */
+    int base;     /* memory base register, -1 for register operands */
+    int32_t disp;
+    int len;      /* bytes consumed, including any REX prefix */
+} dec_op;
+
+static int dec_getc_op(const uint8_t *t, size_t n, size_t at,
+                       uint8_t opcode, dec_op *out) {
+    size_t p = at;
+    int rex = 0;
+    if (p < n && (t[p] & 0xF0) == 0x40) { rex = t[p]; p++; }
+    if (p >= n || t[p] != opcode) return 0;
+    p++;
+    if (p >= n) return 0;
+    uint8_t modrm = t[p++];
+    int mod = modrm >> 6;
+    int reg = ((modrm >> 3) & 7) + ((rex & 4) ? 8 : 0);
+    int rm  = (modrm & 7) + ((rex & 1) ? 8 : 0);
+    if (mod == 3) {
+        if (rm != reg) return 0;             /* only `test r,r` here */
+        out->reg = reg; out->base = -1; out->disp = 0;
+        out->len = (int)(p - at);
+        return out->len;
+    }
+    if (mod != 1) return 0;                  /* we only need [r+disp8] */
+    if ((modrm & 7) == 4) {                  /* SIB byte present */
+        if (p >= n) return 0;
+        uint8_t sib = t[p++];
+        if (((sib >> 3) & 7) != 4) return 0; /* no index register */
+        rm = (sib & 7) + ((rex & 1) ? 8 : 0);
+    }
+    if (p >= n) return 0;
+    out->reg = reg; out->base = rm; out->disp = (int8_t)t[p++];
+    out->len = (int)(p - at);
+    return out->len;
+}
+
 int main(int argc, char **argv, char **envp) {
     int argi = 1;
     while (argi < argc && argv[argi][0] == '-') {
@@ -1071,7 +1131,7 @@ int main(int argc, char **argv, char **envp) {
                 g_fast_path_sites, g_slow_path_sites);
     }
 
-    /* Patch macOS getc macros AND __SEOF/__SERR checks together.
+    /* Patch macOS getc macros, and the __SEOF/__SERR check when present.
      *
      * ROOT PROBLEM: macOS FILE struct has _r (int, 4 bytes) at offset 8
      * and __SEOF/__SERR flags (bits 0x20/0x40) at offset 0x10. glibc has
@@ -1084,41 +1144,33 @@ int main(int argc, char **argv, char **envp) {
      * pointer, whose low byte can have bits 0x20/0x40 set, causing false
      * EOF/error detection.
      *
-     * SKIP for large/complex binaries (text > 100KB) — the pattern matching
-     * is too aggressive and can corrupt unrelated code. The 0xfbad2000 page
-     * mapping (in the shim constructor) handles the crash case safely.
-     * Enable with MACIFY_PATCH_EOF=1 for binaries that need it.
+     * The two rewrites are gated differently. The getc rewrite matches an
+     * exact instruction shape and runs on every binary: without it the
+     * macro's fast path reads _p (glibc _flags) as a pointer, and the shim
+     * cannot fall back to _r = -1 for the standard streams. The EOF-check
+     * rewrite matches any test of [fp+0x10] bits 0x20/0x40 and forces the
+     * no-EOF path, so it only runs where the getc macro was patched (the
+     * case it exists for) or on small binaries, where it has always run;
+     * MACIFY_PATCH_EOF=1 forces it on everywhere.
      *
-     * FIX (only when BOTH patterns are found):
+     * FIX:
      *   1. NOP the getc macro's _r store (prevents _IO_read_ptr corruption)
-     *   2. Change getc's jle to jmp (always call __srget for correct data)
+     *   2. Force getc's __srget slow path (jle→jmp, or NOP an inverted jg)
      *   3. NOP the __SEOF/__SERR check's conditional jump (prevent false EOF)
      *   4. Set macify_getc_patched=1 so __srget doesn't set _r = -1
-     *
-     * If only getc macros are found (no EOF checks), the old _r = -1
-     * approach is used — it's safer for binaries that don't check __SEOF. */
+     */
     {
         loaded_section *text_sec = find_section("__TEXT", "__text");
         if (text_sec) {
             uint8_t *text = (uint8_t *)(uintptr_t)text_sec->addr;
             size_t size = text_sec->size;
 
-            /* Skip EOF/getc patching for large binaries or when disabled.
-             * The pattern matching is too aggressive for complex programs
-             * like bash — it corrupts unrelated code. The 0xfbad2000 page
-             * mapping handles the crash case safely. */
-            if (size > 100000 && !getenv("MACIFY_PATCH_EOF")) {
-                if (g_verbose)
-                    fprintf(stderr, "macify: skipping __SEOF/__SERR patching (text=%zu bytes > 100KB)\n", size);
-                goto skip_eof_patch;
-            }
-
-            /* Patch the inlined getc macro and the __SEOF/__SERR check it
-             * usually sits next to. They are separate features of the same
-             * header: a program can read with the getc macro and detect end
-             * of input from the return value without ever testing the FILE
-             * flags (cut does exactly that), so the getc rewrite cannot be
-             * gated on the presence of the EOF check.
+            /* Patch the inlined getc macro first, then the __SEOF/__SERR
+             * check it usually sits next to. They are separate features of
+             * the same header: a program can read with the getc macro and
+             * detect end of input from the return value without ever
+             * testing the FILE flags (cut does exactly that), so the getc
+             * rewrite cannot be gated on the presence of the EOF check.
              *
              * The macro's "--_r" store lands on glibc's _IO_read_ptr, and
              * the shim's _r = -1 fallback is skipped for the standard
@@ -1126,7 +1178,117 @@ int main(int argc, char **argv, char **envp) {
              * leaves the next call reading _p = glibc _flags (0xfbad2xxx)
              * as a pointer and walking it through the guard page. */
             {
-                /* Patch __SEOF/__SERR checks first.
+                /* Patch getc macros.
+                 *
+                 * Match the whole cluster with whatever registers the
+                 * compiler chose: mov rL,[rB+8]; lea rD,[rL-1];
+                 * mov [rB+8],rD; test rL,rL; jle/jg <slow>.
+                 *
+                 * The `--_r` store lands on glibc's _IO_read_ptr and the
+                 * fast path then reads _p (glibc _flags) as a pointer, so
+                 * we NOP the store and force the __srget slow path. The
+                 * branch is either `jle <slow>` (fall-through is the fast
+                 * path) or the inverted `jg <fast>` (fall-through is the
+                 * slow path); handle both, short and near. */
+                int getc_patched = 0;
+                for (size_t i = 5; i + 12 < size; i++) {
+                    /* The lea is either bare (0x8d) or REX-prefixed; skip
+                     * everything else without entering the decoder. */
+                    if (text[i] != 0x8d && (text[i] & 0xF0) != 0x40) continue;
+                    dec_op lea;
+                    if (!dec_getc_op(text, size, i, 0x8d, &lea)) continue;
+                    if (lea.base < 0 || lea.disp != -1) continue;
+                    int L = lea.base, D = lea.reg;
+                    size_t lea_end = i + (size_t)lea.len;
+
+                    /* Try the load at each possible length, longest first
+                     * so a REX+SIB encoding wins over its suffix. */
+                    for (int k = 5; k >= 3; k--) {
+                        if (i < (size_t)k) continue;
+                        size_t load_at = i - (size_t)k;
+                        dec_op ld;
+                        if (!dec_getc_op(text, size, load_at, 0x8b, &ld)) continue;
+                        if (load_at + (size_t)ld.len != i) continue;
+                        if (ld.disp != 8 || ld.base < 0 || ld.reg != L) continue;
+                        int B = ld.base;
+
+                        dec_op st;
+                        if (!dec_getc_op(text, size, lea_end, 0x89, &st)) continue;
+                        if (st.disp != 8 || st.base != B || st.reg != D) continue;
+                        size_t st_end = lea_end + (size_t)st.len;
+
+                        dec_op ts;
+                        if (!dec_getc_op(text, size, st_end, 0x85, &ts)) continue;
+                        if (ts.base != -1 || ts.reg != L) continue;
+                        size_t jmp_off = st_end + (size_t)ts.len;
+                        if (jmp_off + 1 >= size) continue;
+
+                        int force_jmp;      /* 1 = unconditional jmp to slow */
+                        size_t jmp_len;
+                        if (text[jmp_off] == 0x7e) {          /* jle slow */
+                            force_jmp = 1; jmp_len = 2;
+                        } else if (text[jmp_off] == 0x7f) {   /* jg fast */
+                            force_jmp = 0; jmp_len = 2;
+                        } else if (text[jmp_off] == 0x0f &&
+                                   jmp_off + 5 < size &&
+                                   (text[jmp_off+1] == 0x8e ||
+                                    text[jmp_off+1] == 0x8f)) {
+                            force_jmp = (text[jmp_off+1] == 0x8e);
+                            jmp_len = 6;
+                        } else {
+                            continue;
+                        }
+
+                        /* mprotect every page the rewrite touches. */
+                        uintptr_t lo = (uintptr_t)(text + lea_end) & ~0xfffUL;
+                        uintptr_t hi = (uintptr_t)(text + jmp_off + jmp_len - 1) & ~0xfffUL;
+                        for (uintptr_t pg = lo; pg <= hi; pg += 0x1000)
+                            mprotect((void *)pg, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+
+                        for (int s = 0; s < st.len; s++) text[lea_end + (size_t)s] = 0x90;
+                        if (force_jmp) {
+                            if (jmp_len == 2) {
+                                text[jmp_off] = 0xeb;      /* keep target */
+                            } else {
+                                /* 0f 8e d0..d3 → e9 (d+1) 90, same target */
+                                int32_t disp = (int32_t)(text[jmp_off+2] |
+                                                (text[jmp_off+3] << 8) |
+                                                (text[jmp_off+4] << 16) |
+                                                (text[jmp_off+5] << 24));
+                                disp += 1;
+                                text[jmp_off] = 0xe9;
+                                text[jmp_off+1] = disp & 0xff;
+                                text[jmp_off+2] = (disp >> 8) & 0xff;
+                                text[jmp_off+3] = (disp >> 16) & 0xff;
+                                text[jmp_off+4] = (disp >> 24) & 0xff;
+                                text[jmp_off+5] = 0x90;
+                            }
+                        } else {
+                            for (size_t s = 0; s < jmp_len; s++) text[jmp_off + s] = 0x90;
+                        }
+                        for (uintptr_t pg = lo; pg <= hi; pg += 0x1000)
+                            mprotect((void *)pg, 0x1000, PROT_READ | PROT_EXEC);
+                        getc_patched++;
+                        break;
+                    }
+                }
+
+                /* The __SEOF/__SERR check rewrite forces the no-EOF/no-error
+                 * path, so it is only safe where the false positive comes
+                 * from the getc macro's buffer pointer being read as _flags.
+                 * That is exactly the case where a getc macro was patched
+                 * (macify_getc_patched disables the shim's _r fallback);
+                 * binaries that read through fread/fgets instead (bash,
+                 * awk, ...) rely on the flag to detect EOF, and rewriting
+                 * it there corrupts them. Small binaries keep the old
+                 * unconditional behavior, and MACIFY_PATCH_EOF=1 forces it
+                 * on for debugging. */
+                int patch_eof = (size <= 100000) || (getc_patched > 0)
+                                || getenv("MACIFY_PATCH_EOF");
+                if (!patch_eof && g_verbose)
+                    fprintf(stderr, "macify: skipping __SEOF/__SERR check patching (text=%zu bytes, no getc macro)\n", size);
+
+                /* Patch __SEOF/__SERR checks.
                  *
                  * The test instruction checks [fp+0x10] & {0x20|0x40}.
                  * The conditional jump after it goes to either:
@@ -1145,7 +1307,7 @@ int main(int argc, char **argv, char **envp) {
                  *   Short: 75 XX → 90 90
                  *   Near:  0f 85 XX XX XX XX → 90 90 90 90 90 90 */
                 int eof_patched = 0;
-                for (size_t i = 0; i + 7 < size; i++) {
+                for (size_t i = 0; patch_eof && i + 7 < size; i++) {
                     size_t off = i;
                     int has_rex = 0;
                     if (text[off] == 0x41) { has_rex = 1; off++; }
@@ -1195,39 +1357,6 @@ int main(int argc, char **argv, char **envp) {
                     }
                 }
 
-                /* Patch getc macros */
-                int getc_patched = 0;
-                for (size_t i = 3; i + 16 < size; i++) {
-                    if (text[i] != 0x8d || text[i+1] != 0x48 || text[i+2] != 0xff) continue;
-                    int load_rex = 0, load_rm = -1;
-                    if (i >= 4 && text[i-4] == 0x41 && text[i-3] == 0x8b && text[i-1] == 0x08) {
-                        load_rex = 1; load_rm = text[i-2] & 0x07;
-                    } else if (i >= 3 && text[i-3] == 0x8b && text[i-1] == 0x08) {
-                        load_rex = 0; load_rm = text[i-2] & 0x07;
-                    }
-                    if (load_rm < 0) continue;
-                    int store_start = -1, store_len = 0;
-                    for (size_t j = i + 3; j < i + 8 && j + 3 < size; j++) {
-                        int has_rex = 0; size_t off = j;
-                        if (text[off] == 0x41) { has_rex = 1; off++; }
-                        if (text[off] == 0x89 && (text[off+1] & 0xF8) == 0x48 && text[off+2] == 0x08) {
-                            if ((text[off+1] & 0x07) == load_rm && has_rex == load_rex) {
-                                store_start = (int)j; store_len = 3 + has_rex; break;
-                            }
-                        }
-                    }
-                    if (store_start < 0) continue;
-                    size_t after = (size_t)store_start + store_len;
-                    if (after + 3 >= size) continue;
-                    if (text[after] != 0x85 || text[after+1] != 0xc0 || text[after+2] != 0x7e) continue;
-                    uintptr_t page = (uintptr_t)(text + store_start) & ~0xfffUL;
-                    mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
-                    for (int s = 0; s < store_len; s++) text[store_start + s] = 0x90;
-                    text[after + 2] = 0xeb;
-                    mprotect((void *)page, 0x1000, PROT_READ | PROT_EXEC);
-                    getc_patched++;
-                }
-
                 if (g_verbose && (eof_patched || getc_patched)) {
                     fprintf(stderr, "macify: patched %d __SEOF/__SERR check(s), %d getc macro(s)\n",
                             eof_patched, getc_patched);
@@ -1239,7 +1368,6 @@ int main(int argc, char **argv, char **envp) {
             }
         }
     }
-    skip_eof_patch: ;
 
     /* Patch inlined putc macros to always call __swbuf.
      *
