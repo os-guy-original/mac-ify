@@ -674,11 +674,9 @@ int macify_access(const char *path, int mode) {
     static int (*real_access)(const char *, int) = NULL;
     if (!real_access) real_access = macify_elf_lookup("access");
     int is_macos = macify_caller_is_macos_text(__builtin_return_address(0));
-    if (!is_macos)
-        return real_access(path, mode);
     const char *eff = path;
     char tp[4096];
-    if (path) {
+    if (path && is_macos) {
         extern int macify_should_hide_path(const char *);
         if (macify_should_hide_path(path)) { errno = ENOENT; return -1; }
         extern int macify_translate_path(const char *, char *, size_t);
@@ -687,8 +685,9 @@ int macify_access(const char *path, int mode) {
     int r = real_access(eff, mode);
     if (getenv("MACIFY_TRACE_OPEN")) {
         char b[512]; int n = snprintf(b, sizeof(b),
-            "macify: access(\"%s\", %d) = %d errno=%d\n",
-            path ? path : "(null)", mode, r, r ? errno : 0);
+            "macify: access(\"%s\", %d) = %d errno=%d caller=%s\n",
+            path ? path : "(null)", mode, r, r ? errno : 0,
+            is_macos ? "macos" : "linux");
         (void)write(2, b, n);
     }
     if (r == 0) errno = 0;

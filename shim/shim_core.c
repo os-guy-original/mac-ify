@@ -6,9 +6,35 @@
 uintptr_t macify_text_lo = 0;
 uintptr_t macify_text_hi = 0;
 
+/* __TEXT ranges of ALL loaded Mach-O images: the main executable plus every
+ * Mach-O dylib the loader maps (libncurses, libruby, libpython, ...).
+ *
+ * The single main-image range below is not enough: a shim override called
+ * from a *dylib* (not the main image) would be classified as a Linux
+ * caller and silently skip path/flag/errno translation. Observed with the
+ * macOS libncurses terminfo probe (T0020): stat$INODE64 translated the
+ * terminfo directory (those wrappers deliberately skip the caller check),
+ * but the following access() from inside the dylib did not, so `less`
+ * aborted with "'xterm': unknown terminal type". */
+#define MAX_TEXT_RANGES 64
+static struct { uintptr_t lo, hi; } g_text_ranges[MAX_TEXT_RANGES];
+static int g_n_text_ranges;
+
+void __macify_add_text_range(uint64_t lo, uint64_t hi) {
+    if (lo == 0 || hi <= lo) return;
+    uintptr_t l = (uintptr_t)lo, h = (uintptr_t)hi;
+    for (int i = 0; i < g_n_text_ranges; i++)
+        if (g_text_ranges[i].lo == l && g_text_ranges[i].hi == h) return;
+    if (g_n_text_ranges >= MAX_TEXT_RANGES) return;
+    g_text_ranges[g_n_text_ranges].lo = l;
+    g_text_ranges[g_n_text_ranges].hi = h;
+    g_n_text_ranges++;
+}
+
 void __macify_set_text_range(uint64_t lo, uint64_t hi) {
     macify_text_lo = (uintptr_t)lo;
     macify_text_hi = (uintptr_t)hi;
+    __macify_add_text_range(lo, hi);
 }
 
 int macify_caller_is_macos_text(void *ret_addr) {
@@ -19,7 +45,11 @@ int macify_caller_is_macos_text(void *ret_addr) {
      * applied to macify's own open/sigaction/stat calls. */
     if (macify_text_lo == 0 || macify_text_hi == 0) return 0;
     uintptr_t a = (uintptr_t)ret_addr;
-    return (a >= macify_text_lo && a < macify_text_hi);
+    if (a >= macify_text_lo && a < macify_text_hi) return 1;
+    /* Also match any registered Mach-O dylib __TEXT range. */
+    for (int i = 0; i < g_n_text_ranges; i++)
+        if (a >= g_text_ranges[i].lo && a < g_text_ranges[i].hi) return 1;
+    return 0;
 }
 
 int *__errno(void) {

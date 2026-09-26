@@ -122,9 +122,14 @@ void macify_presolve_all(void);
 extern uintptr_t macify_text_lo;
 extern uintptr_t macify_text_hi;
 void __macify_set_text_range(uint64_t lo, uint64_t hi);
+/* Register an additional Mach-O __TEXT range (Mach-O dylibs the loader maps).
+ * Without this, a shim override called from a dylib is misclassified as a
+ * Linux caller and skips path/flag/errno translation — see T0020. */
+void __macify_add_text_range(uint64_t lo, uint64_t hi);
 
-/* Returns 1 if the immediate caller (by return address) is the macOS main
- * image's __TEXT segment. Used to gate errno translation. */
+/* Returns 1 if the immediate caller (by return address) is inside any loaded
+ * Mach-O image's __TEXT segment (main image or dylib). Used to gate errno
+ * and path translation. */
 int macify_caller_is_macos_text(void *ret_addr);
 
 /* Returns our shim's override for a given symbol, or NULL if we don't
