@@ -81,11 +81,24 @@ void init_real_pthread_funcs(void) {
  * glibc's lock on the raw macOS layout wedged forever in futex(val=2). */
 void convert_macos_mutex(pthread_mutex_t *m) {
     unsigned int sig = *(unsigned int *)m;
-    if (sig == MACOS_PTHREAD_MUTEX_SIG || sig == MACOS_PTHREAD_RECURSIVE_SIG ||
-        sig == MACOS_PTHREAD_ERRORCHECK_SIG || sig == MACOS_PTHREAD_FIRSTFIT_SIG) {
-        static const pthread_mutex_t glibc_init = PTHREAD_MUTEX_INITIALIZER;
-        memcpy(m, &glibc_init, sizeof(pthread_mutex_t));
-    }
+    /* Map each macOS static-initializer signature to the MATCHING glibc
+     * initializer. The kinds are not interchangeable: a macOS RECURSIVE
+     * mutex (0x32AAABA2 — what bash statically initializes, e.g. copied
+     * into a heap struct) converted to the normal glibc initializer makes
+     * its first recursive lock self-deadlock (__lock stays 1, the thread
+     * then FUTEX_WAITs on a lock it already owns).
+     *   0x32AAABA7 normal      0x32AAABA2 recursive
+     *   0x32AAABA1 errorcheck  0x32AAABA3 firstfit/adaptive */
+    static const pthread_mutex_t glibc_normal     = PTHREAD_MUTEX_INITIALIZER;
+    static const pthread_mutex_t glibc_recursive  = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+    static const pthread_mutex_t glibc_errorcheck = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+    static const pthread_mutex_t glibc_adaptive   = PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
+    const pthread_mutex_t *init = NULL;
+    if      (sig == MACOS_PTHREAD_MUTEX_SIG)       init = &glibc_normal;
+    else if (sig == MACOS_PTHREAD_RECURSIVE_SIG)   init = &glibc_recursive;
+    else if (sig == MACOS_PTHREAD_ERRORCHECK_SIG)  init = &glibc_errorcheck;
+    else if (sig == MACOS_PTHREAD_FIRSTFIT_SIG)    init = &glibc_adaptive;
+    if (init) memcpy(m, init, sizeof(pthread_mutex_t));
 }
 
 void convert_macos_cond(pthread_cond_t *c) {

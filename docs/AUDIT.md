@@ -1017,21 +1017,55 @@ only after glibc has already reported the stream failed. Verified:
 `en_US.UTF-8` and `LC_ALL=tr_TR.UTF-8`; the `DBG` trace showed the corrupt
 `d(re-rp)=32` collapsed to `0` on retry.
 
-### 4. Newly reachable and NOT fixed: a guest hangs when LC_MESSAGES is tr_TR
+### 4. A guest hangs when LC_MESSAGES names a locale — FIXED
 
 Mounting the locale data made locales load that previously could not, and
 that exposed a hang. With `LANG` and `LC_ALL` unset,
-`LC_MESSAGES=tr_TR.UTF-8` hangs the guest on the simplest command:
+`LC_MESSAGES=tr_TR.UTF-8` hung the guest on the simplest command:
 
     env -u LANG -u LC_ALL LC_MESSAGES=tr_TR.UTF-8 macify bash -c 'echo hi'
-      -> hangs (no output, killed by timeout)
+      -> hung (no output, killed by timeout)
 
 `LC_CTYPE`, `LC_NUMERIC`, `LC_COLLATE` and `LC_TIME` set to the same locale
-are each fine, and `LC_MESSAGES=en_US.UTF-8` is fine, so the failure is
-specific to the messages category with that locale. It is not the category
-translation: the same hang occurs with the translation disabled. Before the
-locale data was mounted this path was unreachable, because `setlocale`
-failed for every locale but `C`.
+were each fine, and `LC_MESSAGES=en_US.UTF-8` was fine. Before the locale
+data was mounted this path was unreachable, because `setlocale` failed for
+every locale but `C`.
+
+**Root cause:** a macOS **recursive** mutex converted to a glibc
+**non-recursive** one. `convert_macos_mutex` (`shim/pthread/sync.c`)
+matched all four macOS static-initializer signatures and overwrote the
+mutex with `PTHREAD_MUTEX_INITIALIZER` — the *normal* initializer, kind 0.
+bash statically initializes a recursive mutex
+(`_PTHREAD_RECURSIVE_MUTEX_SIG_init` = `0x32AAABA2`) and copies it into a
+heap struct; the first `pthread_mutex_lock` succeeded, and the recursive
+second lock (no intervening unlock) then blocked forever in
+`FUTEX_WAIT_PRIVATE` on a lock the thread already owned (`__lock` stuck at
+1). The shim's own `MACIFY_TRACE_MUTEX` showed the exact shape:
+
+    pthread_mutex_unlock(0x...0c8) sig=0x1
+    pthread_mutex_lock(0x...0c8) sig=0x0
+    pthread_mutex_lock(0x...0c8) -> 0
+    pthread_mutex_lock(0x...0c8) sig=0x1     <- never returns
+
+**Fix:** map each signature to the matching glibc initializer instead of
+collapsing them all to the normal one:
+
+    0x32AAABA7 normal      -> PTHREAD_MUTEX_INITIALIZER             (kind 0)
+    0x32AAABA2 recursive   -> PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP (kind 1)
+    0x32AAABA1 errorcheck  -> PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP(kind 2)
+    0x32AAABA3 firstfit    -> PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP  (kind 3)
+
+**Evidence:**
+- `env -u LANG -u LC_ALL LC_MESSAGES=<tr_TR|en_US|C>.UTF-8 macify bash -c 'echo hi'`
+  all exit 0 printing `hi` with 0-byte stderr (before: tr_TR hung, rc 124).
+- The repro needs the jail: the prefix supplies `.../bash.mo`, which is what
+  drives the gettext path; with it the hang is deterministic.
+- Host demonstration of the semantics: `PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP`
+  has `__kind=1` and a second lock returns 0, while `PTHREAD_MUTEX_INITIALIZER`
+  has `__kind=0` and a second lock self-deadlocks.
+- Other guests under `LC_MESSAGES=tr_TR.UTF-8` are unaffected: cat, sort,
+  sed and grep all rc 0 with correct output.
+- `make test` 17/17, `make test-real` 23/23, `make test-smoke` 29/29.
 
 ## Guest curl — FIXED (da315ae, 4d90598, 6022289, 84a9fad)
 
