@@ -89,6 +89,29 @@ def run_case(name, binary, expect_stdout=None, expect_exit=0,
     return (TestResult.PASS, 'ok')
 
 
+def locale_available(name):
+    """True if the OS offers `name` (per `locale -a`).
+
+    Locale names are spelled inconsistently across systems: the same
+    tr_TR.UTF-8 may be listed as tr_TR.utf8, and glibc accepts either.
+    Normalise to lowercase alphanumerics with a trailing signal-less
+    "utf8" so the comparison does not depend on punctuation or case.
+    """
+    def norm(s):
+        s = s.strip().lower()
+        for ch in ('-', '_', '.'):
+            s = s.replace(ch, '')
+        return s[:-4] if s.endswith('utf8') else s
+
+    try:
+        out = subprocess.run(['locale', '-a'], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    want = norm(name)
+    return any(norm(line) == want for line in out.splitlines())
+
+
 def run_benchmark():
     """Run bench.bin with fast path and slow path, return (fast_time, slow_time)."""
     bench_path = os.path.join(BINARIES_DIR, 'bench.bin')
@@ -214,6 +237,9 @@ TESTS = [
         'binary': 'locale.bin',
         'expect_stdout': 'numeric-ok\n',
         'expect_exit': 0,
+        # The guest asks for this locale; an unknown one makes glibc's
+        # newlocale return NULL before any mask translation is observed.
+        'requires_locale': 'tr_TR.UTF-8',
     },
     {
         'name': 'hello_tlv — TLV (Thread-Local Variables): __thread_vars + __thread_data + _tlv_bootstrap',
@@ -235,6 +261,12 @@ def main():
 
     npass = nfail = nskip = 0
     for t in TESTS:
+        req = t.get('requires_locale')
+        if req and not locale_available(req):
+            nskip += 1
+            print(f'  {YELLOW}SKIP{RESET}  {t["name"]}')
+            print(f'         locale {req} not installed on this host')
+            continue
         binary_path = os.path.join(BINARIES_DIR, t['binary'])
         result, msg = run_case(
             name=t['name'],
