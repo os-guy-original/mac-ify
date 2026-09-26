@@ -1106,14 +1106,17 @@ command exits 0 and returns the page.
   the cause: the redirect works once the reply's sockaddr is not
   corrupted.
 
-## Guest cut stdio corruption — FIXED (ea82454)
+## Guest stdio corruption from inlined getc — FIXED (ea82454, 4529e01)
 
 `make test-functional` failed on `cut -d' '` (stdout mismatch), and the
 output varied between runs: `printf 'hello\nworld\n' | macify cut -c1`
 printed only `h`, and field mode wrote a stream of NULs. Reproduced in
-about half of runs.
+about half of runs. `sed` on stdin failed outright with `read error on
+stdin: Invalid or incomplete multibyte or wide character` (exit 4), and
+`strings` dropped its output in about half of runs or, once its macro
+was patched but not all of it, hung printing `h`.
 
-`paste` was listed alongside it in the original report but does not
+`paste` was listed alongside `cut` in the original report but does not
 reproduce: it exits 0 with correct output on both the unmodified and the
 fixed tree, reading files and stdin alike. It is not evidence here.
 
@@ -1143,28 +1146,67 @@ own fread/underflow. The other defense, the loader's getc-macro rewrite
 of input from `getc`'s return value, so the count was 0 and the macro
 was left alone.
 
-### Fix
+### Fix 1 (ea82454) — patch the getc macro on its own
 
 Patch the getc macro whenever its instruction shape is present, not only
 when an EOF check is also present, and set `macify_getc_patched` when any
 site was rewritten. `cut -c1` now prints `h` and `w` in 10 of 10 runs;
 `cut -d' ' -f1` on a three-line file prints `b`, `a`, `c` in 20 of 20.
 
+### Fix 2 (4529e01) — every encoding, and the EOF gate
+
+Fix 1 kept the matcher's original single encoding: `lea ecx,[rax-1]`
+(`8d 48 ff`), `test eax,eax`, a short `jle`. Compilers use others, and
+every missed site keeps its `--_r` store:
+
+| binary / site | encoding the matcher missed |
+|---|---|
+| `strings` `_get_char` | `lea edx,[rax-1]`, base `%r12` (`8d 50 ff`, REX.B + SIB) |
+| `sed` `_last_file_with_data_p`, `cut` `_cut_fields` (2) | inverted `jg` (`7f`), or near `jle` (`0f 8e`) |
+
+In `strings` the missed `--_r` store decremented `_IO_read_ptr` between
+calls, so glibc `fgetc` returned the same `h` forever and the program
+looped; in `sed` the store plus the unpatched `_inchar` EOF check gave
+the multibyte error. The matcher is now a small x86-64 decoder
+(`dec_getc_op`) that accepts the whole cluster with any registers —
+REX and SIB, short or near, `jle` or the inverted `jg` — and checks the
+register identities (`load.reg == lea.base == test.reg`,
+`lea.reg == store.reg`, `load.base == store.base`). Match counts rose
+from 3→4 (`sed`), 1→2 (`strings`), 5→7 (`cut`), 5→6 (`tar`), 12→13
+(`pr`), 0→1 (`expand`, `od`, `nano`, `unexpand`); the added `cut` and
+`strings` sites were confirmed to be genuine inlined macros by
+disassembly.
+
+The `__SEOF/__SERR` rewrite (force the no-EOF/no-error path) no longer
+keys on `__text` size. That guard came from a `strings` hang, but
+`strings` has **no** EOF-check sites — the hang was the missing getc
+site above. `sed` *needs* the rewrite and is above 100KB, so the size
+gate made it unfixable. The rewrite now runs when a getc macro was
+patched (the case it exists for) or when the binary is small, as
+before. `bash` (0 getc macros, 565 KB) and every other fread/fgets
+binary are unchanged.
+
 ### Evidence
 
-- After: `make test-functional` 100 pass / 2 fail / 2 skip, with no cut
-  failure; the two remaining are `less` (no terminfo in the prefix) and a
-  pre-existing `strings`/`sed` flake that reproduces on the unmodified
-  tree.
+- `sed`: `echo hello | macify tests/real/sed_macos 's/hello/goodbye/'`
+  → `goodbye`, exit 0, 20/20 (before: 0/20, exit 4). Multibyte input
+  works (`printf 'h\xc3\xa9llo\n' | … 's/h\xc3\xa9llo/bonjour/'` →
+  `bonjour`), as do `sed -n '2p' file` and chained `-e`.
+- `strings`: `echo 'hello world' | macify strings_macos` → `hello world`,
+  10/10 (before: `hello world` or empty, ~50/50).
+- `cut -d: -f2` 10/10; `paste`, `expand`, `od -c`, `diff`, `du`, and a
+  `tar -cf` / `tar -tf` round-trip all correct.
 - `make test` 17/17, `make test-real` 23/23, `make test-smoke` 29/29.
-- A/B on the flake: the unmodified tree prints `h` in about half of
-  runs, the fixed tree in 10 of 10.
+- `make test-functional` 101 pass / 1 fail / 2 skip, against the
+  unmodified tree's 100 / 1 / 3; the only failure is `less` (no
+  terminfo), which fails identically before.
+- A/B on the `cut` flake: the unmodified tree prints `h` in about half
+  of runs, the fixed tree in 10 of 10.
+- Scanning every `__text` adds ~12 ms on `starship` (8.5 MB) and
+  ~107 ms on `rclone` (36 MB).
 
 ### Adjacent, not fixed here
 
-- `sed 's/hello/goodbye/'` on stdin still fails ("Invalid or incomplete
-  multibyte") on both trees; it reads through a different path.
-- `strings` drops its output in about half of runs on both trees.
 - `less` fails with `'xterm': unknown terminal type`; the prefix has no
   `<prefix>/usr/share/terminfo`.
-- `pigz -c` writes 19 bytes then hangs.
+- `pigz -c` writes 19 bytes then hangs (a pthread cond lost-wakeup).
