@@ -97,6 +97,10 @@ static void *g_elf_libc_base = NULL;  /* cached dlpi_addr of libc.so */
 static ElfW(Sym) *g_elf_libc_symtab = NULL;
 static const char *g_elf_libc_strtab = NULL;
 static int g_elf_libc_nsyms = 0;
+/* .gnu.version array (DT_VERSYM): one ElfW(Half) per dynsym entry. The
+ * high bit (VERSYM_HIDDEN, 0x8000) marks a NON-default version — e.g.
+ * pthread_cond_init@GLIBC_2.2.5 vs the default @@GLIBC_2.3.2. */
+static ElfW(Half) *g_elf_libc_versym = NULL;
 
 /* Callback to find libc.so and cache its symbol table info. */
 static int find_libc_cb(struct dl_phdr_info *info, size_t size, void *data) {
@@ -115,9 +119,11 @@ static int find_libc_cb(struct dl_phdr_info *info, size_t size, void *data) {
     ElfW(Sym) *symtab = NULL;
     const char *strtab = NULL;
     uint32_t *hash = NULL;
+    ElfW(Half) *versym = NULL;
     for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
         if (d->d_tag == DT_SYMTAB) symtab = (ElfW(Sym) *)d->d_un.d_ptr;
         else if (d->d_tag == DT_STRTAB) strtab = (const char *)d->d_un.d_ptr;
+        else if (d->d_tag == DT_VERSYM) versym = (ElfW(Half) *)d->d_un.d_ptr;
 
     }
     if (!symtab || !strtab) return 0;
@@ -157,6 +163,7 @@ static int find_libc_cb(struct dl_phdr_info *info, size_t size, void *data) {
     g_elf_libc_symtab = symtab;
     g_elf_libc_strtab = strtab;
     g_elf_libc_nsyms = nsyms;
+    g_elf_libc_versym = versym;
     return 1;
 }
 
@@ -173,15 +180,38 @@ void *macify_elf_lookup(const char *name) {
         dl_iterate_phdr(find_libc_cb, NULL);
     }
     if (g_elf_libc_symtab && g_elf_libc_strtab) {
+        /* glibc exports some symbols under MULTIPLE versions, and the
+         * non-default (compat) entry is often listed FIRST.  The clearest
+         * example: pthread_cond_init@GLIBC_2.2.5 (28 bytes, zeroes only
+         * __wseq — it assumes the cond came from PTHREAD_COND_INITIALIZER)
+         * precedes pthread_cond_init@@GLIBC_2.3.2 (51 bytes, zeroes all
+         * 48).  Returning the first match handed callers the stale-ABI
+         * compat function, which left heap conds with garbage in
+         * __g_refs/__g_size/__g_signals and hung every threaded guest
+         * (pigz -p2).  Prefer the DEFAULT version (VERSYM_HIDDEN clear),
+         * falling back to a hidden one only if no default exists. */
+        void *hidden = NULL;
         for (int i = 0; i < g_elf_libc_nsyms; i++) {
             ElfW(Sym) *s = &g_elf_libc_symtab[i];
             if (!s->st_value) continue;
+            /* An IFUNC's st_value is a RESOLVER, not the implementation —
+             * calling it with the target function's arguments corrupts
+             * state.  Skip such entries so we either pick a real FUNC of
+             * another version or fall through to real_dlsym (which runs
+             * the resolver correctly). */
+            if (ELF64_ST_TYPE(s->st_info) == STT_GNU_IFUNC) continue;
             const char *symname = g_elf_libc_strtab + s->st_name;
             if (!symname[0]) continue;
             if (strcmp(symname, name) == 0) {
-                return (void *)((uintptr_t)g_elf_libc_base + s->st_value);
+                void *addr = (void *)((uintptr_t)g_elf_libc_base + s->st_value);
+                if (g_elf_libc_versym && (g_elf_libc_versym[i] & 0x8000u)) {
+                    if (!hidden) hidden = addr;
+                    continue;
+                }
+                return addr;   /* default version — authoritative */
             }
         }
+        if (hidden) return hidden;
     }
     /* Fallback: use real_dlsym for symbols not in libc's dynamic symbol table.
      * This handles versioned/private symbols like __xstat, __select, __clone.

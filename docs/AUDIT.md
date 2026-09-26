@@ -1209,4 +1209,52 @@ binary are unchanged.
 
 - `less` fails with `'xterm': unknown terminal type`; the prefix has no
   `<prefix>/usr/share/terminfo`.
-- `pigz -c` writes 19 bytes then hangs (a pthread cond lost-wakeup).
+
+## Threaded guests hang on glibc's compat pthread_cond symbols — FIXED
+
+`pigz -p2 -c` wrote the 22-byte gzip header and then hung; `strace` showed
+the main thread spinning on `FUTEX_WAKE` with no waiter while workers sat
+in `FUTEX_WAIT`. The cond was not a lost wakeup: every
+`pthread_cond_wait` returned 0 immediately (254,207 times in one run)
+because the condvar was corrupt.
+
+The shim resolves real glibc functions by walking libc's dynamic symbol
+table in `macify_elf_lookup` (`shim/io/dl.c`) and returning the **first**
+name match. glibc exports several pthread functions under two versions,
+and the stale `@GLIBC_2.2.5` compat entry is listed **before** the default
+`@@GLIBC_2.3.2` one:
+
+| symbol | `@GLIBC_2.2.5` (returned) | `@@GLIBC_2.3.2` (default) |
+|---|---|---|
+| `pthread_cond_init` | 28 B: `movq $0,(%rdi)` — zeroes only `__wseq` | 51 B: three `movups` — zeroes all 48 B |
+| `pthread_cond_wait` | 148 B compat | 408 B |
+| `pthread_cond_signal` | 115 B compat | 662 B |
+| `pthread_cond_broadcast` | 115 B compat | 689 B |
+
+The old `pthread_cond_init` assumes its argument already came from
+`PTHREAD_COND_INITIALIZER` (all-zero) and only resets `__wseq`; for a
+`malloc`'d job struct it leaves `__g_refs`/`__g_size`/`__g1_orig_size`/
+`__wrefs`/`__g_signals` holding stale heap garbage (confirmed: a shim dump
+at `wait#0` showed `__wseq=0` but pointer-shaped values at offsets 8–47,
+present before the first wait). glibc's condvar then miscomputes the
+waiter group and returns without blocking.
+
+Fix: `macify_elf_lookup` now parses `DT_VERSYM` and prefers the
+**default** version (`VERSYM_HIDDEN` clear), falling back to a hidden one
+only when no default exists. It also skips `STT_GNU_IFUNC` entries, whose
+`st_value` is a resolver rather than the implementation, so an IFUNC
+default can never be returned as a callable address (it falls through to
+`real_dlsym`, which runs the resolver). This is a general fix for every
+versioned symbol the shim resolves — the same ordering affects `memcpy`,
+`glob`, `dlopen`, the C11 `cnd_*` family, and others.
+
+### Evidence
+
+- `pigz -p{1,2,3,4,8} -c /tmp/pigz_in.bin` (3 MB) all exit 0 and
+  `gzip -dc` reproduces the input byte-for-byte; `-p3 -d` round-trips a
+  host `gzip` file. Before the fix, `-p1` worked but `-p2+` hung (rc 124).
+- A shim dump of the cond right after `pthread_cond_init` showed all 48
+  bytes zero after the fix, versus only the first 8 before.
+- `make test` 17/17, `make test-real` 23/23, `make test-smoke` 29/29,
+  `make test-functional` 102 pass / 1 fail / 1 skip (only the pre-existing
+  `less` failure; `pigz -c` now passes instead of being skipped).
