@@ -1113,24 +1113,19 @@ int main(int argc, char **argv, char **envp) {
                 goto skip_eof_patch;
             }
 
-            /* Step 1: Count __SEOF/__SERR checks */
-            int eof_check_count = 0;
-            for (size_t i = 0; i + 7 < size; i++) {
-                size_t off = i;
-                int has_rex = 0;
-                if (text[off] == 0x41) { has_rex = 1; off++; }
-                if (text[off] != 0xf6) continue;
-                if ((text[off+1] & 0xF8) != 0x40) continue;
-                if (text[off+2] != 0x10) continue;
-                if (text[off+3] != 0x20 && text[off+3] != 0x40) continue;
-                size_t after = i + 4 + has_rex;
-                if (text[after] == 0x75 || text[after] == 0x74 ||
-                    (text[after] == 0x0f && (text[after+1] == 0x85 || text[after+1] == 0x84)))
-                    eof_check_count++;
-            }
-
-            /* Step 2: Only patch getc macros if EOF checks are also present */
-            if (eof_check_count > 0) {
+            /* Patch the inlined getc macro and the __SEOF/__SERR check it
+             * usually sits next to. They are separate features of the same
+             * header: a program can read with the getc macro and detect end
+             * of input from the return value without ever testing the FILE
+             * flags (cut does exactly that), so the getc rewrite cannot be
+             * gated on the presence of the EOF check.
+             *
+             * The macro's "--_r" store lands on glibc's _IO_read_ptr, and
+             * the shim's _r = -1 fallback is skipped for the standard
+             * streams (see macify_is_glibc_standard), so an unpatched getc
+             * leaves the next call reading _p = glibc _flags (0xfbad2xxx)
+             * as a pointer and walking it through the guard page. */
+            {
                 /* Patch __SEOF/__SERR checks first.
                  *
                  * The test instruction checks [fp+0x10] & {0x20|0x40}.
@@ -1237,7 +1232,7 @@ int main(int argc, char **argv, char **envp) {
                     fprintf(stderr, "macify: patched %d __SEOF/__SERR check(s), %d getc macro(s)\n",
                             eof_patched, getc_patched);
                 }
-                if (eof_patched > 0 && getc_patched > 0) {
+                if (getc_patched > 0) {
                     int *flag = (int *)dlsym(g_dylibs[0].handle, "macify_getc_patched");
                     if (flag) *flag = 1;
                 }
