@@ -4,7 +4,8 @@
 # Sources:
 #   - MacPorts (https://packages.macports.org/) — coreutils, diffutils,
 #     grep, findutils, gsed, gawk, gzip, bzip2, xz, zstd, pigz, less,
-#     nano, bc, binutils, gnutar, gmake, file, texinfo
+#     nano, bc, binutils, gnutar, gmake, file, texinfo, lz4, brotli,
+#     lzip, lzop, rsync, cpio, zsh, php83, gpatch, pv, vim, tmux, ncdu
 #   - GitHub releases — watchexec, btm
 #
 # Usage: ./scripts/fetch_binaries.sh
@@ -375,6 +376,78 @@ if [ ! -f "$DEST_DIR/cut_macos" ]; then
         "$MP/coreutils/coreutils-9.10_0.darwin_24.x86_64.tbz2" \
         "opt/local/bin/gnucut" "cut_macos"
 fi
+
+# ── Wider dylib coverage ─────────────────────────────────────────
+# The coreutils batch links libSystem plus at most ncurses/intl/z.
+# These pull dependencies no existing guest loads, so the loader and
+# the extra-library path see libc++, libbrotli*, liblzo2, liblz4,
+# libpcre2, libgdbm and the AppKit/CoreServices/objc frameworks.
+
+# lz4 — links libSystem only, but its LZ4 frame format exercises a
+# different stdio write path than gzip/bzip2/xz.
+run fetch_macports "lz4" \
+    "$MP/lz4/lz4-1.10.0_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/lz4" "lz4_macos"
+
+# brotli — links libbrotlienc/dec/common
+run fetch_macports "brotli" \
+    "$MP/brotli/brotli-1.2.0_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/brotli" "brotli_macos"
+
+# lzip — links libc++.1.dylib
+run fetch_macports "lzip" \
+    "$MP/lzip/lzip-1.26_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/lzip" "lzip_macos"
+
+# lzop — links liblzo2.2.dylib
+run fetch_macports "lzop" \
+    "$MP/lzop/lzop-1.04_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/lzop" "lzop_macos"
+
+# rsync — links libpopt, libiconv, liblz4, libzstd, libxxhash, libcrypto
+run fetch_macports "rsync" \
+    "$MP/rsync/rsync-3.5.0_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/rsync" "rsync_macos"
+
+# cpio (installed as gnucpio) — links libintl and CoreFoundation
+run fetch_macports "cpio" \
+    "$MP/cpio/cpio-2.15_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/gnucpio" "cpio_macos"
+
+# zsh — links libpcre2-8, libgdbm, libiconv, libncurses
+run fetch_macports "zsh" \
+    "$MP/zsh/zsh-5.9.2_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/zsh-5.9.2" "zsh_macos"
+
+# php83 — links libxml2, libpcre2, libargon2, libedit, libbz2, libresolv
+run fetch_macports "php83" \
+    "$MP/php83/php83-8.3.33_0+libedit.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/php83" "php_macos"
+
+# gpatch — the GNU patch the functional suite has no equivalent of
+run fetch_macports "gpatch" \
+    "$MP/gpatch/gpatch-2.8_1.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/gpatch" "patch_macos"
+
+# pv — links libncurses, libintl, CoreFoundation, CoreServices
+run fetch_macports "pv" \
+    "$MP/pv/pv-1.11.0_0.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/pv" "pv_macos"
+
+# vim — links libncurses, libiconv, libintl and the AppKit/objc frameworks
+run fetch_macports "vim" \
+    "$MP/vim/vim-9.2.0321_2+huge.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/vim" "vim_macos"
+
+# tmux — ncurses TUI beyond htop/less, links jemalloc and libevent
+run fetch_macports "tmux" \
+    "$MP/tmux/tmux-3.7c_0+jemalloc+sixel.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/tmux" "tmux_macos"
+
+# ncdu — links libncurses and libzstd
+run fetch_macports "ncdu" \
+    "$MP/ncdu/ncdu-2.9.2_2.darwin_24.x86_64.tbz2" \
+    "opt/local/bin/ncdu" "ncdu_macos"
 
 echo ""
 
