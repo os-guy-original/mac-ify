@@ -15,7 +15,15 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3
+          sudo apt-get install -y build-essential python3 locales
+
+      # The `locale` unit test calls newlocale("tr_TR.UTF-8"), so the
+      # runner needs that locale generated or the case self-skips. Keep it
+      # generated here so the mask translation is exercised on CI.
+      - name: Generate test locales
+        run: |
+          sudo locale-gen en_US.UTF-8 tr_TR.UTF-8
+          locale -a | grep -i tr_TR
 
       # `make test` generates its own Mach-O fixtures via scripts/gen_macho.py,
       # so this job needs nothing fetched and behaves identically on a clean
