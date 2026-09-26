@@ -1292,3 +1292,70 @@ versioned symbol the shim resolves — the same ordering affects `memcpy`,
 - `make test` 17/17, `make test-real` 23/23, `make test-smoke` 29/29,
   `make test-functional` 102 pass / 1 fail / 1 skip (only the pre-existing
   `less` failure; `pigz -c` now passes instead of being skipped).
+
+## Host-path guest binaries under the jail — FIXED (144cc48)
+
+`scripts/macify <guest> [args]` runs the loader through `macify-jail`
+(`scripts/macify:135`, `:189-193`), which unshares a mount and user
+namespace and chroots into the prefix. A guest named by **host path** did
+not exist for the loader at all: `load_file` (`src/segments.c:592-594`)
+opened the path inside the new root, where it is not, and printed the
+bare `open: No such file or directory`. Prefix-internal paths (`macify
+shell`, `/usr/local/bin/bash`) were unaffected, which is why the suites
+stayed green while the documented CLI form did not work.
+
+`src/jail.c` now resolves the guest path before anything chdirs
+(`guest_path_index` `:91`, the resolve block `:299-327`) and, when it
+lies outside the prefix, mounts that one file read-only at the same
+absolute path under the prefix and rewrites the loader's argv slot to
+the resolved path. The mount is the locale-mount shape (`mirror_host_file`
+`:156-172`, precedent at `:405-427`): `MS_BIND`, then
+`MS_BIND|MS_REMOUNT|MS_RDONLY`. It is one file: no directory, no sibling
+dylibs, and the paths named in the guest's arguments are untouched, so a
+host file the guest is asked to read stays invisible. A real prefix file
+at the same path still wins over the host's, and the zero-length
+placeholder the mount needs is recognisable (`prefix_lstat` `:139`) so a
+later run remounts over it instead of reading it as a prefix file.
+
+Two guards keep the mirror from escaping or misfiring. Parent directories
+are created without following any symlink component (`mkdir_parents`
+`:110`), because a prefix symlink with an absolute target (`tmp -> /tmp`,
+`scripts/macify-setup-rootfs:144`) resolves against the host before the
+chroot, and the leaf is opened `O_NOFOLLOW`. When the named path is not a
+regular file, or the mount fails, the launcher exits 126 with a message
+naming the jail and `MACIFY_NO_JAIL` (`:320-326`, `:439-445`) instead of
+leaving a bare loader error.
+
+### Evidence
+
+- `printf 'a:b:c\nd:e:f\n' | scripts/macify tests/real/cat_macos` → the
+  two lines, rc 0. Before: `open: No such file or directory`, rc 1.
+- `printf 'x:y\n' | scripts/macify ~/cle-tmp/cat_macos` → `x:y`, rc 0
+  (a host path outside the repo tree).
+- `scripts/macify ~/cle-tmp/hello.sh` (`#!/bin/bash`) →
+  `from-host-script`, rc 0: entry resolution still applies.
+- `printf 'x\n' | scripts/macify ~/cle-tmp/tee_macos ~/cle-tmp/tee_macos`
+  → `Read-only file system`, rc 1: the mirror is read-only.
+- `scripts/macify tests/real/cat_macos /home/sd-v/Projects/mac-ify/Makefile`
+  → `No such file or directory`: a host file argument is still hidden.
+- `scripts/macify /home/sd-v/Projects/mac-ify` (a directory) and
+  `scripts/macify /tmp/cle-src/cat` → the jail message, rc 126.
+- `scripts/macify /usr/local/bin/bash -c 'echo hi'` → `hi`, rc 0.
+- `make test` 17/17, `make test-real` 23/23, `make test-smoke` 29/29,
+  `make test-functional` 103 pass / 0 fail / 1 skip.
+
+### Adjacent, not fixed here
+
+- `scripts/macify tests/real/cat_macos /tmp/t2.txt` runs the guest now,
+  but the input is not printable: the jail does not expose host paths, so
+  `/tmp/t2.txt` is not the host's file inside. Two pre-existing defects
+  sit behind the error the guest reports. `<prefix>/tmp` is a symlink to
+  `/tmp` (`scripts/macify-setup-rootfs:144`), which under chroot points at
+  itself, so every `/tmp/...` open inside the jail is `ELOOP`; and the
+  private tmpfs meant to give the guest scratch space (`src/jail.c:390-
+  394`) is mounted at the host path before the chroot, so it is not what
+  the guest sees. A host binary that lives under `/tmp` hits the same
+  loop and is refused with the jail message, pointing at
+  `MACIFY_NO_JAIL`.
+- The mirrored file's sibling dylibs are not brought along: a host-path
+  guest resolves its dependencies exactly as a prefix guest does.
