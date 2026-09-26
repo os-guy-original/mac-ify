@@ -223,9 +223,6 @@ static void macify_save_read_ptr(FILE *fp);
 static void macify_restore_read_ptr(FILE *fp);
 
 FILE *macify_fopen(const char *path, const char *mode) __asm__("fopen");
-__attribute__((visibility("hidden")))
-FILE *macify_do_fopen(const char *path, const char *mode)
-        __asm__("macify_do_fopen");
 FILE *macify_fopen(const char *path, const char *mode) {
     static FILE *(*real_fopen)(const char *, const char *) = NULL;
     if (!real_fopen) real_fopen = macify_elf_lookup("fopen");
@@ -297,11 +294,23 @@ FILE *macify_fopen(const char *path, const char *mode) {
 }
 
 
-/* Hidden forwarder so $-variant aliases (fopen$DARWIN_EXTSN) reuse the
- * translating hook without cross-TU preemption hazards. */
-FILE *macify_do_fopen(const char *path, const char *mode) {
-    return macify_fopen(path, mode);
-}
+/* fopen$DARWIN_EXTSN must BE the translating fopen, not a forwarder that
+ * calls it.
+ *
+ * A forwarder cannot work: macify_fopen's assembler name is the exported
+ * `fopen`, so a call to it from inside this shim goes through the PLT and is
+ * resolved in global symbol search order — and libc.so.6 was loaded before
+ * this shim, so glibc's `fopen` wins over our own definition. The guest then
+ * silently got glibc's fopen and lost prefix path translation: the macOS
+ * libncurses terminfo probe access()ed the translated path successfully but
+ * then fopen()ed the raw, untranslated one and failed, so `less` died with
+ * "'xterm': unknown terminal type" (T0020).
+ *
+ * An alias adds no extra frame, so __builtin_return_address(0) inside the
+ * body still identifies the real (macOS) caller. */
+FILE *macify_fopen_extsn(const char *path, const char *mode)
+        __asm__("fopen$DARWIN_EXTSN")
+        __attribute__((alias("fopen")));
 
 int macify_msync(void *addr, size_t length, int flags) __asm__("msync");
 int macify_msync(void *addr, size_t length, int flags) {

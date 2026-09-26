@@ -16,7 +16,6 @@
 
 /* Translating implementations live beside their plain-name hooks. */
 extern char *macify_do_realpath(const char *, char *) __asm__("macify_do_realpath");
-extern FILE *macify_do_fopen(const char *, const char *) __asm__("macify_do_fopen");
 
 char *macify_realpath_extsn(const char *path, char *resolved)
         __asm__("realpath$DARWIN_EXTSN");
@@ -24,11 +23,8 @@ char *macify_realpath_extsn(const char *path, char *resolved) {
     return macify_do_realpath(path, resolved);
 }
 
-FILE *macify_fopen_extsn(const char *path, const char *mode)
-        __asm__("fopen$DARWIN_EXTSN");
-FILE *macify_fopen_extsn(const char *path, const char *mode) {
-    return macify_do_fopen(path, mode);
-}
+/* fopen$DARWIN_EXTSN is an alias of the shim's `fopen`, defined in
+ * process.c — see the comment there for why it cannot be a forwarder. */
 
 FILE *macify_fdopen_extsn(int fd, const char *mode)
         __asm__("fdopen$DARWIN_EXTSN");

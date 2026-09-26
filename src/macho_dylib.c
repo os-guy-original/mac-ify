@@ -663,6 +663,34 @@ int macho_load_dylib(const char *path) {
     if (g_verbose)
         fprintf(stderr, "macify: dylib %s mapped at slide=0x%lx\n", path, (unsigned long)slide);
 
+    /* Register this dylib's __TEXT range with the shim.
+     * macify_caller_is_macos_text() is what gates path/flag/errno translation
+     * in the shim's overrides, and it used to know only the MAIN image's
+     * __TEXT. A call made from inside a dylib was therefore treated as a
+     * Linux caller and passed through untranslated: the macOS libncurses
+     * terminfo probe stat()ed the (translated) terminfo directory fine but
+     * then access()ed it with the raw, untranslated path and failed, so
+     * `less` died with "'xterm': unknown terminal type" (T0020). */
+    {
+        void (*add_text_range)(uint64_t, uint64_t) =
+            (void (*)(uint64_t, uint64_t))dlsym(g_dylibs[0].handle,
+                                                "__macify_add_text_range");
+        if (add_text_range) {
+            load_command *tlc = (load_command *)(file_data + sizeof(mach_header_64));
+            for (uint32_t i = 0; i < hdr->ncmds; i++) {
+                if (tlc->cmd == LC_SEGMENT_64) {
+                    segment_command_64 *tseg = (segment_command_64 *)tlc;
+                    if (strcmp(tseg->segname, "__TEXT") == 0 && tseg->vmsize > 0) {
+                        add_text_range(tseg->vmaddr + slide,
+                                       tseg->vmaddr + slide + tseg->vmsize);
+                        break;
+                    }
+                }
+                tlc = (load_command *)((uint8_t *)tlc + tlc->cmdsize);
+            }
+        }
+    }
+
     /* Recursively load this dylib's OWN dependencies (LC_LOAD_DYLIB commands).
      * This is critical: a dylib like libicui18n depends on libicuuc and libicudata,
      * and its chained fixups need those dependencies' symbols to be available.
