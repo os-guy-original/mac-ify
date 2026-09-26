@@ -1105,3 +1105,66 @@ command exits 0 and returns the page.
   127.0.0.1:53, which `macify_connect` redirects) is a real quirk but not
   the cause: the redirect works once the reply's sockaddr is not
   corrupted.
+
+## Guest cut stdio corruption — FIXED (ea82454)
+
+`make test-functional` failed on `cut -d' '` (stdout mismatch), and the
+output varied between runs: `printf 'hello\nworld\n' | macify cut -c1`
+printed only `h`, and field mode wrote a stream of NULs. Reproduced in
+about half of runs.
+
+`paste` was listed alongside it in the original report but does not
+reproduce: it exits 0 with correct output on both the unmodified and the
+fixed tree, reading files and stdin alike. It is not evidence here.
+
+### Mechanism
+
+`cut` reads with the Darwin `getc` macro inlined:
+
+    --(p)->_r < 0 ? __srget(p) : (int)(*(p)->_p++)
+
+`__stdinp` holds glibc's `stdin` (the shim constructor sets it, and
+`macify_use_macos_stdio` switches only stdout/stderr), so `_r` (offset
+8) is the low half of glibc's `_IO_read_ptr` and `_p` (offset 0) is
+glibc's `_flags` (0xfbad2084). When `_IO_read_ptr`'s low 32 bits are
+large, `--_r` stays non-negative and the fast path dereferences
+`0xfbad2084` and stores `_p + 1` back, so each call reads the next byte
+of the guard page and advances `_p` until it leaves the page at
+0xfbad3000 and faults. Which branch runs depends on the stdio buffer
+address, hence the flake.
+
+The shim's defense is to set `_r = -1` after a read so the next call
+takes the slow path, but `macify_is_glibc_standard` skips that for the
+three standard streams, because poisoning `_IO_read_ptr` breaks glibc's
+own fread/underflow. The other defense, the loader's getc-macro rewrite
+(NOP the `--_r` store, change the `jle` to an unconditional `jmp` to
+`__srget`), was gated on the binary also testing the FILE EOF/ERR bits
+(`test [fp+0x10], 0x20/0x40`). `cut` has the getc macro but checks end
+of input from `getc`'s return value, so the count was 0 and the macro
+was left alone.
+
+### Fix
+
+Patch the getc macro whenever its instruction shape is present, not only
+when an EOF check is also present, and set `macify_getc_patched` when any
+site was rewritten. `cut -c1` now prints `h` and `w` in 10 of 10 runs;
+`cut -d' ' -f1` on a three-line file prints `b`, `a`, `c` in 20 of 20.
+
+### Evidence
+
+- After: `make test-functional` 100 pass / 2 fail / 2 skip, with no cut
+  failure; the two remaining are `less` (no terminfo in the prefix) and a
+  pre-existing `strings`/`sed` flake that reproduces on the unmodified
+  tree.
+- `make test` 17/17, `make test-real` 23/23, `make test-smoke` 29/29.
+- A/B on the flake: the unmodified tree prints `h` in about half of
+  runs, the fixed tree in 10 of 10.
+
+### Adjacent, not fixed here
+
+- `sed 's/hello/goodbye/'` on stdin still fails ("Invalid or incomplete
+  multibyte") on both trees; it reads through a different path.
+- `strings` drops its output in about half of runs on both trees.
+- `less` fails with `'xterm': unknown terminal type`; the prefix has no
+  `<prefix>/usr/share/terminfo`.
+- `pigz -c` writes 19 bytes then hangs.
